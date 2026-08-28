@@ -38,6 +38,28 @@ def test_windows_timezone_separator_is_normalized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timezone_catalog_distinguishes_default_from_saved_value(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    bootstrap = Settings(_env_file=None)
+    try:
+        defaults = await get_effective_application_settings(engine, bootstrap)
+        await save_persisted_application_settings(
+            engine, {"timezone": "America/Chicago"}
+        )
+        configured = await get_effective_application_settings(engine, bootstrap)
+    finally:
+        await engine.dispose()
+
+    assert defaults.timezone == "UTC"
+    assert defaults.timezone_configured is False
+    assert "America/Chicago" in defaults.to_response().available_timezones
+    assert configured.timezone == "America/Chicago"
+    assert configured.timezone_configured is True
+
+
+@pytest.mark.asyncio
 async def test_non_empty_environment_values_override_persisted_settings(tmp_path) -> None:
     database_path = tmp_path / "application.db"
     upgrade_database(database_path)

@@ -38,6 +38,8 @@ export interface ApplicationSettings {
   plex_token_configured: boolean;
   source_path_mappings: SourcePathMapping[];
   timezone: string;
+  timezone_configured: boolean;
+  available_timezones: string[];
   x264_preset: string;
   environment_managed: Record<ApplicationSettingField, boolean>;
 }

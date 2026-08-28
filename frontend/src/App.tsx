@@ -9,6 +9,7 @@ import WarningRounded from "@mui/icons-material/WarningRounded";
 import {
   Alert,
   AppBar,
+  Autocomplete,
   Box,
   Button,
   Card,
@@ -41,7 +42,9 @@ import { fetchHealth, fetchSettings, testPlexConnection, updateSettings } from "
 import type {
   ApplicationSettingField,
   ApplicationSettings,
+  ApplicationSettingsUpdate,
   HealthStatus,
+  PlexConnectionRequest,
   PlexConnectionResult,
   SourcePathMapping,
 } from "./types";
@@ -82,11 +85,30 @@ function ManagedLabel({ managed }: { managed: boolean }) {
   return managed ? <Chip label="Environment managed" size="small" variant="outlined" /> : null;
 }
 
+function initialTimezone(settings: ApplicationSettings): string {
+  if (settings.timezone_configured) return settings.timezone;
+  const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return detected && settings.available_timezones.includes(detected)
+    ? detected
+    : settings.timezone;
+}
+
+interface PlexCandidate {
+  test: PlexConnectionRequest;
+  save: ApplicationSettingsUpdate;
+}
+
+interface SettingsOperation {
+  kind: "clear" | "save" | "test";
+  baseUpdate: ApplicationSettingsUpdate;
+  plexCandidate?: PlexCandidate;
+}
+
 function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   const queryClient = useQueryClient();
   const [plexUrl, setPlexUrl] = useState(settings.plex_url);
   const plexTokenInput = useRef<HTMLInputElement>(null);
-  const [timezone, setTimezone] = useState(settings.timezone);
+  const [timezone, setTimezone] = useState(() => initialTimezone(settings));
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
   const [connection, setConnection] = useState<PlexConnectionResult | null>(null);
@@ -94,41 +116,96 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   useEffect(() => {
     setPlexUrl(settings.plex_url);
     if (plexTokenInput.current) plexTokenInput.current.value = "";
-    setTimezone(settings.timezone);
+    setTimezone(initialTimezone(settings));
     setX264Preset(settings.x264_preset);
     setMappings(settings.source_path_mappings);
   }, [settings]);
 
   const managed = (field: ApplicationSettingField) => settings.environment_managed[field];
   const save = useMutation({
-    mutationFn: updateSettings,
-    onSuccess: (updated) => {
-      queryClient.setQueryData(["settings"], updated);
-      setConnection(null);
+    mutationFn: async (operation: SettingsOperation) => {
+      let updated = Object.keys(operation.baseUpdate).length
+        ? await updateSettings(operation.baseUpdate)
+        : settings;
+      if (!operation.plexCandidate) {
+        return {
+          settings: updated,
+          connection: null,
+          notice: operation.kind === "clear" ? "Plex token cleared." : "Settings saved.",
+        };
+      }
+
+      const result = await testPlexConnection(operation.plexCandidate.test);
+      if (!result.connected) {
+        return {
+          settings: updated,
+          connection: result,
+          notice:
+            operation.kind === "test"
+              ? "Connection failed. Plex settings were not saved."
+              : "Other settings were saved. The new Plex credentials were rejected.",
+        };
+      }
+
+      if (Object.keys(operation.plexCandidate.save).length) {
+        updated = await updateSettings(operation.plexCandidate.save);
+      }
+      return {
+        settings: updated,
+        connection: result,
+        notice:
+          operation.kind === "test"
+            ? "Connection succeeded and Plex settings were saved."
+            : "Settings and verified Plex credentials were saved.",
+      };
     },
-  });
-  const connectionTest = useMutation({
-    mutationFn: testPlexConnection,
-    onSuccess: setConnection,
+    onSuccess: (result) => {
+      queryClient.setQueryData(["settings"], result.settings);
+      setConnection(result.connection);
+      if (plexTokenInput.current) plexTokenInput.current.value = "";
+    },
   });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
     const submittedToken = String(new FormData(form).get("plex_token") ?? "").trim();
-    save.mutate({
-      ...(!managed("plex_url") && { plex_url: plexUrl }),
-      ...(!managed("plex_token") && submittedToken && { plex_token: submittedToken }),
+    const baseUpdate: ApplicationSettingsUpdate = {
+      ...(!submittedToken && !managed("plex_url") && { plex_url: plexUrl }),
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
       ...(!managed("timezone") && { timezone }),
       ...(!managed("x264_preset") && { x264_preset: x264Preset }),
+    };
+    save.mutate({
+      kind: "save",
+      baseUpdate,
+      ...(!managed("plex_token") &&
+        submittedToken && {
+          plexCandidate: {
+            test: { plex_url: plexUrl, plex_token: submittedToken },
+            save: {
+              ...(!managed("plex_url") && { plex_url: plexUrl }),
+              plex_token: submittedToken,
+            },
+          },
+        }),
     });
   };
   const testCurrentConnection = () => {
     const submittedToken = plexTokenInput.current?.value.trim() ?? "";
-    connectionTest.mutate({
-      plex_url: plexUrl,
-      ...(submittedToken && { plex_token: submittedToken }),
+    save.mutate({
+      kind: "test",
+      baseUpdate: {},
+      plexCandidate: {
+        test: {
+          plex_url: plexUrl,
+          ...(submittedToken && { plex_token: submittedToken }),
+        },
+        save: {
+          ...(!managed("plex_url") && { plex_url: plexUrl }),
+          ...(!managed("plex_token") && submittedToken && { plex_token: submittedToken }),
+        },
+      },
     });
   };
 
@@ -191,7 +268,12 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
             <Button
               color="warning"
               disabled={managed("plex_token") || !settings.plex_token_configured || save.isPending}
-              onClick={() => save.mutate({ clear_plex_token: true })}
+              onClick={() =>
+                save.mutate({
+                  kind: "clear",
+                  baseUpdate: { clear_plex_token: true },
+                })
+              }
             >
               Clear token
             </Button>
@@ -200,13 +282,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
             <Button
               variant="outlined"
-              disabled={!plexUrl.trim() || connectionTest.isPending}
+              disabled={!plexUrl.trim() || save.isPending}
               onClick={testCurrentConnection}
             >
-              {connectionTest.isPending ? "Testing…" : "Test connection"}
+              {save.isPending && save.variables?.kind === "test" ? "Testing…" : "Test connection"}
             </Button>
             <Typography color="text.secondary" variant="body2">
-              Tests the values currently in this form without saving them.
+              Tests the current URL/token and saves them only when the connection succeeds.
             </Typography>
           </Stack>
           {connection && (
@@ -214,7 +296,6 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               {connection.message}{connection.server_name ? ` Server: ${connection.server_name}.` : ""}
             </Alert>
           )}
-          {connectionTest.error && <Alert severity="error">{connectionTest.error.message}</Alert>}
 
           <Divider />
 
@@ -288,14 +369,24 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 
           <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
             <Stack direction="row" spacing={1} alignItems="center" flex={1}>
-              <TextField
+              <Autocomplete
                 fullWidth
-                label="Timezone"
-                placeholder="America/Chicago"
+                disableClearable
+                options={settings.available_timezones}
                 value={timezone}
                 disabled={managed("timezone")}
-                onChange={(event) => setTimezone(event.target.value)}
-                helperText="Use an IANA timezone name."
+                onChange={(_event, value) => setTimezone(value)}
+                renderInput={(parameters) => (
+                  <TextField
+                    {...parameters}
+                    label="Timezone"
+                    helperText={
+                      settings.timezone_configured
+                        ? "IANA timezone used for application timestamps."
+                        : "Detected from this browser. Save settings to keep it."
+                    }
+                  />
+                )}
               />
               <ManagedLabel managed={managed("timezone")} />
             </Stack>
@@ -316,9 +407,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
           </Stack>
 
           {save.error && <Alert severity="error">{save.error.message}</Alert>}
-          {save.isSuccess && <Alert severity="success">Settings saved.</Alert>}
+          {save.data && (
+            <Alert severity={save.data.connection && !save.data.connection.connected ? "warning" : "success"}>
+              {save.data.notice}
+            </Alert>
+          )}
           <Button type="submit" variant="contained" disabled={save.isPending} sx={{ alignSelf: "flex-start" }}>
-            {save.isPending ? "Saving…" : "Save settings"}
+            {save.isPending && save.variables?.kind === "save" ? "Saving…" : "Save settings"}
           </Button>
         </Stack>
       </CardContent>

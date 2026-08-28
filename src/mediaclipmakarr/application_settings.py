@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlalchemy import text
@@ -31,6 +31,7 @@ SETTING_FIELDS = (
     "x264_preset",
 )
 _DATABASE_KEYS = {field: f"setting.{field}" for field in SETTING_FIELDS}
+AVAILABLE_TIMEZONES = sorted(available_timezones() | {"UTC"})
 
 
 def normalize_plex_url(value: str) -> str:
@@ -69,6 +70,8 @@ class ApplicationSettingsResponse(BaseModel):
     plex_token_configured: bool
     source_path_mappings: list[SourcePathMapping]
     timezone: str
+    timezone_configured: bool
+    available_timezones: list[str]
     x264_preset: str
     environment_managed: dict[str, bool]
 
@@ -111,6 +114,7 @@ class EffectiveApplicationSettings:
     plex_token: str | None
     source_path_mappings: list[SourcePathMapping]
     timezone: str
+    timezone_configured: bool
     x264_preset: str
     environment_managed: dict[str, bool]
 
@@ -120,6 +124,8 @@ class EffectiveApplicationSettings:
             plex_token_configured=bool(self.plex_token),
             source_path_mappings=self.source_path_mappings,
             timezone=self.timezone,
+            timezone_configured=self.timezone_configured,
+            available_timezones=AVAILABLE_TIMEZONES,
             x264_preset=self.x264_preset,
             environment_managed=self.environment_managed,
         )
@@ -212,6 +218,7 @@ async def get_effective_application_settings(
         plex_token=str(token_value) if token_value else None,
         source_path_mappings=environment_mappings or persisted_mappings,
         timezone=timezone,
+        timezone_configured=managed["timezone"] or "timezone" in persisted,
         x264_preset=x264_preset,
         environment_managed=managed,
     )

@@ -60,6 +60,12 @@ existing token when `plex_token` is empty; send `{"clear_plex_token": true}` to 
 connection test without persisting either credential. Omitted candidates fall back to the saved
 effective values, and the response never returns a token.
 
+In the Settings screen, a successful connection test automatically saves the tested Plex
+credentials. Saving a form with a new token first saves the non-Plex options, then tests the new
+credentials; failed credentials are discarded while the other options remain saved. The timezone
+selector uses the server's IANA timezone catalog and initially selects the browser-detected zone
+until the user saves a timezone.
+
 ## Configuration
 
 All bootstrap environment variables use the `MCM_` prefix. The main values are:
