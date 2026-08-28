@@ -277,11 +277,70 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
     assert ["-t", "4.000"] == argv[argv.index("-t") : argv.index("-t") + 2]
     vf = argv[argv.index("-vf") + 1]
     assert "subtitles=" in vf
-    assert "si=3" in vf
+    assert "si=0" in vf
     assert "trim=start=1.000:duration=3.000" in vf
     assert ["-af", "atrim=start=1.000,asetpts=PTS-STARTPTS"] == argv[
         argv.index("-af") : argv.index("-af") + 2
     ]
+
+
+def test_text_subtitle_filter_escapes_apostrophe_and_uses_subtitle_ordinal(
+    tmp_path,
+) -> None:
+    source_dir = tmp_path / "Young Ladies Don't Play Fighting Games"
+    source_dir.mkdir()
+    source_file = source_dir / "Episode 01.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "subtitle_streams": [
+                MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                MediaStreamIdentity(
+                    stream_index=3,
+                    codec_type="subtitle",
+                    codec_name="ass",
+                    language="jpn",
+                ),
+            ],
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=3,
+                    codec_type="subtitle",
+                    codec_name="ass",
+                    language="jpn",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        subtitle_preroll_ms=1_000,
+        work_dir=tmp_path / "job",
+    )
+
+    vf = argv[argv.index("-vf") + 1]
+    subtitle_filter = next(part for part in vf.split(",") if part.startswith("subtitles="))
+    assert "Young Ladies Don'\\''t Play Fighting Games" in subtitle_filter
+    assert ":si=1:" in subtitle_filter
+    assert ":si=3" not in subtitle_filter
+    assert "fontsdir=" in subtitle_filter
 
 
 def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> None:

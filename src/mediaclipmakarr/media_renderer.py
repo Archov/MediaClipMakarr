@@ -154,11 +154,14 @@ def _subtitle_video_filter(
     strategy = plan.selected_subtitle.strategy
     stream = plan.selected_subtitle.stream
     if strategy == "embedded_text" and stream is not None:
-        source = _filter_path(plan.source_media.local_path)
+        source = _filtergraph_quote(plan.source_media.local_path)
+        subtitle_ordinal = _subtitle_stream_ordinal(plan, stream.stream_index)
         fonts_dir = _font_attachments_dir(work_dir)
-        fonts_arg = f":fontsdir={_filter_path(os.fspath(fonts_dir))}" if fonts_dir else ""
+        fonts_arg = (
+            f":fontsdir={_filtergraph_quote(os.fspath(fonts_dir))}" if fonts_dir else ""
+        )
         return VideoFilterPlan(
-            f"{base},subtitles={source}:si={stream.stream_index}{fonts_arg},{trim}",
+            f"{base},subtitles=filename={source}:si={subtitle_ordinal}{fonts_arg},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
         )
     if strategy == "bitmap" and stream is not None:
@@ -185,9 +188,18 @@ def _duration_seconds(plan: ClipRenderPlan) -> float:
     return (plan.source_end_ms - plan.source_start_ms) / 1000
 
 
-def _filter_path(path: str) -> str:
-    escaped = path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+def _filtergraph_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "'\\''")
     return f"'{escaped}'"
+
+
+def _subtitle_stream_ordinal(plan: ClipRenderPlan, stream_index: int) -> int:
+    for ordinal, stream in enumerate(plan.source_media.subtitle_streams):
+        if stream.stream_index == stream_index:
+            return ordinal
+    raise ValueError(
+        f"Selected subtitle stream {stream_index} is not present in source media."
+    )
 
 
 def _font_attachments_dir(work_dir: Path | None) -> Path | None:
