@@ -4,6 +4,7 @@ import type {
   HealthResponse,
   PlexConnectionRequest,
   PlexConnectionResult,
+  PlexSessionSnapshot,
 } from "./types";
 
 async function parseResponse<T>(response: Response, action: string): Promise<T> {
@@ -70,4 +71,11 @@ export async function testPlexConnection(
     body: JSON.stringify(connection),
   });
   return parseResponse<PlexConnectionResult>(response, "Plex connection test");
+}
+
+export async function fetchPlexSessions(): Promise<PlexSessionSnapshot> {
+  const response = await fetch("/api/sessions", {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<PlexSessionSnapshot>(response, "Plex sessions request");
 }

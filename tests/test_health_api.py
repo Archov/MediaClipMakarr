@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import mediaclipmakarr.main as main_module
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.health import MediaToolInspection
+from mediaclipmakarr.plex import snapshot_sse_payload
 
 
 def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> None:
@@ -47,3 +48,40 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     assert "SPA shell" in spa_response.text
     assert bare_api_response.status_code == 404
     assert missing_api_response.status_code == 404
+
+
+def test_session_snapshot_is_in_memory_and_serializes_for_initial_sse_event(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = Settings(
+        _env_file=None,
+        private_data_dir=tmp_path / "private",
+        work_dir=tmp_path / "work",
+        clip_dir=tmp_path / "clips",
+        source_dirs=[source],
+        frontend_dist_dir=tmp_path / "missing-frontend",
+    )
+
+    async def healthy_media_tools(_settings):
+        return MediaToolInspection(
+            status="ok",
+            message="Media tools are ready.",
+            details={"identity_ok": True, "libx264": True, "aac": True},
+        )
+
+    monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    with TestClient(main_module.create_app(settings)) as client:
+        snapshot_response = client.get("/api/sessions")
+
+    assert snapshot_response.status_code == 200
+    snapshot = snapshot_response.json()
+    assert snapshot["status"] == "not_configured"
+    assert snapshot["sessions"] == []
+    sse_payload = snapshot_sse_payload(
+        client.app.state.plex_session_poller.snapshot
+    )
+    assert sse_payload.startswith("event: snapshot\ndata: ")
+    assert '"status":"not_configured"' in sse_payload
+    assert '"sessions":[]' in sse_payload

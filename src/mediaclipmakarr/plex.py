@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import hashlib
+import json
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Literal
 from xml.etree import ElementTree
 
 import httpx
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
-from mediaclipmakarr.application_settings import normalize_plex_url
+from mediaclipmakarr.application_settings import EffectiveApplicationSettings, normalize_plex_url
+
+PlexSessionSnapshotStatus = Literal[
+    "ok",
+    "not_configured",
+    "invalid_url",
+    "invalid_token",
+    "http_error",
+    "invalid_response",
+    "unreachable",
+]
 
 
 class PlexConnectionResult(BaseModel):
@@ -27,6 +44,292 @@ class PlexConnectionRequest(BaseModel):
         if (self.plex_url is None) != (self.plex_token is None):
             raise ValueError("Provide both a Plex URL and token, or neither.")
         return self
+
+
+class PlexSession(BaseModel):
+    session_identity: str
+    media_identity: str
+    title: str
+    media_type: str
+    plex_user: str | None
+    player: str | None
+    state: str
+    position_ms: int
+    duration_ms: int | None
+    sampled_at: datetime
+    plex_rating_key: str | None = None
+    plex_media_key: str | None = None
+    plex_part_id: str | None = None
+
+
+class PlexSessionSnapshot(BaseModel):
+    status: PlexSessionSnapshotStatus
+    message: str
+    sampled_at: datetime
+    sessions: list[PlexSession]
+
+
+class PlexSessionError(Exception):
+    def __init__(self, status: PlexSessionSnapshotStatus, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+SettingsLoader = Callable[[], Awaitable[EffectiveApplicationSettings]]
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _local_name(element: ElementTree.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _child(element: ElementTree.Element, name: str) -> ElementTree.Element | None:
+    for child in element:
+        if _local_name(child) == name:
+            return child
+    return None
+
+
+def _int_attribute(element: ElementTree.Element, name: str) -> int | None:
+    value = element.attrib.get(name)
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
+
+
+def _identity(prefix: str, parts: list[str | None]) -> str:
+    normalized = [part.strip() for part in parts if part and part.strip()]
+    digest = hashlib.sha256("\x1f".join(normalized).encode("utf-8")).hexdigest()[:24]
+    return f"plex-{prefix}:{digest}"
+
+
+def _display_title(video: ElementTree.Element) -> str:
+    media_type = video.attrib.get("type", "video")
+    if media_type == "episode":
+        show = video.attrib.get("grandparentTitle")
+        title = video.attrib.get("title")
+        if show and title:
+            return f"{show} - {title}"
+    return video.attrib.get("title") or video.attrib.get("grandparentTitle") or "Untitled video"
+
+
+def parse_video_sessions(
+    payload: bytes, *, sampled_at: datetime | None = None
+) -> list[PlexSession]:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return valid session XML."
+        ) from error
+    if _local_name(root) != "MediaContainer":
+        raise PlexSessionError("invalid_response", "Plex did not return a session container.")
+
+    sample_time = sampled_at or utc_now()
+    sessions: list[PlexSession] = []
+    for video in root:
+        if _local_name(video) != "Video":
+            continue
+
+        player = _child(video, "Player")
+        user = _child(video, "User")
+        session = _child(video, "Session")
+        media = _child(video, "Media")
+        part = _child(media, "Part") if media is not None else None
+
+        user_id = user.attrib.get("id") if user is not None else None
+        username = user.attrib.get("title") if user is not None else None
+        player_machine = player.attrib.get("machineIdentifier") if player is not None else None
+        player_title = player.attrib.get("title") if player is not None else None
+        player_product = player.attrib.get("product") if player is not None else None
+        session_id = session.attrib.get("id") if session is not None else None
+        rating_key = video.attrib.get("ratingKey") or video.attrib.get("key")
+        guid = video.attrib.get("guid")
+        media_id = media.attrib.get("id") if media is not None else None
+        media_key = media.attrib.get("key") if media is not None else None
+        part_id = part.attrib.get("id") if part is not None else None
+        part_key = part.attrib.get("key") if part is not None else None
+
+        sessions.append(
+            PlexSession(
+                session_identity=_identity(
+                    "session",
+                    [user_id or username, player_machine or player_title, session_id],
+                ),
+                media_identity=_identity(
+                    "media",
+                    [rating_key, guid, media_id or media_key, part_id or part_key],
+                ),
+                title=_display_title(video),
+                media_type=video.attrib.get("type", "video"),
+                plex_user=username,
+                player=player_title or player_product,
+                state=(player.attrib.get("state") if player is not None else None) or "unknown",
+                position_ms=_int_attribute(video, "viewOffset") or 0,
+                duration_ms=_int_attribute(video, "duration"),
+                sampled_at=sample_time,
+                plex_rating_key=rating_key,
+                plex_media_key=media_key or media_id,
+                plex_part_id=part_id,
+            )
+        )
+    return sessions
+
+
+class PlexClient:
+    def __init__(self, plex_url: str, plex_token: str, *, client: httpx.AsyncClient):
+        self.plex_url = normalize_plex_url(plex_url)
+        self.plex_token = plex_token
+        self.client = client
+
+    async def fetch_video_sessions(self) -> list[PlexSession]:
+        sampled_at = utc_now()
+        try:
+            response = await self.client.get(
+                f"{self.plex_url}/status/sessions",
+                headers={"Accept": "application/xml", "X-Plex-Token": self.plex_token},
+            )
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as error:
+            raise PlexSessionError(
+                "invalid_url", "The configured Plex URL could not be used for a request."
+            ) from error
+        except httpx.RequestError as error:
+            raise PlexSessionError(
+                "unreachable", "The Plex server could not be reached at the configured URL."
+            ) from error
+
+        if response.status_code in {401, 403}:
+            raise PlexSessionError("invalid_token", "Plex rejected the configured token.")
+        if response.status_code != 200:
+            raise PlexSessionError(
+                "http_error",
+                f"Plex returned HTTP {response.status_code} while loading active sessions.",
+            )
+        return parse_video_sessions(response.content, sampled_at=sampled_at)
+
+
+class PlexSessionPoller:
+    def __init__(
+        self,
+        settings_loader: SettingsLoader,
+        *,
+        interval_seconds: float = 1.0,
+        client: httpx.AsyncClient | None = None,
+    ):
+        self.settings_loader = settings_loader
+        self.interval_seconds = interval_seconds
+        self._client = client
+        self._owns_client = client is None
+        self._task: asyncio.Task[None] | None = None
+        self._condition = asyncio.Condition()
+        self._version = 0
+        self._snapshot = PlexSessionSnapshot(
+            status="not_configured",
+            message="Configure Plex to discover active video sessions.",
+            sampled_at=utc_now(),
+            sessions=[],
+        )
+
+    @property
+    def snapshot(self) -> PlexSessionSnapshot:
+        return self._snapshot
+
+    @property
+    def version(self) -> int:
+        return self._version
+
+    async def start(self) -> None:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+        self._task = asyncio.create_task(self._run(), name="plex-session-poller")
+        await self.poll_once()
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def poll_once(self) -> PlexSessionSnapshot:
+        try:
+            settings = await self.settings_loader()
+            if not settings.plex_url or not settings.plex_token:
+                snapshot = PlexSessionSnapshot(
+                    status="not_configured",
+                    message="Configure Plex to discover active video sessions.",
+                    sampled_at=utc_now(),
+                    sessions=[],
+                )
+            else:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+                client = PlexClient(settings.plex_url, settings.plex_token, client=self._client)
+                sessions = await client.fetch_video_sessions()
+                snapshot = PlexSessionSnapshot(
+                    status="ok",
+                    message=(
+                        "No active Plex video sessions were found."
+                        if not sessions
+                        else "Active Plex video sessions loaded."
+                    ),
+                    sampled_at=utc_now(),
+                    sessions=sessions,
+                )
+        except ValueError:
+            snapshot = PlexSessionSnapshot(
+                status="invalid_url",
+                message="The configured Plex URL is not a valid HTTP or HTTPS server URL.",
+                sampled_at=utc_now(),
+                sessions=[],
+            )
+        except PlexSessionError as error:
+            snapshot = PlexSessionSnapshot(
+                status=error.status,
+                message=error.message,
+                sampled_at=utc_now(),
+                sessions=[],
+            )
+
+        async with self._condition:
+            self._snapshot = snapshot
+            self._version += 1
+            self._condition.notify_all()
+        return snapshot
+
+    async def wait_for_change(
+        self, version: int, *, timeout_seconds: float | None = None
+    ) -> tuple[PlexSessionSnapshot, int, bool]:
+        async with self._condition:
+            if self._version == version:
+                try:
+                    await asyncio.wait_for(
+                        self._condition.wait_for(lambda: self._version != version),
+                        timeout_seconds,
+                    )
+                except TimeoutError:
+                    return self._snapshot, self._version, False
+            return self._snapshot, self._version, True
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            await self.poll_once()
+
+
+def snapshot_sse_payload(snapshot: PlexSessionSnapshot) -> str:
+    data = snapshot.model_dump(mode="json")
+    return f"event: snapshot\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
 async def test_plex_connection(
