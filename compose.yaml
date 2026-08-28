@@ -22,8 +22,6 @@ services:
       MCM_DEV_WEB_PORT: "${MCM_DEV_WEB_PORT:-5173}"
     volumes:
       # The .env values select host paths; container destinations match the image defaults.
-      - "${MCM_PRIVATE_DATA_DIR:-./data/private}:/data/private"
-      - "${MCM_WORK_DIR:-./data/work}:/data/work"
-      - "${MCM_CLIP_DIR:-./data/clips}:/data/clips"
+      - "${MCM_DATA:-./data/}:/data/"
       - "${MCM_COMPOSE_SOURCE_DIR:-./data/sources}:/media:ro"
     restart: unless-stopped
