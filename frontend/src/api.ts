@@ -8,10 +8,28 @@ import type {
 async function parseResponse<T>(response: Response, action: string): Promise<T> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
-      | { detail?: string | { message?: string } }
+      | {
+          detail?:
+            | string
+            | { message?: string }
+            | Array<{ loc?: Array<string | number>; msg?: string }>;
+        }
       | null;
     const detail = payload?.detail;
-    const message = typeof detail === "string" ? detail : detail?.message;
+    const message = Array.isArray(detail)
+      ? detail
+          .map((issue) => {
+            const location = (issue.loc ?? [])
+              .filter((part) => part !== "body")
+              .map((part) => (typeof part === "number" ? part + 1 : part.replaceAll("_", " ")))
+              .join(" › ");
+            const reason = issue.msg?.replace(/^Value error,\s*/i, "") ?? "Invalid value.";
+            return location ? `${location}: ${reason}` : reason;
+          })
+          .join(" ")
+      : typeof detail === "string"
+        ? detail
+        : detail?.message;
     throw new Error(message ?? `${action} failed with HTTP ${response.status}.`);
   }
   return (await response.json()) as T;

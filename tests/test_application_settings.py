@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import mediaclipmakarr.main as main_module
 from mediaclipmakarr.application_settings import (
+    ApplicationSettingsUpdate,
     get_effective_application_settings,
     save_persisted_application_settings,
 )
@@ -27,6 +28,12 @@ def api_settings(tmp_path, **overrides) -> Settings:
         frontend_dist_dir=tmp_path / "missing-frontend",
         **overrides,
     )
+
+
+def test_windows_timezone_separator_is_normalized() -> None:
+    update = ApplicationSettingsUpdate(timezone=r"America\Chicago")
+
+    assert update.timezone == "America/Chicago"
 
 
 @pytest.mark.asyncio

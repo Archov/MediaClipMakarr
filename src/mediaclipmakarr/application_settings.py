@@ -47,7 +47,7 @@ def normalize_plex_url(value: str) -> str:
 
 
 def validate_timezone(value: str) -> str:
-    value = value.strip()
+    value = value.strip().replace("\\", "/")
     try:
         ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError) as error:
