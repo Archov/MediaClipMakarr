@@ -115,7 +115,7 @@ def build_ffmpeg_clip_args(
                 "-vf",
                 subtitle_filter.filter_value,
                 "-af",
-                _audio_filter(preroll_seconds),
+                _audio_filter(preroll_seconds, duration_seconds),
             ]
         )
 
@@ -209,7 +209,7 @@ def _subtitle_video_filter(
             f"[0:{stream.stream_index}]setpts=PTS-STARTPTS[s];"
             f"[v][s]overlay,format=yuv420p,{trim}[outv];"
             f"[0:{plan.selected_audio_stream.stream_index}]"
-            f"{_audio_filter(preroll_seconds)}[outa]"
+            f"{_audio_filter(preroll_seconds, _duration_seconds(plan))}[outa]"
         )
         return VideoFilterPlan(filter_value, "[outv]", "[outa]", complex_filter=True)
     return VideoFilterPlan(
@@ -218,8 +218,11 @@ def _subtitle_video_filter(
     )
 
 
-def _audio_filter(preroll_seconds: float) -> str:
-    return f"atrim=start={preroll_seconds:.3f},asetpts=PTS-STARTPTS"
+def _audio_filter(preroll_seconds: float, duration_seconds: float) -> str:
+    return (
+        f"atrim=start={preroll_seconds:.3f}:duration={duration_seconds:.3f},"
+        "asetpts=PTS-STARTPTS"
+    )
 
 
 def _duration_seconds(plan: ClipRenderPlan) -> float:
@@ -315,7 +318,7 @@ async def _extract_embedded_text_subtitle(
             _subtitle_encoder(stream.codec_name),
             os.fspath(output_path),
         ],
-        timeout_seconds=settings.subprocess_timeout_seconds,
+        timeout_seconds=settings.media_preparation_timeout_seconds,
     )
 
 
@@ -367,7 +370,7 @@ async def _extract_font_attachments(
             "null",
             "-",
         ],
-        timeout_seconds=settings.subprocess_timeout_seconds,
+        timeout_seconds=settings.media_preparation_timeout_seconds,
         cwd=fonts_dir,
     )
 

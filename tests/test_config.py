@@ -5,6 +5,17 @@ import pytest
 from mediaclipmakarr.config import Settings, validate_path_layout
 
 
+def test_media_preparation_timeout_is_separate_from_short_tool_timeout() -> None:
+    settings = Settings(
+        _env_file=None,
+        subprocess_timeout_seconds=3,
+        media_preparation_timeout_seconds=180,
+    )
+
+    assert settings.subprocess_timeout_seconds == 3
+    assert settings.media_preparation_timeout_seconds == 180
+
+
 def test_writable_directories_cannot_overlap_source_media(tmp_path) -> None:
     source = tmp_path / "source"
     settings = Settings(

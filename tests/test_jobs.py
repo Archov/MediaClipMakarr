@@ -299,7 +299,7 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
     assert "selected-subtitle.ass" in vf
     assert ":si=" not in vf
     assert "trim=start=1.000:duration=3.000" in vf
-    assert ["-af", "atrim=start=1.000,asetpts=PTS-STARTPTS"] == argv[
+    assert ["-af", "atrim=start=1.000:duration=3.000,asetpts=PTS-STARTPTS"] == argv[
         argv.index("-af") : argv.index("-af") + 2
     ]
 
@@ -360,6 +360,7 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
         work_dir=tmp_path / "work",
         ffmpeg_path=Path("ffmpeg-test"),
         subprocess_timeout_seconds=7,
+        media_preparation_timeout_seconds=180,
     )
     commands: list[tuple[str, ...]] = []
     render_argv: list[str] | None = None
@@ -368,7 +369,7 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
     async def fake_run_command(argv, **kwargs):
         normalized = tuple(str(value) for value in argv)
         commands.append(normalized)
-        assert kwargs["timeout_seconds"] == 7
+        assert kwargs["timeout_seconds"] == 180
         return CommandResult(normalized, 0, "", "")
 
     async def fake_render(argv, *, duration_ms, progress, cwd=None):
@@ -445,7 +446,7 @@ def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> 
     assert "[0:4]setpts=PTS-STARTPTS[s]" in filter_complex
     assert "[v][s]overlay" in filter_complex
     assert "trim=start=0.500:duration=3.000" in filter_complex
-    assert "[0:1]atrim=start=0.500,asetpts=PTS-STARTPTS[outa]" in filter_complex
+    assert "[0:1]atrim=start=0.500:duration=3.000,asetpts=PTS-STARTPTS[outa]" in filter_complex
     assert ["-map", "[outv]"] == argv[argv.index("-map") : argv.index("-map") + 2]
     second_map = argv.index("-map", argv.index("-map") + 1)
     assert ["-map", "[outa]"] == argv[second_map : second_map + 2]

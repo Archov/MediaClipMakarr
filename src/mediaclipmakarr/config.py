@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     database_filename: str = "mediaclipmakarr.db"
     process_lock_filename: str = "mediaclipmakarr.lock"
     blocking_io_workers: int = Field(default=4, ge=1, le=16)
+    # Tool inspection and source probes should fail quickly.  Preparation work runs
+    # within a cancellable media job and may need to read substantially more input.
     subprocess_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    media_preparation_timeout_seconds: float = Field(default=300.0, gt=0, le=3_600)
     ffmpeg_path: Path = Path("ffmpeg")
     ffprobe_path: Path = Path("ffprobe")
     expected_ffmpeg_identity: str = "7.1.4-Jellyfin"

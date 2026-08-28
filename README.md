@@ -87,6 +87,8 @@ All Compose and application environment variables use the `MCM_` prefix. The mai
 - `MCM_FFMPEG_PATH` and `MCM_FFPROBE_PATH`
 - `MCM_EXPECTED_FFMPEG_IDENTITY` (defaults to `7.1.4-Jellyfin`)
 - `MCM_BLOCKING_IO_WORKERS` (defaults to 4, maximum 16)
+- `MCM_SUBPROCESS_TIMEOUT_SECONDS` (defaults to 10 seconds for tool inspection and probes)
+- `MCM_MEDIA_PREPARATION_TIMEOUT_SECONDS` (defaults to 300 seconds for cancellable subtitle/font preparation)
 
 Plex and encoding values are normally saved from the Settings screen. Non-empty environment
 values take precedence and make their corresponding UI/API fields read-only:
