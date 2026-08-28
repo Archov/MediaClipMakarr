@@ -40,7 +40,7 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["database"]["details"]["schema_revision"] == "0001_bootstrap"
+    assert payload["database"]["details"]["schema_revision"] == "0002_jobs_and_clips"
     assert payload["application"]["details"]["exclusive_lock"] is True
     serialized = response.text
     assert str(tmp_path) not in serialized

@@ -49,6 +49,7 @@ import { type FormEvent, useEffect, useState } from "react";
 
 import {
   createClip,
+  fetchJob,
   fetchHealth,
   fetchPlexSessions,
   fetchSettings,
@@ -62,6 +63,8 @@ import type {
   ApplicationSettingsUpdate,
   ClipCreateRequest,
   HealthStatus,
+  JobSnapshot,
+  JobState,
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSession,
@@ -182,6 +185,42 @@ function useLivePlexSessions() {
   return sessions;
 }
 
+function useJobSnapshot(initialJob: JobSnapshot | null) {
+  const [job, setJob] = useState<JobSnapshot | null>(initialJob);
+
+  useEffect(() => {
+    setJob(initialJob);
+    if (!initialJob || typeof EventSource === "undefined") return undefined;
+
+    let closed = false;
+    const eventSource = new EventSource(`/api/jobs/${encodeURIComponent(initialJob.id)}/events`);
+    const handleSnapshot = (event: MessageEvent<string>) => {
+      setJob(JSON.parse(event.data) as JobSnapshot);
+    };
+    const handleError = () => {
+      if (!closed) void fetchJob(initialJob.id).then(setJob).catch(() => undefined);
+    };
+
+    eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
+    eventSource.addEventListener("error", handleError);
+    return () => {
+      closed = true;
+      eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
+      eventSource.removeEventListener("error", handleError);
+      eventSource.close();
+    };
+  }, [initialJob]);
+
+  return job;
+}
+
+function jobSeverity(state: JobState): "success" | "info" | "warning" | "error" {
+  if (state === "SUCCEEDED") return "success";
+  if (state === "PARTIAL") return "warning";
+  if (state === "FAILED") return "error";
+  return "info";
+}
+
 function SessionDetail({ session }: { session: PlexSession }) {
   const now = useClock(session.state.toLowerCase() === "playing");
   const position = displayedPosition(session, now);
@@ -252,6 +291,7 @@ function MakeClipScreen() {
   const [endInput, setEndInput] = useState("");
   const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
+  const [submittedJob, setSubmittedJob] = useState<JobSnapshot | null>(null);
   const snapshot = sessions.data;
   const selectedSession = snapshot?.sessions.find(
     (session) => session.session_identity === selectedSessionIdentity,
@@ -261,7 +301,11 @@ function MakeClipScreen() {
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
   const startParse = parseTimestampMs(startInput);
   const endParse = parseTimestampMs(endInput);
-  const clipCreate = useMutation({ mutationFn: createClip });
+  const activeJob = useJobSnapshot(submittedJob);
+  const clipCreate = useMutation({
+    mutationFn: createClip,
+    onSuccess: (job) => setSubmittedJob(job),
+  });
 
   const setBoundary = (boundary: Boundary, value: number | null) => {
     const nextInput = formatTimestampMs(value);
@@ -273,6 +317,7 @@ function MakeClipScreen() {
       setEndInput(nextInput);
     }
     setBoundaryNotice(null);
+    setSubmittedJob(null);
     clipCreate.reset();
   };
 
@@ -286,6 +331,7 @@ function MakeClipScreen() {
       setEndMs(parsed.error ? null : parsed.value);
     }
     setBoundaryNotice(null);
+    setSubmittedJob(null);
     clipCreate.reset();
   };
 
@@ -523,11 +569,45 @@ function MakeClipScreen() {
                 )}
                 {rangeError && <Alert severity="warning">{rangeError}</Alert>}
                 {clipCreate.error && <Alert severity="error">{clipCreate.error.message}</Alert>}
-                {clipCreate.data && (
-                  <Alert severity="success">
-                    {clipCreate.data.message} Duration{" "}
-                    {formatMilliseconds(clipCreate.data.duration_ms)}.
-                  </Alert>
+                {activeJob && (
+                  <Stack spacing={2}>
+                    <Alert severity={jobSeverity(activeJob.state)}>
+                      {activeJob.message}
+                      {activeJob.queue_position ? ` Queue position ${activeJob.queue_position}.` : ""}
+                      {activeJob.error ? ` ${activeJob.error.message}` : ""}
+                    </Alert>
+                    {activeJob.state !== "SUCCEEDED" && activeJob.state !== "FAILED" && (
+                      <LinearProgress
+                        variant="determinate"
+                        value={Math.round(activeJob.progress * 100)}
+                        aria-label="Clip render progress"
+                      />
+                    )}
+                    {activeJob.state === "SUCCEEDED" && activeJob.result && (
+                      <Stack spacing={2}>
+                        <Box
+                          component="video"
+                          src={activeJob.result.play_url}
+                          controls
+                          sx={{ width: "100%", borderRadius: 1, bgcolor: "black" }}
+                        />
+                        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                          <Chip label={activeJob.result.title} color="success" variant="outlined" />
+                          <Chip
+                            label={formatMilliseconds(activeJob.result.duration_ms)}
+                            variant="outlined"
+                          />
+                          <Button
+                            href={activeJob.result.download_url}
+                            variant="outlined"
+                            startIcon={<ArrowDownwardRounded />}
+                          >
+                            Download
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    )}
+                  </Stack>
                 )}
 
                 <Button

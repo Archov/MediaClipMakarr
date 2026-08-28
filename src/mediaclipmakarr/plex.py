@@ -11,7 +11,7 @@ from typing import Literal
 from xml.etree import ElementTree
 
 import httpx
-from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings, normalize_plex_url
 
@@ -50,6 +50,16 @@ class PlexConnectionRequest(BaseModel):
         return self
 
 
+class PlexPartStream(BaseModel):
+    id: str | None = None
+    stream_index: int | None = None
+    stream_type: int | None = None
+    codec: str | None = None
+    language: str | None = None
+    title: str | None = None
+    selected: bool = False
+
+
 class PlexSession(BaseModel):
     session_identity: str
     media_identity: str
@@ -64,6 +74,9 @@ class PlexSession(BaseModel):
     plex_rating_key: str | None = None
     plex_media_key: str | None = None
     plex_part_id: str | None = None
+    plex_part_key: str | None = None
+    plex_part_file: str | None = None
+    selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
 
 
 class PlexSessionSnapshot(BaseModel):
@@ -98,6 +111,24 @@ def _child(element: ElementTree.Element, name: str) -> ElementTree.Element | Non
     return None
 
 
+def _children(element: ElementTree.Element | None, name: str) -> list[ElementTree.Element]:
+    if element is None:
+        return []
+    return [child for child in element if _local_name(child) == name]
+
+
+def _is_selected(element: ElementTree.Element) -> bool:
+    return element.attrib.get("selected", "").strip().casefold() in {"1", "true", "yes"}
+
+
+def _active_child(element: ElementTree.Element, name: str) -> ElementTree.Element | None:
+    children = _children(element, name)
+    selected = next((child for child in children if _is_selected(child)), None)
+    if selected is not None:
+        return selected
+    return children[0] if children else None
+
+
 def _int_attribute(element: ElementTree.Element, name: str) -> int | None:
     value = element.attrib.get(name)
     if value is None:
@@ -124,6 +155,18 @@ def _display_title(video: ElementTree.Element) -> str:
     return video.attrib.get("title") or video.attrib.get("grandparentTitle") or "Untitled video"
 
 
+def _parse_part_stream(stream: ElementTree.Element) -> PlexPartStream:
+    return PlexPartStream(
+        id=stream.attrib.get("id"),
+        stream_index=_int_attribute(stream, "index"),
+        stream_type=_int_attribute(stream, "streamType"),
+        codec=stream.attrib.get("codec"),
+        language=stream.attrib.get("languageCode") or stream.attrib.get("language"),
+        title=stream.attrib.get("title"),
+        selected=_is_selected(stream),
+    )
+
+
 def parse_video_sessions(
     payload: bytes, *, sampled_at: datetime | None = None
 ) -> list[PlexSession]:
@@ -145,8 +188,8 @@ def parse_video_sessions(
         player = _child(video, "Player")
         user = _child(video, "User")
         session = _child(video, "Session")
-        media = _child(video, "Media")
-        part = _child(media, "Part") if media is not None else None
+        media = _active_child(video, "Media")
+        part = _active_child(media, "Part") if media is not None else None
 
         user_id = user.attrib.get("id") if user is not None else None
         username = user.attrib.get("title") if user is not None else None
@@ -160,6 +203,12 @@ def parse_video_sessions(
         media_key = media.attrib.get("key") if media is not None else None
         part_id = part.attrib.get("id") if part is not None else None
         part_key = part.attrib.get("key") if part is not None else None
+        part_file = part.attrib.get("file") if part is not None else None
+        selected_audio_streams = [
+            parsed
+            for parsed in (_parse_part_stream(stream) for stream in _children(part, "Stream"))
+            if parsed.stream_type == 2 and parsed.selected
+        ]
 
         sessions.append(
             PlexSession(
@@ -182,6 +231,9 @@ def parse_video_sessions(
                 plex_rating_key=rating_key,
                 plex_media_key=media_key or media_id,
                 plex_part_id=part_id,
+                plex_part_key=part_key,
+                plex_part_file=part_file,
+                selected_audio_streams=selected_audio_streams,
             )
         )
     return sessions

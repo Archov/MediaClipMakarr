@@ -90,6 +90,19 @@ export interface PlexSession {
   plex_rating_key: string | null;
   plex_media_key: string | null;
   plex_part_id: string | null;
+  plex_part_key: string | null;
+  plex_part_file: string | null;
+  selected_audio_streams: PlexPartStream[];
+}
+
+export interface PlexPartStream {
+  id: string | null;
+  stream_index: number | null;
+  stream_type: number | null;
+  codec: string | null;
+  language: string | null;
+  title: string | null;
+  selected: boolean;
 }
 
 export interface PlexSessionSnapshot {
@@ -112,14 +125,70 @@ export interface ClipCreateRequest {
   end_ms: number;
 }
 
-export interface ClipCreateResult {
-  valid: boolean;
-  code: string;
-  message: string;
-  session_identity: string;
-  media_identity: string;
-  start_ms: number;
-  end_ms: number;
+export interface SourceFingerprint {
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface VideoColorMetadata {
+  color_space: string | null;
+  color_transfer: string | null;
+  color_primaries: string | null;
+  color_range: string | null;
+}
+
+export interface MediaStreamIdentity {
+  stream_index: number;
+  codec_type: string;
+  codec_name: string | null;
+  language: string | null;
+  title: string | null;
+}
+
+export interface VideoStreamIdentity extends MediaStreamIdentity {
+  width: number | null;
+  height: number | null;
+  color: VideoColorMetadata;
+}
+
+export interface ResolvedSourceMedia {
+  plex_path: string;
+  local_path: string;
+  fingerprint: SourceFingerprint;
+  duration_ms: number | null;
+  video_streams: VideoStreamIdentity[];
+  audio_streams: MediaStreamIdentity[];
+  subtitle_streams: MediaStreamIdentity[];
+  selected_audio_stream: MediaStreamIdentity;
+  subtitles_forced_off: boolean;
+}
+
+export type JobState = "QUEUED" | "RUNNING" | "FINALIZING" | "SUCCEEDED" | "PARTIAL" | "FAILED";
+
+export type JobStage = "queued" | "validating" | "rendering" | "finalizing" | "complete" | "failed";
+
+export interface ClipJobResult {
+  clip_id: string;
+  title: string;
+  file_path: string;
   duration_ms: number;
-  validated_at: string;
+  play_url: string;
+  download_url: string;
+}
+
+export interface JobSnapshot {
+  id: string;
+  type: "clip_create";
+  state: JobState;
+  stage: JobStage;
+  progress: number;
+  current_stage_progress: number;
+  elapsed_ms: number | null;
+  queue_position: number | null;
+  message: string;
+  result: ClipJobResult | null;
+  error: StructuredError | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }

@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from mediaclipmakarr.plex import PlexSession, PlexSessionSnapshot
+from mediaclipmakarr.source_media import ResolvedSourceMedia
 
 StructuredErrorCode = Literal[
     "CLIP_RANGE_NEGATIVE",
@@ -14,6 +15,17 @@ StructuredErrorCode = Literal[
     "PLEX_SESSION_NOT_FOUND",
     "PLEX_MEDIA_CHANGED",
     "PLEX_SESSIONS_UNAVAILABLE",
+    "PLEX_SOURCE_PART_UNAVAILABLE",
+    "SOURCE_PATH_UNMAPPED",
+    "SOURCE_PATH_REJECTED",
+    "SOURCE_PATH_MISSING",
+    "SOURCE_PROBE_UNAVAILABLE",
+    "SOURCE_PROBE_FAILED",
+    "SOURCE_PROBE_INVALID",
+    "VIDEO_STREAM_UNAVAILABLE",
+    "AUDIO_STREAM_UNAVAILABLE",
+    "AUDIO_STREAM_AMBIGUOUS",
+    "ADVANCED_MEDIA_NOT_SUPPORTED",
 ]
 
 
@@ -42,6 +54,7 @@ class ClipCreateValidationResult(BaseModel):
     end_ms: int
     duration_ms: int
     validated_at: datetime
+    source_media: ResolvedSourceMedia | None = None
 
 
 class ClipCreateValidationError(Exception):

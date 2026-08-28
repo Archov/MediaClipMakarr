@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from mediaclipmakarr.application_settings import EffectiveApplicationSettings
+from mediaclipmakarr.config import Settings
+from mediaclipmakarr.plex import PlexPartStream, PlexSession
+from mediaclipmakarr.source_media import SourceMediaError, resolve_and_probe_source_media
+from mediaclipmakarr.source_paths import SourcePathMapping
+from mediaclipmakarr.subprocesses import CommandResult
+
+
+def effective_settings(source_root: Path) -> EffectiveApplicationSettings:
+    return EffectiveApplicationSettings(
+        plex_url="http://plex.example:32400",
+        plex_token="token",
+        source_path_mappings=[
+            SourcePathMapping(plex_prefix="/plex", local_prefix=str(source_root))
+        ],
+        timezone="UTC",
+        timezone_configured=True,
+        x264_preset="veryfast",
+        environment_managed={
+            "plex_url": False,
+            "plex_token": False,
+            "source_path_mappings": False,
+            "timezone": False,
+            "x264_preset": False,
+        },
+    )
+
+
+def session(
+    *,
+    plex_part_file: str = "/plex/Movie.mkv",
+    selected_audio_streams: list[PlexPartStream] | None = None,
+) -> PlexSession:
+    return PlexSession(
+        session_identity="plex-session:living-room",
+        media_identity="plex-media:movie",
+        title="A Movie",
+        media_type="movie",
+        plex_user="Alice",
+        player="Living Room",
+        state="playing",
+        position_ms=10_000,
+        duration_ms=90_000,
+        sampled_at="2026-08-28T12:00:00Z",
+        plex_rating_key="501",
+        plex_media_key="media-501",
+        plex_part_id="part-501",
+        plex_part_file=plex_part_file,
+        selected_audio_streams=selected_audio_streams
+        if selected_audio_streams is not None
+        else [PlexPartStream(stream_type=2, stream_index=1, selected=True)],
+    )
+
+
+async def run_blocking(function, *args):
+    return function(*args)
+
+
+def probe_payload(*, color_transfer: str = "bt709", audio_indexes=(1,)) -> str:
+    return json.dumps(
+        {
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "color_space": "bt709",
+                    "color_transfer": color_transfer,
+                    "color_primaries": "bt709",
+                    "color_range": "tv",
+                },
+                *[
+                    {
+                        "index": index,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "tags": {"language": "eng", "title": f"Audio {index}"},
+                    }
+                    for index in audio_indexes
+                ],
+                {
+                    "index": 3,
+                    "codec_type": "subtitle",
+                    "codec_name": "subrip",
+                    "tags": {"language": "eng"},
+                },
+            ],
+            "format": {"duration": "12.345"},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_probe_captures_fingerprint_duration_and_selected_audio(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+    observed_argv: tuple[str, ...] | None = None
+
+    async def runner(argv, **kwargs):
+        nonlocal observed_argv
+        observed_argv = tuple(str(value) for value in argv)
+        assert kwargs["timeout_seconds"] == 3
+        return CommandResult(observed_argv, 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(
+            _env_file=None,
+            source_dirs=[source_root],
+            ffprobe_path=Path("test-ffprobe"),
+            subprocess_timeout_seconds=3,
+        ),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert observed_argv == (
+        "test-ffprobe",
+        "-v",
+        "error",
+        "-show_streams",
+        "-show_format",
+        "-of",
+        "json",
+        str(media.resolve()),
+    )
+    assert result.local_path == str(media.resolve())
+    assert result.fingerprint.size_bytes == len(b"fake media")
+    assert result.duration_ms == 12_345
+    assert result.video_streams[0].color.color_transfer == "bt709"
+    assert result.selected_audio_stream.stream_index == 1
+    assert result.subtitle_streams[0].codec_name == "subrip"
+    assert result.subtitles_forced_off is True
+
+
+@pytest.mark.asyncio
+async def test_unmapped_or_missing_paths_do_not_reach_ffprobe(tmp_path) -> None:
+    calls = 0
+
+    async def runner(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    settings = effective_settings(source_root)
+    bootstrap = Settings(_env_file=None, source_dirs=[source_root])
+
+    with pytest.raises(SourceMediaError) as unmapped:
+        await resolve_and_probe_source_media(
+            session(plex_part_file="/other/Movie.mkv"),
+            settings,
+            bootstrap,
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+    with pytest.raises(SourceMediaError) as missing:
+        await resolve_and_probe_source_media(
+            session(),
+            settings,
+            bootstrap,
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert unmapped.value.code == "SOURCE_PATH_UNMAPPED"
+    assert missing.value.code == "SOURCE_PATH_MISSING"
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_selected_audio_must_map_unambiguously(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(
+            tuple(str(value) for value in argv),
+            0,
+            probe_payload(audio_indexes=(1, 2)),
+            "",
+        )
+
+    with pytest.raises(SourceMediaError) as unavailable:
+        await resolve_and_probe_source_media(
+            session(
+                selected_audio_streams=[
+                    PlexPartStream(stream_type=2, stream_index=9, selected=True)
+                ]
+            ),
+            effective_settings(source_root),
+            Settings(_env_file=None, source_dirs=[source_root]),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+    with pytest.raises(SourceMediaError) as ambiguous:
+        await resolve_and_probe_source_media(
+            session(
+                selected_audio_streams=[
+                    PlexPartStream(stream_type=2, selected=True)
+                ]
+            ),
+            effective_settings(source_root),
+            Settings(_env_file=None, source_dirs=[source_root]),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert unavailable.value.code == "AUDIO_STREAM_UNAVAILABLE"
+    assert ambiguous.value.code == "AUDIO_STREAM_AMBIGUOUS"
+
+
+@pytest.mark.asyncio
+async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(
+            tuple(str(value) for value in argv),
+            0,
+            probe_payload(color_transfer="smpte2084"),
+            "",
+        )
+
+    with pytest.raises(SourceMediaError) as error:
+        await resolve_and_probe_source_media(
+            session(),
+            effective_settings(source_root),
+            Settings(_env_file=None, source_dirs=[source_root]),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert error.value.code == "ADVANCED_MEDIA_NOT_SUPPORTED"
