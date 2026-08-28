@@ -36,7 +36,7 @@ import {
   createTheme,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
 import { fetchHealth, fetchSettings, testPlexConnection, updateSettings } from "./api";
 import type {
@@ -69,6 +69,16 @@ const x264Presets = [
   "slower",
   "veryslow",
 ];
+const PLEX_TOKEN_MASK = "●●●●●●●●";
+
+function tokenDraft(settings: ApplicationSettings): string {
+  return settings.plex_token_configured ? PLEX_TOKEN_MASK : "";
+}
+
+function enteredToken(value: string): string {
+  const token = value.trim();
+  return token === PLEX_TOKEN_MASK ? "" : token;
+}
 
 function StatusIcon({ status }: { status: HealthStatus }) {
   if (status === "ok") return <CheckCircleRounded color="success" />;
@@ -107,7 +117,7 @@ interface SettingsOperation {
 function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   const queryClient = useQueryClient();
   const [plexUrl, setPlexUrl] = useState(settings.plex_url);
-  const plexTokenInput = useRef<HTMLInputElement>(null);
+  const [plexToken, setPlexToken] = useState(() => tokenDraft(settings));
   const [timezone, setTimezone] = useState(() => initialTimezone(settings));
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
@@ -115,7 +125,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 
   useEffect(() => {
     setPlexUrl(settings.plex_url);
-    if (plexTokenInput.current) plexTokenInput.current.value = "";
+    setPlexToken(tokenDraft(settings));
     setTimezone(initialTimezone(settings));
     setX264Preset(settings.x264_preset);
     setMappings(settings.source_path_mappings);
@@ -162,14 +172,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
     onSuccess: (result) => {
       queryClient.setQueryData(["settings"], result.settings);
       setConnection(result.connection);
-      if (plexTokenInput.current) plexTokenInput.current.value = "";
+      setPlexToken(tokenDraft(result.settings));
     },
   });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const submittedToken = String(new FormData(form).get("plex_token") ?? "").trim();
+    const submittedToken = enteredToken(plexToken);
     const baseUpdate: ApplicationSettingsUpdate = {
       ...(!submittedToken && !managed("plex_url") && { plex_url: plexUrl }),
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
@@ -192,7 +201,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
     });
   };
   const testCurrentConnection = () => {
-    const submittedToken = plexTokenInput.current?.value.trim() ?? "";
+    const submittedToken = enteredToken(plexToken);
     save.mutate({
       kind: "test",
       baseUpdate: {},
@@ -258,11 +267,20 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               type="password"
               name="plex_token"
               label="Plex token"
-              placeholder={settings.plex_token_configured ? "●●●●●●●●" : "Enter token"}
+              placeholder="Enter token"
+              value={plexToken}
               slotProps={{ inputLabel: { shrink: true } }}
-              inputRef={plexTokenInput}
               disabled={managed("plex_token")}
-              onChange={() => setConnection(null)}
+              onFocus={() => {
+                if (plexToken === PLEX_TOKEN_MASK) setPlexToken("");
+              }}
+              onBlur={() => {
+                if (!plexToken && settings.plex_token_configured) setPlexToken(PLEX_TOKEN_MASK);
+              }}
+              onChange={(event) => {
+                setPlexToken(event.target.value);
+                setConnection(null);
+              }}
               helperText="The saved token is replaced only when you enter a new one."
             />
             <ManagedLabel managed={managed("plex_token")} />
