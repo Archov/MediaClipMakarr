@@ -20,6 +20,12 @@ from mediaclipmakarr.application_settings import (
     save_persisted_application_settings,
     serialize_update,
 )
+from mediaclipmakarr.clips import (
+    ClipCreateRequest,
+    ClipCreateValidationError,
+    ClipCreateValidationResult,
+    validate_clip_create_request,
+)
 from mediaclipmakarr.concurrency import BlockingIOExecutor
 from mediaclipmakarr.config import Settings, validate_path_layout
 from mediaclipmakarr.database import check_database, create_database_engine, upgrade_database
@@ -262,6 +268,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.post("/api/clips", response_model=ClipCreateValidationResult)
+    async def create_clip(
+        clip_request: ClipCreateRequest, request: Request
+    ) -> ClipCreateValidationResult:
+        try:
+            return validate_clip_create_request(
+                clip_request, request.app.state.plex_session_poller.snapshot
+            )
+        except ClipCreateValidationError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=error.error.model_dump(mode="json"),
+            ) from error
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():

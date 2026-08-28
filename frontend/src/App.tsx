@@ -3,11 +3,13 @@ import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
 import ArrowUpwardRounded from "@mui/icons-material/ArrowUpwardRounded";
 import AvTimerRounded from "@mui/icons-material/AvTimerRounded";
 import CheckCircleRounded from "@mui/icons-material/CheckCircleRounded";
+import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import ErrorRounded from "@mui/icons-material/ErrorRounded";
 import MovieRounded from "@mui/icons-material/MovieRounded";
 import PersonRounded from "@mui/icons-material/PersonRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
+import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRounded from "@mui/icons-material/SmartDisplayRounded";
 import WarningRounded from "@mui/icons-material/WarningRounded";
@@ -46,16 +48,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 
 import {
+  createClip,
   fetchHealth,
   fetchPlexSessions,
   fetchSettings,
   testPlexConnection,
   updateSettings,
 } from "./api";
+import { formatTimestampMs, parseTimestampMs } from "./timestamps";
 import type {
   ApplicationSettingField,
   ApplicationSettings,
   ApplicationSettingsUpdate,
+  ClipCreateRequest,
   HealthStatus,
   PlexConnectionRequest,
   PlexConnectionResult,
@@ -126,17 +131,7 @@ function ManagedLabel({ managed }: { managed: boolean }) {
 }
 
 function formatMilliseconds(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "--:--";
-  const total = Math.max(0, Math.floor(value));
-  const hours = Math.floor(total / 3_600_000);
-  const minutes = Math.floor((total % 3_600_000) / 60_000);
-  const seconds = Math.floor((total % 60_000) / 1_000);
-  const milliseconds = total % 1_000;
-  return [
-    hours.toString().padStart(2, "0"),
-    minutes.toString().padStart(2, "0"),
-    seconds.toString().padStart(2, "0"),
-  ].join(":") + `.${milliseconds.toString().padStart(3, "0")}`;
+  return formatTimestampMs(value) || "--:--";
 }
 
 function useClock(enabled: boolean): number {
@@ -229,18 +224,127 @@ function SessionDetail({ session }: { session: PlexSession }) {
   );
 }
 
+type Boundary = "start" | "end";
+type AppPage = "make-clip" | "settings";
+
+const MAX_ADJUSTMENT_SECONDS = 99;
+
+function adjustmentLabel(seconds: number): string {
+  return seconds > 0 ? `+${seconds}` : seconds.toString();
+}
+
+function clampAdjustmentSeconds(seconds: number): number {
+  return Math.min(MAX_ADJUSTMENT_SECONDS, Math.max(-MAX_ADJUSTMENT_SECONDS, seconds));
+}
+
+function clampBoundaryMs(value: number, maximumMs: number | null): number {
+  const nonNegative = Math.max(0, Math.floor(value));
+  return maximumMs === null ? nonNegative : Math.min(nonNegative, maximumMs);
+}
+
 function MakeClipScreen() {
   const sessions = useLivePlexSessions();
   const [selectedSessionIdentity, setSelectedSessionIdentity] = useState<string | null>(null);
   const [selectedMediaIdentity, setSelectedMediaIdentity] = useState<string | null>(null);
+  const [startMs, setStartMs] = useState<number | null>(null);
+  const [endMs, setEndMs] = useState<number | null>(null);
+  const [startInput, setStartInput] = useState("");
+  const [endInput, setEndInput] = useState("");
+  const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
+  const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const snapshot = sessions.data;
   const selectedSession = snapshot?.sessions.find(
     (session) => session.session_identity === selectedSessionIdentity,
   );
+  const now = useClock(selectedSession?.state.toLowerCase() === "playing");
+  const livePositionMs = selectedSession ? displayedPosition(selectedSession, now) : null;
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
-  const selectedMediaChanged = Boolean(
-    selectedSession && selectedMediaIdentity && selectedSession.media_identity !== selectedMediaIdentity,
-  );
+  const startParse = parseTimestampMs(startInput);
+  const endParse = parseTimestampMs(endInput);
+  const clipCreate = useMutation({ mutationFn: createClip });
+
+  const setBoundary = (boundary: Boundary, value: number | null) => {
+    const nextInput = formatTimestampMs(value);
+    if (boundary === "start") {
+      setStartMs(value);
+      setStartInput(nextInput);
+    } else {
+      setEndMs(value);
+      setEndInput(nextInput);
+    }
+    setBoundaryNotice(null);
+    clipCreate.reset();
+  };
+
+  const handleBoundaryInput = (boundary: Boundary, value: string) => {
+    const parsed = parseTimestampMs(value);
+    if (boundary === "start") {
+      setStartInput(value);
+      setStartMs(parsed.error ? null : parsed.value);
+    } else {
+      setEndInput(value);
+      setEndMs(parsed.error ? null : parsed.value);
+    }
+    setBoundaryNotice(null);
+    clipCreate.reset();
+  };
+
+  useEffect(() => {
+    if (
+      !selectedSession ||
+      !selectedMediaIdentity ||
+      selectedSession.media_identity === selectedMediaIdentity
+    ) {
+      return;
+    }
+    setSelectedMediaIdentity(selectedSession.media_identity);
+    setBoundary("start", null);
+    setBoundary("end", null);
+    setBoundaryNotice("The selected player changed media, so captured boundaries were cleared.");
+  }, [selectedMediaIdentity, selectedSession]);
+
+  const rangeError =
+    startParse.error ??
+    endParse.error ??
+    (selectedSession && startMs === null ? "Capture Start before creating a clip." : null) ??
+    (selectedSession && endMs === null ? "Capture End before creating a clip." : null) ??
+    (startMs !== null && endMs !== null && endMs <= startMs
+      ? "End must be later than Start."
+      : null) ??
+    (selectedSession?.duration_ms !== null &&
+    selectedSession?.duration_ms !== undefined &&
+    endMs !== null &&
+    endMs > selectedSession.duration_ms
+      ? "End must be within the selected media duration."
+      : null);
+
+  const submitClip = () => {
+    if (!selectedSession || !selectedMediaIdentity || startMs === null || endMs === null) return;
+    const request: ClipCreateRequest = {
+      session_identity: selectedSession.session_identity,
+      media_identity: selectedMediaIdentity,
+      start_ms: startMs,
+      end_ms: endMs,
+    };
+    clipCreate.mutate(request);
+  };
+
+  const adjustStart = () => {
+    if (!selectedSession || startMs === null) return;
+    setBoundary(
+      "start",
+      clampBoundaryMs(startMs + adjustmentSeconds * 1_000, selectedSession.duration_ms),
+    );
+  };
+
+  const adjustEnd = () => {
+    const baseMs = endMs ?? startMs;
+    if (!selectedSession || baseMs === null) return;
+    setBoundary(
+      "end",
+      clampBoundaryMs(baseMs + adjustmentSeconds * 1_000, selectedSession.duration_ms),
+    );
+  };
 
   return (
     <Card variant="outlined">
@@ -263,9 +367,7 @@ function MakeClipScreen() {
           {selectedSessionEnded && (
             <Alert severity="warning">The selected Plex session ended.</Alert>
           )}
-          {selectedMediaChanged && (
-            <Alert severity="info">The selected player changed media.</Alert>
-          )}
+          {boundaryNotice && <Alert severity="info">{boundaryNotice}</Alert>}
 
           {snapshot && snapshot.sessions.length > 0 ? (
             <List disablePadding>
@@ -278,6 +380,9 @@ function MakeClipScreen() {
                     onClick={() => {
                       setSelectedSessionIdentity(session.session_identity);
                       setSelectedMediaIdentity(session.media_identity);
+                      setBoundary("start", displayedPosition(session, Date.now()));
+                      setBoundary("end", null);
+                      setBoundaryNotice(null);
                     }}
                     sx={{ borderRadius: 1, mb: 1, alignItems: "flex-start" }}
                   >
@@ -297,6 +402,145 @@ function MakeClipScreen() {
             <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 3 }}>
               <Typography color="text.secondary">No active sessions.</Typography>
             </Box>
+          )}
+
+          {selectedSession && (
+            <>
+              <Divider />
+              <Stack spacing={2}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={2}
+                  justifyContent="space-between"
+                  alignItems={{ sm: "center" }}
+                >
+                  <Box>
+                    <Typography variant="h6">Clip boundaries</Typography>
+                    <Typography color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                      Current position {formatMilliseconds(livePositionMs)}
+                    </Typography>
+                  </Box>
+                </Stack>
+
+                <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start">
+                  <Stack direction="row" spacing={1} alignItems="flex-start">
+                    <TextField
+                      label="Start"
+                      placeholder="00:00:00.000"
+                      value={startInput}
+                      error={Boolean(startParse.error)}
+                      helperText={startParse.error ?? "HH:MM:SS.mmm"}
+                      onChange={(event) => handleBoundaryInput("start", event.target.value)}
+                      sx={{ width: { xs: "15ch", sm: "16ch" } }}
+                    />
+                    <Button
+                      aria-label="Set Start to current position"
+                      startIcon={<AvTimerRounded />}
+                      variant="outlined"
+                      disabled={livePositionMs === null}
+                      onClick={() => setBoundary("start", livePositionMs)}
+                      sx={{ minHeight: 56 }}
+                    >
+                      Set
+                    </Button>
+                  </Stack>
+                  <Stack direction="row" spacing={1} alignItems="flex-start">
+                    <TextField
+                      label="End"
+                      placeholder="00:00:00.000"
+                      value={endInput}
+                      error={Boolean(endParse.error)}
+                      helperText={endParse.error ?? "HH:MM:SS.mmm"}
+                      onChange={(event) => handleBoundaryInput("end", event.target.value)}
+                      sx={{ width: { xs: "15ch", sm: "16ch" } }}
+                    />
+                    <Button
+                      aria-label="Set End to current position"
+                      startIcon={<AvTimerRounded />}
+                      variant="outlined"
+                      disabled={livePositionMs === null}
+                      onClick={() => setBoundary("end", livePositionMs)}
+                      sx={{ minHeight: 56 }}
+                    >
+                      Set
+                    </Button>
+                  </Stack>
+                  <Button
+                    startIcon={<RestartAltRounded />}
+                    variant="outlined"
+                    onClick={() => {
+                      setBoundary("start", null);
+                      setBoundary("end", null);
+                    }}
+                    sx={{ minHeight: 56 }}
+                  >
+                    Clear
+                  </Button>
+                </Stack>
+
+                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start">
+                  <TextField
+                    type="number"
+                    label="Seconds"
+                    value={adjustmentSeconds}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setAdjustmentSeconds(
+                        Number.isFinite(value) ? clampAdjustmentSeconds(Math.trunc(value)) : 0,
+                      );
+                    }}
+                    slotProps={{
+                      htmlInput: {
+                        max: MAX_ADJUSTMENT_SECONDS,
+                        min: -MAX_ADJUSTMENT_SECONDS,
+                        step: 1,
+                      },
+                    }}
+                    sx={{ width: "12ch" }}
+                  />
+                  <Button
+                    variant="outlined"
+                    disabled={startMs === null}
+                    onClick={adjustStart}
+                    sx={{ minHeight: 56, textTransform: "none", whiteSpace: "nowrap", width: 116 }}
+                  >
+                    Start {adjustmentLabel(adjustmentSeconds)}s
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    disabled={endMs === null && startMs === null}
+                    onClick={adjustEnd}
+                    sx={{ minHeight: 56, textTransform: "none", whiteSpace: "nowrap", width: 116 }}
+                  >
+                    End {adjustmentLabel(adjustmentSeconds)}s
+                  </Button>
+                </Stack>
+
+                {startMs !== null && endMs !== null && endMs > startMs && (
+                  <Typography color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                    Selected duration {formatMilliseconds(endMs - startMs)}
+                  </Typography>
+                )}
+                {rangeError && <Alert severity="warning">{rangeError}</Alert>}
+                {clipCreate.error && <Alert severity="error">{clipCreate.error.message}</Alert>}
+                {clipCreate.data && (
+                  <Alert severity="success">
+                    {clipCreate.data.message} Duration{" "}
+                    {formatMilliseconds(clipCreate.data.duration_ms)}.
+                  </Alert>
+                )}
+
+                <Button
+                  startIcon={<ContentCutRounded />}
+                  variant="contained"
+                  disabled={Boolean(rangeError) || clipCreate.isPending}
+                  onClick={submitClip}
+                  sx={{ alignSelf: "flex-start" }}
+                >
+                  {clipCreate.isPending ? "Submitting…" : "Create clip"}
+                </Button>
+              </Stack>
+            </>
           )}
         </Stack>
       </CardContent>
@@ -651,6 +895,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 }
 
 export function App() {
+  const [page, setPage] = useState<AppPage>("make-clip");
   const health = useQuery({
     queryKey: ["health"],
     queryFn: fetchHealth,
@@ -662,57 +907,74 @@ export function App() {
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <AppBar position="static" color="transparent" elevation={0}>
-        <Toolbar>
-          <SettingsRounded sx={{ mr: 1 }} />
-          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 700 }}>MediaClipMakarr</Typography>
+        <Toolbar sx={{ gap: 1, flexWrap: "wrap", py: 1 }}>
+          <ContentCutRounded sx={{ mr: 1 }} />
+          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 700, minWidth: 180 }}>
+            MediaClipMakarr
+          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mr: { sm: 2 } }}>
+            <Button
+              color={page === "make-clip" ? "primary" : "inherit"}
+              variant={page === "make-clip" ? "outlined" : "text"}
+              onClick={() => setPage("make-clip")}
+            >
+              Make Clip
+            </Button>
+            <Button
+              color={page === "settings" ? "primary" : "inherit"}
+              startIcon={<SettingsRounded />}
+              variant={page === "settings" ? "outlined" : "text"}
+              onClick={() => setPage("settings")}
+            >
+              Settings
+            </Button>
+          </Stack>
           {health.data && <StatusChip status={health.data.status} />}
         </Toolbar>
       </AppBar>
       <Container maxWidth="md" sx={{ py: { xs: 4, md: 7 } }}>
         <Stack spacing={3}>
-          <Box>
-            <Typography variant="h3" component="h1" gutterBottom sx={{ fontWeight: 800 }}>Make Clip</Typography>
-            <Typography color="text.secondary">
-              Select the active Plex playback session before capturing clip boundaries.
-            </Typography>
-          </Box>
+          {page === "make-clip" && <MakeClipScreen />}
 
-          {(settings.isLoading || health.isLoading) && (
-            <Box sx={{ display: "flex", justifyContent: "center", py: 8 }}>
-              <CircularProgress aria-label="Loading settings" />
-            </Box>
-          )}
-          {settings.error && <Alert severity="error">{settings.error.message}</Alert>}
-          <MakeClipScreen />
-          {settings.data && <SettingsForm settings={settings.data} />}
+          {page === "settings" && (
+            <>
+              {(settings.isLoading || health.isLoading) && (
+                <Box sx={{ display: "flex", justifyContent: "center", py: 8 }}>
+                  <CircularProgress aria-label="Loading settings" />
+                </Box>
+              )}
+              {settings.error && <Alert severity="error">{settings.error.message}</Alert>}
+              {settings.data && <SettingsForm settings={settings.data} />}
 
-          {health.error && <Alert severity="error">{health.error.message}</Alert>}
-          {health.data && (
-            <Card variant="outlined">
-              <CardContent>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="h5">Runtime readiness</Typography>
-                  <StatusChip status={health.data.status} />
-                </Stack>
-                <List>
-                  {[
-                    ["Application", health.data.application],
-                    ["SQLite", health.data.database],
-                    ["Jellyfin FFmpeg", health.data.media_tools],
-                  ].map(([name, component]) => {
-                    const item = component as typeof health.data.application;
-                    return (
-                      <ListItem key={name as string} disableGutters alignItems="flex-start">
-                        <ListItemIcon sx={{ minWidth: 40, pt: 0.5 }}>
-                          <StatusIcon status={item.status} />
-                        </ListItemIcon>
-                        <ListItemText primary={name as string} secondary={item.message} />
-                      </ListItem>
-                    );
-                  })}
-                </List>
-              </CardContent>
-            </Card>
+              {health.error && <Alert severity="error">{health.error.message}</Alert>}
+              {health.data && (
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="h5">Runtime readiness</Typography>
+                      <StatusChip status={health.data.status} />
+                    </Stack>
+                    <List>
+                      {[
+                        ["Application", health.data.application],
+                        ["SQLite", health.data.database],
+                        ["Jellyfin FFmpeg", health.data.media_tools],
+                      ].map(([name, component]) => {
+                        const item = component as typeof health.data.application;
+                        return (
+                          <ListItem key={name as string} disableGutters alignItems="flex-start">
+                            <ListItemIcon sx={{ minWidth: 40, pt: 0.5 }}>
+                              <StatusIcon status={item.status} />
+                            </ListItemIcon>
+                            <ListItemText primary={name as string} secondary={item.message} />
+                          </ListItem>
+                        );
+                      })}
+                    </List>
+                  </CardContent>
+                </Card>
+              )}
+            </>
           )}
         </Stack>
       </Container>

@@ -3,9 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.20.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "test:node-version": "node -e \"const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 20)) { console.error('Node.js >=22.20.0 is required for test:timestamps.'); process.exit(1); }\"",
+    "test:timestamps": "npm run test:node-version && node --experimental-strip-types tests/timestamps.test.ts",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

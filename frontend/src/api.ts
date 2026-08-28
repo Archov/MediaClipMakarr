@@ -1,6 +1,8 @@
 import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
+  ClipCreateRequest,
+  ClipCreateResult,
   HealthResponse,
   PlexConnectionRequest,
   PlexConnectionResult,
@@ -13,7 +15,7 @@ async function parseResponse<T>(response: Response, action: string): Promise<T> 
       | {
           detail?:
             | string
-            | { message?: string }
+            | { code?: string; message?: string }
             | Array<{ loc?: Array<string | number>; msg?: string }>;
         }
       | null;
@@ -31,7 +33,11 @@ async function parseResponse<T>(response: Response, action: string): Promise<T> 
           .join(" ")
       : typeof detail === "string"
         ? detail
-        : detail?.message;
+        : detail?.message
+          ? detail.code
+            ? `${detail.message} (${detail.code})`
+            : detail.message
+          : undefined;
     throw new Error(message ?? `${action} failed with HTTP ${response.status}.`);
   }
   return (await response.json()) as T;
@@ -78,4 +84,13 @@ export async function fetchPlexSessions(): Promise<PlexSessionSnapshot> {
     headers: { Accept: "application/json" },
   });
   return parseResponse<PlexSessionSnapshot>(response, "Plex sessions request");
+}
+
+export async function createClip(request: ClipCreateRequest): Promise<ClipCreateResult> {
+  const response = await fetch("/api/clips", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  return parseResponse<ClipCreateResult>(response, "Clip request");
 }

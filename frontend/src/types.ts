@@ -98,3 +98,28 @@ export interface PlexSessionSnapshot {
   sampled_at: string;
   sessions: PlexSession[];
 }
+
+export interface StructuredError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface ClipCreateRequest {
+  session_identity: string;
+  media_identity: string;
+  start_ms: number;
+  end_ms: number;
+}
+
+export interface ClipCreateResult {
+  valid: boolean;
+  code: string;
+  message: string;
+  session_identity: string;
+  media_identity: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  validated_at: string;
+}

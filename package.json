@@ -7,6 +7,6 @@
     "dev": "python scripts/dev.py",
     "build": "npm --prefix frontend run build",
     "typecheck": "npm --prefix frontend run typecheck",
-    "test": "python -m pytest tests -q"
+    "test": "python -m pytest tests -q && npm --prefix frontend run test:timestamps"
   }
 }
