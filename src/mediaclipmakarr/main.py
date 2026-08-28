@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -23,7 +23,6 @@ from mediaclipmakarr.application_settings import (
 from mediaclipmakarr.clips import (
     ClipCreateRequest,
     ClipCreateValidationError,
-    ClipCreateValidationResult,
     validate_clip_create_request,
 )
 from mediaclipmakarr.concurrency import BlockingIOExecutor
@@ -36,6 +35,15 @@ from mediaclipmakarr.health import (
     inspect_directories,
     inspect_media_tools,
 )
+from mediaclipmakarr.jobs import (
+    JobEventBroker,
+    JobRunner,
+    JobSnapshot,
+    enqueue_clip_create_job,
+    get_clip,
+    get_job_snapshot,
+    job_sse_payload,
+)
 from mediaclipmakarr.plex import (
     PlexConnectionRequest,
     PlexConnectionResult,
@@ -45,6 +53,8 @@ from mediaclipmakarr.plex import (
     test_plex_connection,
 )
 from mediaclipmakarr.process_lock import ProcessLock
+from mediaclipmakarr.render_plan import build_clip_render_plan
+from mediaclipmakarr.source_media import SourceMediaError, resolve_and_probe_source_media
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +127,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for name, error in directory_initialization.items():
                 if error and name != "private-data":
                     logger.warning(error)
+            app.state.job_events = JobEventBroker()
+            app.state.job_runner = JobRunner(
+                database_engine,
+                application_settings,
+                run_blocking=executor.run,
+                events=app.state.job_events,
+            )
+            await app.state.job_runner.start()
             yield
         finally:
+            if hasattr(app.state, "job_runner"):
+                await app.state.job_runner.stop()
             if hasattr(app.state, "plex_session_poller"):
                 await app.state.plex_session_poller.stop()
             if database_engine is not None:
@@ -269,19 +289,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.post("/api/clips", response_model=ClipCreateValidationResult)
+    @app.post("/api/clips", response_model=JobSnapshot)
     async def create_clip(
         clip_request: ClipCreateRequest, request: Request
-    ) -> ClipCreateValidationResult:
+    ) -> JobSnapshot:
         try:
-            return validate_clip_create_request(
-                clip_request, request.app.state.plex_session_poller.snapshot
+            snapshot = request.app.state.plex_session_poller.snapshot
+            result = validate_clip_create_request(clip_request, snapshot)
+            session = next(
+                session
+                for session in snapshot.sessions
+                if session.session_identity == result.session_identity
             )
+            result.source_media = await resolve_and_probe_source_media(
+                session,
+                request.app.state.effective_application_settings,
+                application_settings,
+                run_blocking=request.app.state.blocking_io.run,
+            )
+            render_plan = build_clip_render_plan(
+                session=session,
+                request=clip_request,
+                source_media=result.source_media,
+                x264_preset=request.app.state.effective_application_settings.x264_preset,
+            )
+            job = await enqueue_clip_create_job(
+                request.app.state.database_engine,
+                render_plan,
+            )
+            await request.app.state.job_events.publish(job.id, job)
+            request.app.state.job_runner.wake()
+            return job
         except ClipCreateValidationError as error:
             raise HTTPException(
                 status_code=error.status_code,
                 detail=error.error.model_dump(mode="json"),
             ) from error
+        except SourceMediaError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                },
+            ) from error
+
+    @app.get("/api/jobs/{job_id}", response_model=JobSnapshot)
+    async def get_job(job_id: str, request: Request) -> JobSnapshot:
+        snapshot = await get_job_snapshot(request.app.state.database_engine, job_id)
+        if snapshot is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "JOB_NOT_FOUND",
+                    "message": "The requested job does not exist.",
+                    "retryable": False,
+                },
+            )
+        return snapshot
+
+    @app.get("/api/jobs/{job_id}/events")
+    async def stream_job(job_id: str, request: Request) -> StreamingResponse:
+        if await get_job_snapshot(request.app.state.database_engine, job_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "JOB_NOT_FOUND",
+                    "message": "The requested job does not exist.",
+                    "retryable": False,
+                },
+            )
+
+        async def events():
+            broker: JobEventBroker = request.app.state.job_events
+            version = broker.version(job_id)
+            snapshot = await get_job_snapshot(request.app.state.database_engine, job_id)
+            if snapshot is not None:
+                yield job_sse_payload(snapshot)
+            while not await request.is_disconnected():
+                version, changed = await broker.wait_for_change(
+                    job_id, version, timeout_seconds=15.0
+                )
+                if changed:
+                    snapshot = broker.snapshot(job_id) or await get_job_snapshot(
+                        request.app.state.database_engine, job_id
+                    )
+                    if snapshot is not None:
+                        yield job_sse_payload(snapshot)
+                else:
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/clips/{clip_id}/media")
+    async def play_clip(clip_id: str, request: Request) -> FileResponse:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        return FileResponse(
+            clip["file_path"],
+            media_type="video/mp4",
+            filename=f"{clip['title']}.mp4",
+        )
+
+    @app.get("/api/clips/{clip_id}/download")
+    async def download_clip(clip_id: str, request: Request) -> FileResponse:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        return FileResponse(
+            clip["file_path"],
+            media_type="video/mp4",
+            filename=f"{clip['title']}.mp4",
+            content_disposition_type="attachment",
+        )
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():

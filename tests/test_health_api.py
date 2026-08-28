@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 
 import mediaclipmakarr.main as main_module
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.health import MediaToolInspection
-from mediaclipmakarr.plex import snapshot_sse_payload
+from mediaclipmakarr.plex import PlexSession, PlexSessionSnapshot, snapshot_sse_payload
 
 
 def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> None:
@@ -40,7 +42,7 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["database"]["details"]["schema_revision"] == "0001_bootstrap"
+    assert payload["database"]["details"]["schema_revision"] == "0002_jobs_and_clips"
     assert payload["application"]["details"]["exclusive_lock"] is True
     serialized = response.text
     assert str(tmp_path) not in serialized
@@ -73,15 +75,41 @@ def test_session_snapshot_is_in_memory_and_serializes_for_initial_sse_event(
 
     monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
     with TestClient(main_module.create_app(settings)) as client:
+        client.app.state.plex_session_poller._snapshot = PlexSessionSnapshot(
+            status="ok",
+            message="Active Plex video sessions loaded.",
+            sampled_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+            sessions=[
+                PlexSession(
+                    session_identity="plex-session:living-room",
+                    media_identity="plex-media:movie",
+                    title="A Movie",
+                    media_type="movie",
+                    plex_user="Alice",
+                    player="Living Room",
+                    state="playing",
+                    position_ms=1_000,
+                    duration_ms=10_000,
+                    sampled_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+                    plex_rating_key="501",
+                    plex_media_key="media-501",
+                    plex_part_id="part-501",
+                    plex_part_key="/library/parts/501",
+                    plex_part_file="/plex/private/Movie.mkv",
+                )
+            ],
+        )
         snapshot_response = client.get("/api/sessions")
 
     assert snapshot_response.status_code == 200
     snapshot = snapshot_response.json()
-    assert snapshot["status"] == "not_configured"
-    assert snapshot["sessions"] == []
+    assert snapshot["status"] == "ok"
+    assert "plex_part_file" not in snapshot["sessions"][0]
+    assert "/plex/private/Movie.mkv" not in snapshot_response.text
     sse_payload = snapshot_sse_payload(
         client.app.state.plex_session_poller.snapshot
     )
     assert sse_payload.startswith("event: snapshot\ndata: ")
-    assert '"status":"not_configured"' in sse_payload
-    assert '"sessions":[]' in sse_payload
+    assert '"status":"ok"' in sse_payload
+    assert "plex_part_file" not in sse_payload
+    assert "/plex/private/Movie.mkv" not in sse_payload

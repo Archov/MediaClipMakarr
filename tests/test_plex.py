@@ -130,6 +130,41 @@ def test_video_session_identity_is_separate_from_media_identity() -> None:
     assert first[0].media_identity != changed[0].media_identity
 
 
+def test_video_session_uses_selected_media_part_and_audio_stream() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video type="movie" ratingKey="501" title="A Movie" viewOffset="12000" duration="90000">
+        <User id="1" title="Alice" />
+        <Player title="Living Room" machineIdentifier="player-a" state="playing" />
+        <Session id="session-a" />
+        <Media id="media-501-a">
+          <Part id="part-501-a" key="/library/parts/501-a" file="/plex/wrong.mkv">
+            <Stream id="stream-audio-wrong" streamType="2" index="1" selected="1" />
+          </Part>
+        </Media>
+        <Media id="media-501-b" selected="1">
+          <Part id="part-501-b1" key="/library/parts/501-b1" file="/plex/wrong-part.mkv" />
+          <Part id="part-501-b2" key="/library/parts/501-b2" file="/plex/right.mkv" selected="1">
+            <Stream id="stream-video" streamType="1" index="0" />
+            <Stream id="stream-audio" streamType="2" index="2" codec="aac"
+              languageCode="eng" title="Stereo" selected="1" />
+          </Part>
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    [session] = parse_video_sessions(payload)
+
+    assert session.plex_media_key == "media-501-b"
+    assert session.plex_part_id == "part-501-b2"
+    assert session.plex_part_key == "/library/parts/501-b2"
+    assert session.plex_part_file == "/plex/right.mkv"
+    assert len(session.selected_audio_streams) == 1
+    assert session.selected_audio_streams[0].stream_index == 2
+    assert session.selected_audio_streams[0].language == "eng"
+
+
 @pytest.mark.asyncio
 async def test_session_poller_reports_disappearance_without_persisting_sessions() -> None:
     payloads = [

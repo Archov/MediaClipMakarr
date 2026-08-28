@@ -42,12 +42,14 @@ On macOS or Linux, use `cp .env.example .env` instead. Open
 on all host interfaces so LAN clients and containerized reverse proxies can reach it; restrict
 untrusted access with the host firewall or an authenticating reverse proxy. `MCM_COMPOSE_SOURCE_DIR`
 selects the host media directory mounted read-only at `/media`; `MCM_SOURCE_DIRS` must therefore
-include `/media`. `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR` are ordinary persistent
-directories on the Docker host. Ensure custom directories exist and are writable by `MCM_PUID` and
-`MCM_PGID` before starting Compose. Existing Docker named volumes from older configurations are
-left untouched and are not migrated automatically. The runtime launches exactly one Uvicorn worker
-and contains the checksum-verified official Jellyfin FFmpeg `7.1.4-3` GPL portable release for
-amd64 or arm64.
+include `/media`. `MCM_DATA` selects the host directory mounted at `/data`, which stores the
+database, work files, and clips under `private`, `work`, and `clips`. It must be set explicitly so
+Compose does not silently start against the wrong data root. Keep `MCM_COMPOSE_SOURCE_DIR` outside
+`MCM_DATA` so Plex source media is available only through the read-only `/media:ro` mount. Ensure
+custom directories exist and are writable by `MCM_PUID` and `MCM_PGID` before starting Compose.
+Existing Docker named volumes from older configurations are left untouched and are not migrated
+automatically. The runtime launches exactly one Uvicorn worker and contains the checksum-verified
+official Jellyfin FFmpeg `7.1.4-3` GPL portable release for amd64 or arm64.
 
 ## Verification commands
 
@@ -80,7 +82,7 @@ All Compose and application environment variables use the `MCM_` prefix. The mai
 
 - `MCM_COMPOSE_PORT` and `MCM_COMPOSE_SOURCE_DIR` configure the published port and host media mount
 - `MCM_PUID` and `MCM_PGID` select the container process identity for bind-mount permissions
-- `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR` select persistent host directories
+- `MCM_DATA` selects the persistent host data root mounted at `/data`
 - `MCM_SOURCE_DIRS`, as a JSON array of read-only container source roots
 - `MCM_FFMPEG_PATH` and `MCM_FFPROBE_PATH`
 - `MCM_EXPECTED_FFMPEG_IDENTITY` (defaults to `7.1.4-Jellyfin`)
@@ -99,3 +101,12 @@ the container prefix `/media`; a POSIX Plex server can similarly map `/srv/plex/
 Resolved paths are still canonicalized and must remain within `MCM_SOURCE_DIRS`.
 
 See `.env.example` for the complete deployment template.
+
+### Migrating legacy Compose paths
+
+Earlier local Compose files could be customized with separate `MCM_PRIVATE_DATA_DIR`,
+`MCM_WORK_DIR`, and `MCM_CLIP_DIR` values. The current Compose template uses one host `MCM_DATA`
+root instead. Before starting the new stack, place the existing `private`, `work`, and `clips`
+directories under the chosen `MCM_DATA` directory, or set `MCM_DATA` to the existing parent that
+already contains them. Keep your Plex source directory as a sibling such as `./sources`, not inside
+`MCM_DATA`.

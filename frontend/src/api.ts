@@ -2,8 +2,8 @@ import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
   ClipCreateRequest,
-  ClipCreateResult,
   HealthResponse,
+  JobSnapshot,
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSessionSnapshot,
@@ -86,11 +86,18 @@ export async function fetchPlexSessions(): Promise<PlexSessionSnapshot> {
   return parseResponse<PlexSessionSnapshot>(response, "Plex sessions request");
 }
 
-export async function createClip(request: ClipCreateRequest): Promise<ClipCreateResult> {
+export async function createClip(request: ClipCreateRequest): Promise<JobSnapshot> {
   const response = await fetch("/api/clips", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
-  return parseResponse<ClipCreateResult>(response, "Clip request");
+  return parseResponse<JobSnapshot>(response, "Clip request");
+}
+
+export async function fetchJob(jobId: string): Promise<JobSnapshot> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<JobSnapshot>(response, "Job request");
 }

@@ -16,4 +16,4 @@ async def test_alembic_initializes_sqlite_database(tmp_path) -> None:
         await engine.dispose()
 
     assert healthy is True
-    assert revision == "0001_bootstrap"
+    assert revision == "0002_jobs_and_clips"

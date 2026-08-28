@@ -13,6 +13,11 @@ from mediaclipmakarr.clips import (
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.health import MediaToolInspection
 from mediaclipmakarr.plex import PlexSession, PlexSessionSnapshot
+from mediaclipmakarr.source_media import (
+    MediaStreamIdentity,
+    ResolvedSourceMedia,
+    SourceFingerprint,
+)
 
 
 def make_session(
@@ -44,6 +49,26 @@ def make_snapshot(*sessions: PlexSession, status: str = "ok") -> PlexSessionSnap
         message="Active Plex video sessions loaded.",
         sampled_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
         sessions=list(sessions),
+    )
+
+
+def make_source_media(tmp_path) -> ResolvedSourceMedia:
+    return ResolvedSourceMedia(
+        plex_path="/plex/Example.mkv",
+        local_path=str(tmp_path / "source" / "Example.mkv"),
+        fingerprint=SourceFingerprint(
+            size_bytes=123,
+            modified_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        ),
+        duration_ms=120_000,
+        video_streams=[],
+        audio_streams=[
+            MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")
+        ],
+        subtitle_streams=[],
+        selected_audio_stream=MediaStreamIdentity(
+            stream_index=1, codec_type="audio", codec_name="aac"
+        ),
     )
 
 
@@ -135,7 +160,11 @@ def test_clip_api_returns_structured_validation_errors(tmp_path, monkeypatch) ->
             details={"identity_ok": True, "libx264": True, "aac": True},
         )
 
+    async def source_media(*_args, **_kwargs):
+        return make_source_media(tmp_path)
+
     monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    monkeypatch.setattr(main_module, "resolve_and_probe_source_media", source_media)
     with TestClient(main_module.create_app(settings)) as client:
         client.app.state.plex_session_poller._snapshot = make_snapshot(make_session())
 
@@ -159,7 +188,7 @@ def test_clip_api_returns_structured_validation_errors(tmp_path, monkeypatch) ->
         )
 
     assert valid_response.status_code == 200
-    assert valid_response.json()["valid"] is True
-    assert valid_response.json()["duration_ms"] == 55_545
+    assert valid_response.json()["state"] in {"QUEUED", "RUNNING", "FAILED"}
+    assert valid_response.json()["type"] == "clip_create"
     assert invalid_response.status_code == 422
     assert invalid_response.json()["detail"]["code"] == "CLIP_RANGE_ORDER"
