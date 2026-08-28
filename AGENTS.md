@@ -32,7 +32,7 @@ Prioritize tests for:
 - durable-state/revision conflicts;
 - security-sensitive behavior;
 - real regressions.
-- do not create temporary test harnesses that can't be reused in the future. only write it if it's worth using more than once.
+Do not create temporary test harnesses that cannot be reused. Write a harness only if it is worth using more than once.
 
 Avoid broad browser automation, snapshot tests, exact HTML/CSS assertions, or tests that merely restate framework behavior unless a demonstrated regression justifies them.
 
