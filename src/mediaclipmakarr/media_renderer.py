@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
@@ -17,12 +19,20 @@ ProgressCallback = Callable[[float, str], Awaitable[None]]
 
 TEXT_SUBTITLE_PREROLL_MS = 5_000
 BITMAP_SUBTITLE_PROBE_WINDOW_MS = 15_000
+SUPPORTED_FONT_ATTACHMENT_CODECS = {"ttf", "otf", "ttc", "woff", "woff2"}
+SUPPORTED_FONT_ATTACHMENT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".woff", ".woff2"}
 
 
 @dataclass(frozen=True, slots=True)
 class RenderedClipFile:
     path: Path
     duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTextSubtitle:
+    path: Path
+    fonts_dir: Path
 
 
 async def render_clip_file(
@@ -37,14 +47,25 @@ async def render_clip_file(
 
     duration_ms = plan.source_end_ms - plan.source_start_ms
     subtitle_preroll_ms = await _subtitle_preroll_ms(plan, settings)
+    prepared_subtitle = await _prepare_text_subtitle_file(
+        plan,
+        settings,
+        output_dir,
+        subtitle_preroll_ms=subtitle_preroll_ms,
+    )
     argv = build_ffmpeg_clip_args(
         plan,
         settings,
         output_path,
         subtitle_preroll_ms=subtitle_preroll_ms,
-        work_dir=output_dir,
+        prepared_text_subtitle=prepared_subtitle,
     )
-    await _run_ffmpeg_with_progress(argv, duration_ms=duration_ms, progress=progress)
+    await _run_ffmpeg_with_progress(
+        argv,
+        duration_ms=duration_ms,
+        progress=progress,
+        cwd=output_dir,
+    )
     return RenderedClipFile(path=output_path, duration_ms=duration_ms)
 
 
@@ -60,7 +81,7 @@ def build_ffmpeg_clip_args(
     output_path: Path,
     *,
     subtitle_preroll_ms: int = 0,
-    work_dir: Path | None = None,
+    prepared_text_subtitle: PreparedTextSubtitle | None = None,
 ) -> list[str]:
     duration_seconds = (plan.source_end_ms - plan.source_start_ms) / 1000
     decode_start_ms = max(0, plan.source_start_ms - subtitle_preroll_ms)
@@ -81,7 +102,11 @@ def build_ffmpeg_clip_args(
         f"{input_duration_seconds:.3f}",
     ]
 
-    subtitle_filter = _subtitle_video_filter(plan, preroll_seconds, work_dir)
+    subtitle_filter = _subtitle_video_filter(
+        plan,
+        preroll_seconds,
+        prepared_text_subtitle,
+    )
     if subtitle_filter.complex_filter:
         argv.extend(["-filter_complex", subtitle_filter.filter_value])
     else:
@@ -96,37 +121,37 @@ def build_ffmpeg_clip_args(
 
     argv.extend(
         [
-        "-map",
-        subtitle_filter.video_map,
-        "-map",
-        subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
-        "-sn",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "18",
-        "-preset",
-        plan.x264_preset,
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ac",
-        "2",
-        "-ar",
-        "48000",
-        "-movflags",
-        "+faststart",
-        "-metadata",
-        f"title={plan.title}",
-        "-metadata",
-        f"comment={metadata}",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        os.fspath(output_path),
+            "-map",
+            subtitle_filter.video_map,
+            "-map",
+            subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
+            "-sn",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            plan.x264_preset,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-movflags",
+            "+faststart",
+            "-metadata",
+            f"title={plan.title}",
+            "-metadata",
+            f"comment={metadata}",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            os.fspath(output_path),
         ]
     )
     return argv
@@ -141,7 +166,9 @@ class VideoFilterPlan:
 
 
 def _subtitle_video_filter(
-    plan: ClipRenderPlan, preroll_seconds: float, work_dir: Path | None
+    plan: ClipRenderPlan,
+    preroll_seconds: float,
+    prepared_text_subtitle: PreparedTextSubtitle | None,
 ) -> VideoFilterPlan:
     base = (
         "scale=w='min(1920,iw)':h='min(1080,ih)':"
@@ -154,14 +181,25 @@ def _subtitle_video_filter(
     strategy = plan.selected_subtitle.strategy
     stream = plan.selected_subtitle.stream
     if strategy == "embedded_text" and stream is not None:
-        source = _filtergraph_quote(plan.source_media.local_path)
-        subtitle_ordinal = _subtitle_stream_ordinal(plan, stream.stream_index)
-        fonts_dir = _font_attachments_dir(work_dir)
+        if prepared_text_subtitle is None:
+            raise ValueError("Embedded text subtitles must be prepared before rendering.")
+        source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
         fonts_arg = (
-            f":fontsdir={_filtergraph_quote(os.fspath(fonts_dir))}" if fonts_dir else ""
+            f":fontsdir={_filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.fonts_dir))}"
         )
         return VideoFilterPlan(
-            f"{base},subtitles=filename={source}:si={subtitle_ordinal}{fonts_arg},{trim}",
+            f"{base},subtitles=filename={source}{fonts_arg},{trim}",
+            f"0:{plan.source_media.video_streams[0].stream_index}",
+        )
+    if strategy == "external_text" and stream is not None:
+        if prepared_text_subtitle is None:
+            raise ValueError("External text subtitles must be prepared before rendering.")
+        source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
+        fonts_arg = (
+            f":fontsdir={_filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.fonts_dir))}"
+        )
+        return VideoFilterPlan(
+            f"{base},subtitles=filename={source}{fonts_arg},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
         )
     if strategy == "bitmap" and stream is not None:
@@ -193,21 +231,153 @@ def _filtergraph_quote(value: str) -> str:
     return f"'{escaped}'"
 
 
-def _subtitle_stream_ordinal(plan: ClipRenderPlan, stream_index: int) -> int:
-    for ordinal, stream in enumerate(plan.source_media.subtitle_streams):
-        if stream.stream_index == stream_index:
-            return ordinal
-    raise ValueError(
-        f"Selected subtitle stream {stream_index} is not present in source media."
+def _prepared_filter_path(path: Path) -> str:
+    if path.name == "fonts":
+        relative = Path("fonts")
+    else:
+        relative = Path("subtitles") / path.name
+    return relative.as_posix()
+
+
+async def _prepare_text_subtitle_file(
+    plan: ClipRenderPlan,
+    settings: Settings,
+    work_dir: Path,
+    *,
+    subtitle_preroll_ms: int,
+) -> PreparedTextSubtitle | None:
+    strategy = plan.selected_subtitle.strategy
+    stream = plan.selected_subtitle.stream
+    if not plan.selected_subtitle.enabled or strategy not in {"embedded_text", "external_text"}:
+        return None
+    if stream is None:
+        raise ValueError("Selected text subtitle stream is missing.")
+
+    subtitles_dir = work_dir / "subtitles"
+    fonts_dir = work_dir / "fonts"
+    await asyncio.to_thread(subtitles_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(fonts_dir.mkdir, parents=True, exist_ok=True)
+    prepared = subtitles_dir / _prepared_subtitle_filename(stream.codec_name)
+
+    if strategy == "external_text":
+        await _download_external_text_subtitle(plan, prepared)
+    else:
+        await _extract_embedded_text_subtitle(
+            plan,
+            settings,
+            prepared,
+            subtitle_preroll_ms=subtitle_preroll_ms,
+        )
+    await _extract_font_attachments(plan, settings, fonts_dir)
+    return PreparedTextSubtitle(path=prepared, fonts_dir=fonts_dir)
+
+
+def _prepared_subtitle_filename(codec_name: str | None) -> str:
+    codec = (codec_name or "").casefold()
+    extension = {
+        "ass": "ass",
+        "ssa": "ass",
+        "subrip": "srt",
+        "webvtt": "vtt",
+        "mov_text": "srt",
+        "text": "srt",
+    }.get(codec, "ass")
+    return f"selected-subtitle.{extension}"
+
+
+async def _extract_embedded_text_subtitle(
+    plan: ClipRenderPlan,
+    settings: Settings,
+    output_path: Path,
+    *,
+    subtitle_preroll_ms: int,
+) -> None:
+    stream = plan.selected_subtitle.stream
+    if stream is None:
+        raise ValueError("Selected text subtitle stream is missing.")
+    decode_start_ms = max(0, plan.source_start_ms - subtitle_preroll_ms)
+    preroll_seconds = (plan.source_start_ms - decode_start_ms) / 1000
+    duration_seconds = _duration_seconds(plan) + preroll_seconds
+    await run_command(
+        [
+            settings.ffmpeg_path,
+            "-hide_banner",
+            "-y",
+            "-ss",
+            f"{decode_start_ms / 1000:.3f}",
+            "-i",
+            plan.source_media.local_path,
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-map",
+            f"0:{stream.stream_index}",
+            "-c:s",
+            _subtitle_encoder(stream.codec_name),
+            os.fspath(output_path),
+        ],
+        timeout_seconds=settings.subprocess_timeout_seconds,
     )
 
 
-def _font_attachments_dir(work_dir: Path | None) -> Path | None:
-    if work_dir is None:
-        return None
-    fonts_dir = work_dir / "fonts"
-    fonts_dir.mkdir(parents=True, exist_ok=True)
-    return fonts_dir
+def _subtitle_encoder(codec_name: str | None) -> str:
+    codec = (codec_name or "").casefold()
+    if codec in {"ass", "ssa"}:
+        return "ass"
+    if codec == "webvtt":
+        return "webvtt"
+    return "srt"
+
+
+async def _download_external_text_subtitle(
+    plan: ClipRenderPlan, output_path: Path
+) -> None:
+    external_url = plan.selected_subtitle.external_url
+    if not external_url:
+        raise ValueError("Selected external subtitle has no download URL.")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        response = await client.get(external_url)
+        response.raise_for_status()
+    await asyncio.to_thread(output_path.write_bytes, response.content)
+
+
+async def _extract_font_attachments(
+    plan: ClipRenderPlan, settings: Settings, fonts_dir: Path
+) -> None:
+    attachment_indexes = [
+        attachment.stream_index
+        for attachment in plan.source_media.attachment_streams
+        if _is_supported_font_attachment(attachment.codec_name, attachment.title)
+    ]
+    if not attachment_indexes:
+        return
+    dump_args = [
+        value
+        for stream_index in attachment_indexes
+        for value in (f"-dump_attachment:{stream_index}", "")
+    ]
+    await run_command(
+        [
+            settings.ffmpeg_path,
+            "-hide_banner",
+            "-y",
+            *dump_args,
+            "-i",
+            plan.source_media.local_path,
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout_seconds=settings.subprocess_timeout_seconds,
+        cwd=fonts_dir,
+    )
+
+
+def _is_supported_font_attachment(codec_name: str | None, filename: str | None) -> bool:
+    codec = (codec_name or "").casefold()
+    if codec in SUPPORTED_FONT_ATTACHMENT_CODECS:
+        return True
+    suffix = Path(filename or "").suffix.casefold()
+    return suffix in SUPPORTED_FONT_ATTACHMENT_EXTENSIONS
 
 
 async def _subtitle_preroll_ms(plan: ClipRenderPlan, settings: Settings) -> int:
@@ -307,11 +477,13 @@ async def _run_ffmpeg_with_progress(
     *,
     duration_ms: int,
     progress: ProgressCallback,
+    cwd: Path | None = None,
 ) -> None:
     await progress(0.0, "Starting FFmpeg.")
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
+            cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

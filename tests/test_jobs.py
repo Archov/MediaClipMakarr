@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import mediaclipmakarr.jobs as jobs_module
+import mediaclipmakarr.media_renderer as media_renderer_module
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.jobs import (
@@ -21,7 +22,12 @@ from mediaclipmakarr.jobs import (
     transition_to_finalizing,
     update_running_job,
 )
-from mediaclipmakarr.media_renderer import RenderedClipFile, build_ffmpeg_clip_args
+from mediaclipmakarr.media_renderer import (
+    PreparedTextSubtitle,
+    RenderedClipFile,
+    build_ffmpeg_clip_args,
+    render_clip_file,
+)
 from mediaclipmakarr.plex import PlexSession
 from mediaclipmakarr.render_plan import build_clip_render_plan
 from mediaclipmakarr.source_media import (
@@ -32,6 +38,7 @@ from mediaclipmakarr.source_media import (
     VideoColorMetadata,
     VideoStreamIdentity,
 )
+from mediaclipmakarr.subprocesses import CommandResult
 
 
 def source_media(source_file: Path) -> ResolvedSourceMedia:
@@ -245,6 +252,14 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
                     language="eng",
                 )
             ],
+            "attachment_streams": [
+                MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="attachment",
+                    codec_name="ttf",
+                    title="Example.ttf",
+                )
+            ],
             "selected_subtitle": SubtitleSelection(
                 enabled=True,
                 stream=MediaStreamIdentity(
@@ -270,22 +285,28 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
         Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
         tmp_path / "out.mp4",
         subtitle_preroll_ms=1_000,
-        work_dir=tmp_path / "job",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "job" / "subtitles" / "selected-subtitle.ass",
+            fonts_dir=tmp_path / "job" / "fonts",
+        ),
     )
 
     assert ["-ss", "0.000"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
     assert ["-t", "4.000"] == argv[argv.index("-t") : argv.index("-t") + 2]
     vf = argv[argv.index("-vf") + 1]
     assert "subtitles=" in vf
-    assert "si=0" in vf
+    assert "filename=" in vf
+    assert "selected-subtitle.ass" in vf
+    assert ":si=" not in vf
     assert "trim=start=1.000:duration=3.000" in vf
     assert ["-af", "atrim=start=1.000,asetpts=PTS-STARTPTS"] == argv[
         argv.index("-af") : argv.index("-af") + 2
     ]
 
 
-def test_text_subtitle_filter_escapes_apostrophe_and_uses_subtitle_ordinal(
-    tmp_path,
+@pytest.mark.asyncio
+async def test_embedded_text_subtitle_is_prepared_before_libass_render(
+    monkeypatch, tmp_path
 ) -> None:
     source_dir = tmp_path / "Young Ladies Don't Play Fighting Games"
     source_dir.mkdir()
@@ -307,6 +328,14 @@ def test_text_subtitle_filter_escapes_apostrophe_and_uses_subtitle_ordinal(
                     language="jpn",
                 ),
             ],
+            "attachment_streams": [
+                MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="attachment",
+                    codec_name="ttf",
+                    title="Show Font.ttf",
+                )
+            ],
             "selected_subtitle": SubtitleSelection(
                 enabled=True,
                 stream=MediaStreamIdentity(
@@ -326,21 +355,56 @@ def test_text_subtitle_filter_escapes_apostrophe_and_uses_subtitle_ordinal(
         source_media=media,
         x264_preset="veryfast",
     )
+    settings = Settings(
+        _env_file=None,
+        work_dir=tmp_path / "work",
+        ffmpeg_path=Path("ffmpeg-test"),
+        subprocess_timeout_seconds=7,
+    )
+    commands: list[tuple[str, ...]] = []
+    render_argv: list[str] | None = None
+    render_cwd: Path | None = None
 
-    argv = build_ffmpeg_clip_args(
+    async def fake_run_command(argv, **kwargs):
+        normalized = tuple(str(value) for value in argv)
+        commands.append(normalized)
+        assert kwargs["timeout_seconds"] == 7
+        return CommandResult(normalized, 0, "", "")
+
+    async def fake_render(argv, *, duration_ms, progress, cwd=None):
+        nonlocal render_argv, render_cwd
+        render_argv = [str(value) for value in argv]
+        render_cwd = cwd
+        await progress(1.0, "rendered")
+
+    monkeypatch.setattr(media_renderer_module, "run_command", fake_run_command)
+    monkeypatch.setattr(media_renderer_module, "_run_ffmpeg_with_progress", fake_render)
+
+    rendered = await render_clip_file(
         plan,
-        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
-        tmp_path / "out.mp4",
-        subtitle_preroll_ms=1_000,
-        work_dir=tmp_path / "job",
+        settings,
+        progress=lambda _progress, _message: asyncio.sleep(0),
     )
 
-    vf = argv[argv.index("-vf") + 1]
+    assert rendered.duration_ms == 3000
+    assert len(commands) == 2
+    subtitle_extract = commands[0]
+    assert subtitle_extract[subtitle_extract.index("-i") + 1] == str(source_file.resolve())
+    assert ["-map", "0:3"] == list(subtitle_extract)[
+        subtitle_extract.index("-map") : subtitle_extract.index("-map") + 2
+    ]
+    assert subtitle_extract[-1].endswith("selected-subtitle.ass")
+    font_extract = commands[1]
+    assert "-dump_attachment:4" in font_extract
+
+    assert render_argv is not None
+    assert render_cwd == settings.resolved_work_dir / "jobs" / plan.job_id
+    vf = render_argv[render_argv.index("-vf") + 1]
     subtitle_filter = next(part for part in vf.split(",") if part.startswith("subtitles="))
-    assert "Young Ladies Don'\\''t Play Fighting Games" in subtitle_filter
-    assert ":si=1:" in subtitle_filter
-    assert ":si=3" not in subtitle_filter
-    assert "fontsdir=" in subtitle_filter
+    assert "Young Ladies" not in subtitle_filter
+    assert "filename='subtitles/selected-subtitle.ass'" in subtitle_filter
+    assert ":si=" not in subtitle_filter
+    assert "fontsdir='fonts'" in subtitle_filter
 
 
 def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> None:
