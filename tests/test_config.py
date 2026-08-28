@@ -19,6 +19,9 @@ def test_writable_directories_cannot_overlap_source_media(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("field", ["database_filename", "process_lock_filename"])
-def test_application_data_filenames_cannot_escape_private_directory(field) -> None:
+@pytest.mark.parametrize("unsafe_filename", ["../outside", "C:outside"])
+def test_application_data_filenames_cannot_escape_private_directory(
+    field, unsafe_filename
+) -> None:
     with pytest.raises(ValueError, match="must be plain filenames"):
-        Settings(_env_file=None, **{field: "../outside"})
+        Settings(_env_file=None, **{field: unsafe_filename})

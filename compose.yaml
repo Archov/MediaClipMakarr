@@ -2,7 +2,7 @@ services:
   mediaclipmakarr:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       MCM_SOURCE_DIRS: '["/media"]'
     volumes:

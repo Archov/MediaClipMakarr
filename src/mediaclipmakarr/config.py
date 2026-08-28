@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     @field_validator("database_filename", "process_lock_filename")
     @classmethod
     def require_safe_filename(cls, value: str) -> str:
-        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        if not value or value in {".", ".."} or any(
+            separator in value for separator in ("/", "\\", ":")
+        ):
             raise ValueError("Application data filenames must be plain filenames without paths.")
         return value
 

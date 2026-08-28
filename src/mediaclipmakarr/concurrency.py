@@ -26,7 +26,11 @@ class BlockingIOExecutor:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, partial(function, *args, **kwargs))
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         if not self._closed:
             self._closed = True
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            await asyncio.to_thread(
+                self._executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -90,8 +91,15 @@ async def run_command(
             asyncio.gather(stdout_task, stderr_task, process.wait()),
             timeout=timeout_seconds,
         )
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        raise
     except TimeoutError as error:
-        process.kill()
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
         await process.wait()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         raise CommandTimeoutError(

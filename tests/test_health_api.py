@@ -33,6 +33,7 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     with TestClient(main_module.create_app(settings)) as client:
         response = client.get("/api/health")
         spa_response = client.get("/clips/future-route")
+        bare_api_response = client.get("/api")
         missing_api_response = client.get("/api/not-a-real-endpoint")
 
     assert response.status_code == 200
@@ -44,4 +45,5 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     assert str(tmp_path) not in serialized
     assert spa_response.status_code == 200
     assert "SPA shell" in spa_response.text
+    assert bare_api_response.status_code == 404
     assert missing_api_response.status_code == 404

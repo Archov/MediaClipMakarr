@@ -55,18 +55,23 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        terminated = set()
         for process in processes:
             if process.poll() is None:
+                terminated.add(process)
                 process.terminate()
         for process in processes:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
         failed = [
-            process.returncode for process in processes if process.returncode not in (0, None)
+            process.returncode
+            for process in processes
+            if process not in terminated and process.returncode not in (0, None)
         ]
-        if failed and all(code not in (-15, 1) for code in failed):
+        if failed:
             raise SystemExit(f"A development process stopped unexpectedly: {failed}")
 
 

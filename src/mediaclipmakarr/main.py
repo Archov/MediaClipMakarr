@@ -38,9 +38,9 @@ class SPAStaticFiles(StaticFiles):
                 if isinstance(raw_path, bytes)
                 else scope.get("path", path)
             )
-            is_spa_route = error.status_code == 404 and not request_path.lstrip("/").startswith(
-                "api/"
-            )
+            normalized_path = request_path.lstrip("/")
+            is_api_path = normalized_path == "api" or normalized_path.startswith("api/")
+            is_spa_route = error.status_code == 404 and not is_api_path
             if not is_spa_route:
                 raise
             return await super().get_response("index.html", scope)
@@ -88,7 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await database_engine.dispose()
             if process_lock is not None:
                 await executor.run(process_lock.release)
-            executor.shutdown()
+            await executor.shutdown()
 
     app = FastAPI(
         title=application_settings.app_name,

@@ -9,7 +9,6 @@ RUN npm run build
 
 FROM debian:bookworm-slim AS media-tools
 ARG TARGETARCH
-ARG JELLYFIN_FFMPEG_VERSION=7.1.4-3
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/* \
@@ -19,7 +18,7 @@ RUN apt-get update \
          *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
        esac \
     && curl --fail --location --show-error --silent \
-         "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JELLYFIN_FFMPEG_VERSION}/${asset}" \
+         "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v7.1.4-3/${asset}" \
          --output /tmp/jellyfin-ffmpeg.tar.xz \
     && echo "${checksum}  /tmp/jellyfin-ffmpeg.tar.xz" | sha256sum --check --strict \
     && mkdir -p /opt/jellyfin-ffmpeg \

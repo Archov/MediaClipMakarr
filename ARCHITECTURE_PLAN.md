@@ -110,7 +110,7 @@ Human-readable storage is an intentional product feature:
 
 - Derive directories from the current library and filenames from the current automatic or custom title.
 - Sanitize invalid cross-platform characters, reserved names, trailing characters, and excessive length while preserving readable Unicode.
-- Resolve collisions using deterministic ` - 2`, ` - 3` suffixes.
+- Resolve collisions using deterministic `- 2`, `- 3` suffixes.
 - Title or library changes intentionally rename or move the MP4.
 - UUIDs remain internal database and embedded-metadata identifiers.
 - Keep thumbnails, GIFs, previews, and temporary files outside the browsable MP4 tree.

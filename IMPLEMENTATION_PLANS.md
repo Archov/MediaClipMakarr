@@ -169,7 +169,7 @@ A user can configure Plex, see active video sessions, select a session, capture 
 
 - A real SDR source can be captured from an active Plex session through playback/download without manual filesystem work.
 - ffprobe confirms H.264/AAC, `yuv420p`, expected dimensions, duration tolerance, and selected audio.
-- The output filename is readable, the metadata envelope round-trips, and a collision produces ` - 2` rather than overwriting.
+- The output filename is readable, the metadata envelope round-trips, and a collision produces `- 2` rather than overwriting.
 - One short SDR fixture protects the render command and output contract; no broad UI automation is required.
 
 **Depends on:** P1-05, P1-06.
