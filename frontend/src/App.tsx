@@ -35,7 +35,7 @@ import {
   createTheme,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { fetchHealth, fetchSettings, testPlexConnection, updateSettings } from "./api";
 import type {
@@ -85,7 +85,7 @@ function ManagedLabel({ managed }: { managed: boolean }) {
 function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   const queryClient = useQueryClient();
   const [plexUrl, setPlexUrl] = useState(settings.plex_url);
-  const [plexToken, setPlexToken] = useState("");
+  const plexTokenInput = useRef<HTMLInputElement>(null);
   const [timezone, setTimezone] = useState(settings.timezone);
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
@@ -93,7 +93,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 
   useEffect(() => {
     setPlexUrl(settings.plex_url);
-    setPlexToken("");
+    if (plexTokenInput.current) plexTokenInput.current.value = "";
     setTimezone(settings.timezone);
     setX264Preset(settings.x264_preset);
     setMappings(settings.source_path_mappings);
@@ -114,9 +114,11 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    const submittedToken = String(new FormData(form).get("plex_token") ?? "").trim();
     save.mutate({
       ...(!managed("plex_url") && { plex_url: plexUrl }),
-      ...(!managed("plex_token") && plexToken.trim() && { plex_token: plexToken }),
+      ...(!managed("plex_token") && submittedToken && { plex_token: submittedToken }),
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
       ...(!managed("timezone") && { timezone }),
       ...(!managed("x264_preset") && { x264_preset: x264Preset }),
@@ -167,11 +169,11 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
             <TextField
               fullWidth
               type="password"
+              name="plex_token"
               label="Plex token"
               placeholder={settings.plex_token_configured ? "Configured — leave blank to keep" : "Enter token"}
-              value={plexToken}
+              inputRef={plexTokenInput}
               disabled={managed("plex_token")}
-              onChange={(event) => setPlexToken(event.target.value)}
               helperText="A blank value preserves the current token."
             />
             <ManagedLabel managed={managed("plex_token")} />
