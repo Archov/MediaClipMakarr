@@ -1,0 +1,12 @@
+{
+  "name": "mediaclipmakarr",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "setup": "python scripts/bootstrap.py",
+    "dev": "python scripts/dev.py",
+    "build": "npm --prefix frontend run build",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "test": "python -m pytest tests -q"
+  }
+}

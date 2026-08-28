@@ -1,0 +1,18 @@
+services:
+  mediaclipmakarr:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MCM_SOURCE_DIRS: '["/media"]'
+    volumes:
+      - private-data:/data/private
+      - work-data:/data/work
+      - clip-library:/data/clips
+      - ./data/sources:/media:ro
+    restart: unless-stopped
+
+volumes:
+  private-data:
+  work-data:
+  clip-library:
