@@ -40,6 +40,20 @@ class Settings(BaseSettings):
     alembic_script_dir: Path = Path("alembic")
     dev_api_port: int = Field(default=8000, ge=1, le=65535)
     dev_web_port: int = Field(default=5173, ge=1, le=65535)
+    plex_url: str | None = None
+    plex_token: str | None = None
+    source_path_mappings: str | None = None
+    timezone: str | None = None
+    x264_preset: str | None = None
+
+    @field_validator(
+        "plex_url", "plex_token", "source_path_mappings", "timezone", "x264_preset", mode="before"
+    )
+    @classmethod
+    def ignore_empty_application_override(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("database_filename", "process_lock_filename")
     @classmethod

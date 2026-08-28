@@ -3,13 +3,23 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from mediaclipmakarr.application_settings import (
+    ApplicationSettingsResponse,
+    ApplicationSettingsUpdate,
+    get_effective_application_settings,
+    managed_update_fields,
+    save_persisted_application_settings,
+    serialize_update,
+)
 from mediaclipmakarr.concurrency import BlockingIOExecutor
 from mediaclipmakarr.config import Settings, validate_path_layout
 from mediaclipmakarr.database import check_database, create_database_engine, upgrade_database
@@ -19,6 +29,11 @@ from mediaclipmakarr.health import (
     initialize_writable_directories,
     inspect_directories,
     inspect_media_tools,
+)
+from mediaclipmakarr.plex import (
+    PlexConnectionRequest,
+    PlexConnectionResult,
+    test_plex_connection,
 )
 from mediaclipmakarr.process_lock import ProcessLock
 
@@ -97,6 +112,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = application_settings
 
+    @app.exception_handler(RequestValidationError)
+    async def redacted_validation_error(
+        _request: Request, error: RequestValidationError
+    ) -> JSONResponse:
+        errors = []
+        for validation_error in error.errors():
+            sanitized_error = dict(validation_error)
+            sanitized_error.pop("input", None)
+            errors.append(sanitized_error)
+        return JSONResponse(
+            status_code=422,
+            content=jsonable_encoder({"detail": errors}),
+        )
+
     @app.get("/api/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:
         database_ok, revision = await check_database(request.app.state.database_engine)
@@ -132,6 +161,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_tools=media_tools,
             directories=directories,
         )
+
+    @app.get("/api/settings", response_model=ApplicationSettingsResponse)
+    async def get_application_settings(request: Request) -> ApplicationSettingsResponse:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        return effective.to_response()
+
+    @app.put("/api/settings", response_model=ApplicationSettingsResponse)
+    async def update_application_settings(
+        update: ApplicationSettingsUpdate, request: Request
+    ) -> ApplicationSettingsResponse:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        managed_fields = managed_update_fields(update, effective.environment_managed)
+        if managed_fields:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ENVIRONMENT_MANAGED_SETTING",
+                    "message": "Environment-managed settings cannot be changed through the API.",
+                    "fields": managed_fields,
+                },
+            )
+
+        changes_plex_url = update.plex_url is not None and update.plex_url != effective.plex_url
+        supplies_plex_token = bool(update.plex_token and update.plex_token.strip())
+        if (
+            changes_plex_url
+            and effective.plex_token
+            and not supplies_plex_token
+            and not update.clear_plex_token
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PLEX_CREDENTIALS_REQUIRED",
+                    "message": "Enter the Plex token again when changing the Plex server URL.",
+                },
+            )
+
+        values = serialize_update(update)
+        if values:
+            await save_persisted_application_settings(
+                request.app.state.database_engine, values
+            )
+        updated = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        return updated.to_response()
+
+    @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
+    async def test_current_plex_connection(
+        request: Request, connection: PlexConnectionRequest | None = None
+    ) -> PlexConnectionResult:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        if connection is None or connection.plex_url is None or connection.plex_token is None:
+            candidate_url = effective.plex_url
+            candidate_token = effective.plex_token
+        else:
+            candidate_url = connection.plex_url
+            candidate_token = connection.plex_token.get_secret_value().strip()
+        return await test_plex_connection(candidate_url, candidate_token)
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():
