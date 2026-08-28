@@ -259,6 +259,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               name="plex_token"
               label="Plex token"
               placeholder={settings.plex_token_configured ? "●●●●●●●●" : "Enter token"}
+              slotProps={{ inputLabel: { shrink: true } }}
               inputRef={plexTokenInput}
               disabled={managed("plex_token")}
               onChange={() => setConnection(null)}
