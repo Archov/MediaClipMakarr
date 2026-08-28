@@ -3,13 +3,21 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from mediaclipmakarr.application_settings import (
+    ApplicationSettingsResponse,
+    ApplicationSettingsUpdate,
+    get_effective_application_settings,
+    managed_update_fields,
+    save_persisted_application_settings,
+    serialize_update,
+)
 from mediaclipmakarr.concurrency import BlockingIOExecutor
 from mediaclipmakarr.config import Settings, validate_path_layout
 from mediaclipmakarr.database import check_database, create_database_engine, upgrade_database
@@ -20,6 +28,7 @@ from mediaclipmakarr.health import (
     inspect_directories,
     inspect_media_tools,
 )
+from mediaclipmakarr.plex import PlexConnectionResult, test_plex_connection
 from mediaclipmakarr.process_lock import ProcessLock
 
 logger = logging.getLogger(__name__)
@@ -132,6 +141,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_tools=media_tools,
             directories=directories,
         )
+
+    @app.get("/api/settings", response_model=ApplicationSettingsResponse)
+    async def get_application_settings(request: Request) -> ApplicationSettingsResponse:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        return effective.to_response()
+
+    @app.put("/api/settings", response_model=ApplicationSettingsResponse)
+    async def update_application_settings(
+        update: ApplicationSettingsUpdate, request: Request
+    ) -> ApplicationSettingsResponse:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        managed_fields = managed_update_fields(update, effective.environment_managed)
+        if managed_fields:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ENVIRONMENT_MANAGED_SETTING",
+                    "message": "Environment-managed settings cannot be changed through the API.",
+                    "fields": managed_fields,
+                },
+            )
+
+        values = serialize_update(update)
+        if values:
+            await save_persisted_application_settings(
+                request.app.state.database_engine, values
+            )
+        updated = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        return updated.to_response()
+
+    @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
+    async def test_current_plex_connection(request: Request) -> PlexConnectionResult:
+        effective = await get_effective_application_settings(
+            request.app.state.database_engine, application_settings
+        )
+        return await test_plex_connection(effective.plex_url, effective.plex_token)
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():

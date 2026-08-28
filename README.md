@@ -1,9 +1,9 @@
 # MediaClipMakarr
 
 MediaClipMakarr is a self-hosted application for creating precise, compatible clips from media
-currently playing in Plex. This branch implements the Phase 1 application foundation: a FastAPI
-API, React/Vite SPA, SQLite/Alembic initialization, exclusive process locking, runtime health
-reporting, and a production container with pinned Jellyfin FFmpeg.
+currently playing in Plex. The current Phase 1 application includes its FastAPI/React foundation,
+runtime health reporting, persisted Plex and encoding settings, ordered source-path mappings, and
+a production container with pinned Jellyfin FFmpeg.
 
 ## Local development (Windows, macOS, or Linux)
 
@@ -53,6 +53,12 @@ npm --prefix frontend run build
 sanitized directory readiness. It does not return configured directory paths, environment values,
 or credentials.
 
+`GET /api/settings` reports the effective application settings and environment-managed fields.
+It never returns the Plex token, only `plex_token_configured`. `PUT /api/settings` preserves the
+existing token when `plex_token` is empty; send `{"clear_plex_token": true}` to explicitly clear it.
+`POST /api/settings/plex/test` tests the saved effective Plex URL/token without returning either
+credential.
+
 ## Configuration
 
 All bootstrap environment variables use the `MCM_` prefix. The main values are:
@@ -62,5 +68,17 @@ All bootstrap environment variables use the `MCM_` prefix. The main values are:
 - `MCM_FFMPEG_PATH` and `MCM_FFPROBE_PATH`
 - `MCM_EXPECTED_FFMPEG_IDENTITY` (defaults to `7.1.4-Jellyfin`)
 - `MCM_BLOCKING_IO_WORKERS` (defaults to 4, maximum 16)
+
+Plex and encoding values are normally saved from the Settings screen. Non-empty environment
+values take precedence and make their corresponding UI/API fields read-only:
+
+- `MCM_PLEX_URL` and `MCM_PLEX_TOKEN`
+- `MCM_SOURCE_PATH_MAPPINGS`, an ordered JSON array of `plex_prefix`/`local_prefix` objects
+- `MCM_TIMEZONE`, as an IANA timezone name such as `America/Chicago`
+- `MCM_X264_PRESET`, from `ultrafast` through `veryslow` (default `medium`)
+
+For example, a Plex server reporting `D:\Media\Movies\Film.mkv` can map prefix `D:\Media` to
+the container prefix `/media`; a POSIX Plex server can similarly map `/srv/plex/media` to `/media`.
+Resolved paths are still canonicalized and must remain within `MCM_SOURCE_DIRS`.
 
 See `.env.example` for local examples.
