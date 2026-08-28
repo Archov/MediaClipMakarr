@@ -125,6 +125,9 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
 
   useEffect(() => {
     setPlexUrl(settings.plex_url);
+  }, [settings.plex_url]);
+
+  useEffect(() => {
     setPlexToken(tokenDraft(settings));
     setTimezone(initialTimezone(settings));
     setX264Preset(settings.x264_preset);
