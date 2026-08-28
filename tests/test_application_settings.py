@@ -141,6 +141,8 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     secret = "must-not-appear-in-a-response"
     replacement_secret = "replacement-must-also-stay-secret"
     candidate_secret = "unsaved-candidate-secret"
+    validation_secret = "validation-secret-must-not-leak"
+    partial_candidate_secret = "partial-candidate-secret-must-not-leak"
 
     with TestClient(main_module.create_app(settings)) as client:
         created = client.put("/api/settings", json={"plex_token": secret})
@@ -155,6 +157,18 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
             },
         )
         saved_connection = client.post("/api/settings/plex/test")
+        url_only_connection = client.post(
+            "/api/settings/plex/test",
+            json={"plex_url": "http://untrusted.example:32400"},
+        )
+        token_only_connection = client.post(
+            "/api/settings/plex/test",
+            json={"plex_token": partial_candidate_secret},
+        )
+        conflicting_update = client.put(
+            "/api/settings",
+            json={"plex_token": validation_secret, "clear_plex_token": True},
+        )
         cleared = client.put("/api/settings", json={"clear_plex_token": True})
 
     assert created.status_code == 200
@@ -165,17 +179,30 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert fetched.json()["plex_token_configured"] is True
     assert candidate_connection.json()["connected"] is True
     assert saved_connection.json()["connected"] is True
+    assert url_only_connection.status_code == 422
+    assert token_only_connection.status_code == 422
+    assert conflicting_update.status_code == 422
+    assert all("input" not in error for error in token_only_connection.json()["detail"])
+    assert all("input" not in error for error in conflicting_update.json()["detail"])
     assert observed_connections == [
         ("http://candidate-plex:32400", candidate_secret),
         ("", replacement_secret),
     ]
     assert cleared.json()["plex_token_configured"] is False
     serialized_responses = (
-        created.text + replaced.text + preserved.text + fetched.text + cleared.text
+        created.text
+        + replaced.text
+        + preserved.text
+        + fetched.text
+        + token_only_connection.text
+        + conflicting_update.text
+        + cleared.text
     )
     assert secret not in serialized_responses
     assert replacement_secret not in serialized_responses
     assert candidate_secret not in serialized_responses
+    assert validation_secret not in serialized_responses
+    assert partial_candidate_secret not in serialized_responses
     assert "plex_token" not in fetched.json()
 
 

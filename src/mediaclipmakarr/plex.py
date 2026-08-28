@@ -3,7 +3,7 @@ from __future__ import annotations
 from xml.etree import ElementTree
 
 import httpx
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
 from mediaclipmakarr.application_settings import normalize_plex_url
 
@@ -21,6 +21,12 @@ class PlexConnectionRequest(BaseModel):
 
     plex_url: str | None = None
     plex_token: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def require_complete_candidate(self) -> PlexConnectionRequest:
+        if (self.plex_url is None) != (self.plex_token is None):
+            raise ValueError("Provide both a Plex URL and token, or neither.")
+        return self
 
 
 async def test_plex_connection(

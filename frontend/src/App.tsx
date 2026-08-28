@@ -205,16 +205,27 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   };
   const testCurrentConnection = () => {
     const submittedToken = enteredToken(plexToken);
+    if (!submittedToken && plexUrl !== settings.plex_url) {
+      save.reset();
+      setConnection({
+        connected: false,
+        code: "PLEX_CREDENTIALS_REQUIRED",
+        message: "Enter the Plex token when testing a different server URL.",
+        server_name: null,
+        server_version: null,
+      });
+      return;
+    }
+    const candidate = submittedToken
+      ? { plex_url: plexUrl, plex_token: submittedToken }
+      : {};
     save.mutate({
       kind: "test",
       baseUpdate: {},
       plexCandidate: {
-        test: {
-          plex_url: plexUrl,
-          ...(submittedToken && { plex_token: submittedToken }),
-        },
+        test: candidate,
         save: {
-          ...(!managed("plex_url") && { plex_url: plexUrl }),
+          ...(!managed("plex_url") && submittedToken && { plex_url: plexUrl }),
           ...(!managed("plex_token") && submittedToken && { plex_token: submittedToken }),
         },
       },

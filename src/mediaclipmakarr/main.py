@@ -4,6 +4,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -110,6 +112,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = application_settings
 
+    @app.exception_handler(RequestValidationError)
+    async def redacted_validation_error(
+        _request: Request, error: RequestValidationError
+    ) -> JSONResponse:
+        errors = []
+        for validation_error in error.errors():
+            sanitized_error = dict(validation_error)
+            sanitized_error.pop("input", None)
+            errors.append(sanitized_error)
+        return JSONResponse(
+            status_code=422,
+            content=jsonable_encoder({"detail": errors}),
+        )
+
     @app.get("/api/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:
         database_ok, revision = await check_database(request.app.state.database_engine)
@@ -188,16 +204,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         effective = await get_effective_application_settings(
             request.app.state.database_engine, application_settings
         )
-        candidate_url = (
-            connection.plex_url
-            if connection is not None and connection.plex_url is not None
-            else effective.plex_url
-        )
-        candidate_token = (
-            connection.plex_token.get_secret_value().strip()
-            if connection is not None and connection.plex_token is not None
-            else effective.plex_token
-        )
+        if connection is None or connection.plex_url is None or connection.plex_token is None:
+            candidate_url = effective.plex_url
+            candidate_token = effective.plex_token
+        else:
+            candidate_url = connection.plex_url
+            candidate_token = connection.plex_token.get_secret_value().strip()
         return await test_plex_connection(candidate_url, candidate_token)
 
     frontend_dist = application_settings.resolved_frontend_dist_dir

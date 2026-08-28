@@ -38,7 +38,9 @@ docker compose up --build
 ```
 
 On macOS or Linux, use `cp .env.example .env` instead. Open
-`http://127.0.0.1:<MCM_COMPOSE_PORT>` (port `3623` in the template). `MCM_COMPOSE_SOURCE_DIR`
+`http://127.0.0.1:<MCM_COMPOSE_PORT>` (port `3623` in the template). The published port is available
+on all host interfaces so LAN clients and containerized reverse proxies can reach it; restrict
+untrusted access with the host firewall or an authenticating reverse proxy. `MCM_COMPOSE_SOURCE_DIR`
 selects the host media directory mounted read-only at `/media`; `MCM_SOURCE_DIRS` must therefore
 include `/media`. `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR` are ordinary persistent
 directories on the Docker host. Ensure custom directories exist and are writable by `MCM_PUID` and
@@ -63,8 +65,8 @@ or credentials.
 It never returns the Plex token, only `plex_token_configured`. `PUT /api/settings` preserves the
 existing token when `plex_token` is empty; send `{"clear_plex_token": true}` to explicitly clear it.
 `POST /api/settings/plex/test` can accept temporary `plex_url` and `plex_token` candidates for a
-connection test without persisting either credential. Omitted candidates fall back to the saved
-effective values, and the response never returns a token.
+connection test without persisting either credential. Candidate URL and token values must be
+provided together; omitting both uses the saved effective pair. The response never returns a token.
 
 In the Settings screen, a successful connection test automatically saves the tested Plex
 credentials. Saving a form with a new token first saves the non-Plex options, then tests the new
