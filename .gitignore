@@ -196,3 +196,4 @@ data/sources/*
 !data/clips/.gitkeep
 !data/sources/.gitkeep
 .ffs_lock
+*.ffs_lock
