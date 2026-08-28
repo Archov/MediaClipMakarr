@@ -20,7 +20,7 @@ MediaClipMakarr is designed around **fast clip capture combined with strong medi
 
 # 2. Core Product Principles
 
-### Fast capture
+## Fast capture
 
 Creating a clip should require very little interaction:
 
@@ -31,7 +31,7 @@ Creating a clip should require very little interaction:
 
 Convenience controls should make common clip lengths quick to create without requiring timeline editing.
 
-### Server-side media processing
+## Server-side media processing
 
 FFmpeg running on the MediaClipMakarr server is responsible for:
 
@@ -46,13 +46,13 @@ FFmpeg running on the MediaClipMakarr server is responsible for:
 
 The frontend controls these operations and displays their results.
 
-### Source fidelity
+## Source fidelity
 
 MediaClipMakarr should identify and use the exact media version, audio stream, and subtitle stream associated with Plex playback whenever possible.
 
 If the selected source track cannot be used, the application should explicitly ask the user to choose another available track.
 
-### Managed clips
+## Managed clips
 
 Generated clips are persistent application assets with:
 
@@ -293,11 +293,11 @@ Sources such as Dolby Vision Profile 5 that cannot be safely handled by the stan
 
 The default MediaClipMakarr clip is optimized for broad playback and sharing compatibility.
 
-### Container
+## Container
 
 MP4
 
-### Video
+## Video
 
 - H.264 / `libx264`
 - CRF 18
@@ -306,7 +306,7 @@ MP4
 - `yuv420p`
 - fast-start metadata
 
-### Resolution
+## Resolution
 
 Maximum:
 
@@ -320,7 +320,7 @@ The renderer:
 - does not upscale smaller sources;
 - produces encoder-compatible dimensions.
 
-### Audio
+## Audio
 
 - AAC-LC
 - 192 kbps
@@ -556,11 +556,11 @@ The minimum selected range is approximately 100 milliseconds.
 
 The user can:
 
-### Save as new
+## Save as new
 
 Create another managed clip while preserving its relationship to the original Plex source.
 
-### Replace existing
+## Replace existing
 
 Render the new media into a temporary file and atomically replace the existing clip only after successful completion.
 
