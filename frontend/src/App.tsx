@@ -98,6 +98,7 @@ const sessionStatusSeverity: Record<
   http_error: "warning",
   invalid_response: "error",
   unreachable: "warning",
+  error: "error",
 };
 
 function tokenDraft(settings: ApplicationSettings): string {

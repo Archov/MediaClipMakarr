@@ -233,3 +233,40 @@ def test_environment_managed_setting_cannot_be_updated_through_api(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "ENVIRONMENT_MANAGED_SETTING"
     assert response.json()["detail"]["fields"] == ["plex_url"]
+
+
+def test_effective_settings_are_cached_until_settings_update(tmp_path, monkeypatch) -> None:
+    async def healthy_media_tools(_settings):
+        return MediaToolInspection(
+            status="ok",
+            message="Media tools are ready.",
+            details={"identity_ok": True, "libx264": True, "aac": True},
+        )
+
+    calls = 0
+    original_loader = main_module.get_effective_application_settings
+
+    async def count_effective_settings_loads(engine, bootstrap):
+        nonlocal calls
+        calls += 1
+        return await original_loader(engine, bootstrap)
+
+    monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    monkeypatch.setattr(
+        main_module, "get_effective_application_settings", count_effective_settings_loads
+    )
+    settings = api_settings(tmp_path)
+
+    with TestClient(main_module.create_app(settings)) as client:
+        first_settings = client.get("/api/settings")
+        first_sessions = client.get("/api/sessions")
+        second_sessions = client.get("/api/sessions")
+        updated = client.put("/api/settings", json={"timezone": "America/Chicago"})
+        refreshed_settings = client.get("/api/settings")
+
+    assert first_settings.status_code == 200
+    assert first_sessions.status_code == 200
+    assert second_sessions.status_code == 200
+    assert updated.status_code == 200
+    assert refreshed_settings.json()["timezone"] == "America/Chicago"
+    assert calls == 2

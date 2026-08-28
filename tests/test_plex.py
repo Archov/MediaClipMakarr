@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 import httpx
 import pytest
 
+import mediaclipmakarr.plex as plex_module
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.plex import PlexSessionPoller, parse_video_sessions
 from mediaclipmakarr.plex import test_plex_connection as check_plex_connection
@@ -159,3 +163,110 @@ async def test_session_poller_reports_disappearance_without_persisting_sessions(
     assert [session.title for session in first.sessions] == ["A Movie"]
     assert second.status == "ok"
     assert second.sessions == []
+
+
+@pytest.mark.asyncio
+async def test_session_poller_converts_settings_loader_failure_to_error_snapshot(
+    monkeypatch,
+) -> None:
+    async def fail_settings_load() -> EffectiveApplicationSettings:
+        raise RuntimeError("settings cache unavailable")
+
+    logged_messages: list[str] = []
+    monkeypatch.setattr(
+        plex_module.logger,
+        "exception",
+        lambda message, *args, **kwargs: logged_messages.append(message),
+    )
+    poller = PlexSessionPoller(fail_settings_load)
+    snapshot = await poller.poll_once()
+
+    assert snapshot.status == "error"
+    assert snapshot.sessions == []
+    assert poller.version == 1
+    assert logged_messages == ["Unexpected error while polling Plex sessions."]
+
+
+@pytest.mark.asyncio
+async def test_session_poller_converts_unexpected_plex_payload_failure_to_error_snapshot(
+    monkeypatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/status/sessions"
+        return httpx.Response(
+            200,
+            content=b"""
+            <MediaContainer size="1">
+              <Video type="movie" ratingKey="501" title="A Movie"
+                viewOffset="inf" duration="90000">
+                <User id="1" title="Alice" />
+                <Player title="Living Room" machineIdentifier="player-a" state="playing" />
+                <Session id="session-a" />
+                <Media id="media-501"><Part id="part-501" /></Media>
+              </Video>
+            </MediaContainer>
+            """,
+        )
+
+    async def load_settings() -> EffectiveApplicationSettings:
+        return effective_settings()
+
+    logged_messages: list[str] = []
+    monkeypatch.setattr(
+        plex_module.logger,
+        "exception",
+        lambda message, *args, **kwargs: logged_messages.append(message),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        poller = PlexSessionPoller(load_settings, client=client)
+        snapshot = await poller.poll_once()
+
+    assert snapshot.status == "error"
+    assert snapshot.sessions == []
+    assert poller.version == 1
+    assert logged_messages == ["Unexpected error while polling Plex sessions."]
+
+
+@pytest.mark.asyncio
+async def test_session_poller_run_loop_continues_after_escaped_poll_error(monkeypatch) -> None:
+    class EscapingPoller(PlexSessionPoller):
+        calls = 0
+
+        async def poll_once(self) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("escaped poll failure")
+            return await super().poll_once()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/status/sessions"
+        return httpx.Response(200, content=b'<MediaContainer size="0" />')
+
+    async def load_settings() -> EffectiveApplicationSettings:
+        return effective_settings()
+
+    logged_messages: list[str] = []
+    monkeypatch.setattr(
+        plex_module.logger,
+        "exception",
+        lambda message, *args, **kwargs: logged_messages.append(message),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        poller = EscapingPoller(load_settings, interval_seconds=0.01, client=client)
+        task = asyncio.create_task(poller._run())
+        first_snapshot, version, changed = await poller.wait_for_change(
+            0, timeout_seconds=1.0
+        )
+        second_snapshot, _version, changed_again = await poller.wait_for_change(
+            version, timeout_seconds=1.0
+        )
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert changed is True
+    assert first_snapshot.status == "error"
+    assert changed_again is True
+    assert second_snapshot.status == "ok"
+    assert poller.version >= 2
+    assert logged_messages == ["Unexpected error escaped the Plex session poller."]

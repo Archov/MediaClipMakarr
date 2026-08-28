@@ -93,8 +93,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             database_engine = create_database_engine(application_settings.database_path)
             app.state.database_engine = database_engine
+            app.state.effective_application_settings = await get_effective_application_settings(
+                database_engine, application_settings
+            )
+
+            async def load_cached_application_settings():
+                return app.state.effective_application_settings
+
             app.state.plex_session_poller = PlexSessionPoller(
-                lambda: get_effective_application_settings(database_engine, application_settings)
+                load_cached_application_settings
             )
             await app.state.plex_session_poller.start()
 
@@ -173,18 +180,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/settings", response_model=ApplicationSettingsResponse)
     async def get_application_settings(request: Request) -> ApplicationSettingsResponse:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
-        return effective.to_response()
+        return request.app.state.effective_application_settings.to_response()
 
     @app.put("/api/settings", response_model=ApplicationSettingsResponse)
     async def update_application_settings(
         update: ApplicationSettingsUpdate, request: Request
     ) -> ApplicationSettingsResponse:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
+        effective = request.app.state.effective_application_settings
         managed_fields = managed_update_fields(update, effective.environment_managed)
         if managed_fields:
             raise HTTPException(
@@ -220,15 +222,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         updated = await get_effective_application_settings(
             request.app.state.database_engine, application_settings
         )
+        request.app.state.effective_application_settings = updated
         return updated.to_response()
 
     @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
     async def test_current_plex_connection(
         request: Request, connection: PlexConnectionRequest | None = None
     ) -> PlexConnectionResult:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
+        effective = request.app.state.effective_application_settings
         if connection is None or connection.plex_url is None or connection.plex_token is None:
             candidate_url = effective.plex_url
             candidate_token = effective.plex_token

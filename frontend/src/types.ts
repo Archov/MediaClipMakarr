@@ -73,7 +73,8 @@ export type PlexSessionSnapshotStatus =
   | "invalid_token"
   | "http_error"
   | "invalid_response"
-  | "unreachable";
+  | "unreachable"
+  | "error";
 
 export interface PlexSession {
   session_identity: string;

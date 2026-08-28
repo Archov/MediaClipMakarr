@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
@@ -14,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings, normalize_plex_url
 
+logger = logging.getLogger(__name__)
+
 PlexSessionSnapshotStatus = Literal[
     "ok",
     "not_configured",
@@ -22,6 +25,7 @@ PlexSessionSnapshotStatus = Literal[
     "http_error",
     "invalid_response",
     "unreachable",
+    "error",
 ]
 
 
@@ -300,12 +304,26 @@ class PlexSessionPoller:
                 sampled_at=utc_now(),
                 sessions=[],
             )
+        except Exception:
+            logger.exception("Unexpected error while polling Plex sessions.")
+            snapshot = self._unexpected_error_snapshot()
 
+        await self._publish_snapshot(snapshot)
+        return snapshot
+
+    async def _publish_snapshot(self, snapshot: PlexSessionSnapshot) -> None:
         async with self._condition:
             self._snapshot = snapshot
             self._version += 1
             self._condition.notify_all()
-        return snapshot
+
+    def _unexpected_error_snapshot(self) -> PlexSessionSnapshot:
+        return PlexSessionSnapshot(
+            status="error",
+            message="Plex session polling failed unexpectedly. Check the application logs.",
+            sampled_at=utc_now(),
+            sessions=[],
+        )
 
     async def wait_for_change(
         self, version: int, *, timeout_seconds: float | None = None
@@ -324,7 +342,13 @@ class PlexSessionPoller:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.interval_seconds)
-            await self.poll_once()
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Unexpected error escaped the Plex session poller.")
+                await self._publish_snapshot(self._unexpected_error_snapshot())
 
 
 def snapshot_sse_payload(snapshot: PlexSessionSnapshot) -> str:
