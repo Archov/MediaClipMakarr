@@ -28,7 +28,11 @@ from mediaclipmakarr.health import (
     inspect_directories,
     inspect_media_tools,
 )
-from mediaclipmakarr.plex import PlexConnectionResult, test_plex_connection
+from mediaclipmakarr.plex import (
+    PlexConnectionRequest,
+    PlexConnectionResult,
+    test_plex_connection,
+)
 from mediaclipmakarr.process_lock import ProcessLock
 
 logger = logging.getLogger(__name__)
@@ -178,11 +182,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return updated.to_response()
 
     @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
-    async def test_current_plex_connection(request: Request) -> PlexConnectionResult:
+    async def test_current_plex_connection(
+        request: Request, connection: PlexConnectionRequest | None = None
+    ) -> PlexConnectionResult:
         effective = await get_effective_application_settings(
             request.app.state.database_engine, application_settings
         )
-        return await test_plex_connection(effective.plex_url, effective.plex_token)
+        candidate_url = (
+            connection.plex_url
+            if connection is not None and connection.plex_url is not None
+            else effective.plex_url
+        )
+        candidate_token = (
+            connection.plex_token.get_secret_value().strip()
+            if connection is not None and connection.plex_token is not None
+            else effective.plex_token
+        )
+        return await test_plex_connection(candidate_url, candidate_token)
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():

@@ -58,3 +58,8 @@ export interface PlexConnectionResult {
   server_name: string | null;
   server_version: string | null;
 }
+
+export interface PlexConnectionRequest {
+  plex_url?: string;
+  plex_token?: string;
+}

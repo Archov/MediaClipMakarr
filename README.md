@@ -56,8 +56,9 @@ or credentials.
 `GET /api/settings` reports the effective application settings and environment-managed fields.
 It never returns the Plex token, only `plex_token_configured`. `PUT /api/settings` preserves the
 existing token when `plex_token` is empty; send `{"clear_plex_token": true}` to explicitly clear it.
-`POST /api/settings/plex/test` tests the saved effective Plex URL/token without returning either
-credential.
+`POST /api/settings/plex/test` can accept temporary `plex_url` and `plex_token` candidates for a
+connection test without persisting either credential. Omitted candidates fall back to the saved
+effective values, and the response never returns a token.
 
 ## Configuration
 

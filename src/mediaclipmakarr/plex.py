@@ -3,7 +3,7 @@ from __future__ import annotations
 from xml.etree import ElementTree
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 from mediaclipmakarr.application_settings import normalize_plex_url
 
@@ -14,6 +14,13 @@ class PlexConnectionResult(BaseModel):
     message: str
     server_name: str | None = None
     server_version: str | None = None
+
+
+class PlexConnectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plex_url: str | None = None
+    plex_token: SecretStr | None = None
 
 
 async def test_plex_connection(

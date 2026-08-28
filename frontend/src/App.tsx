@@ -124,6 +124,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
       ...(!managed("x264_preset") && { x264_preset: x264Preset }),
     });
   };
+  const testCurrentConnection = () => {
+    const submittedToken = plexTokenInput.current?.value.trim() ?? "";
+    connectionTest.mutate({
+      plex_url: plexUrl,
+      ...(submittedToken && { plex_token: submittedToken }),
+    });
+  };
 
   const changeMapping = (index: number, field: keyof SourcePathMapping, value: string) => {
     setMappings((current) =>
@@ -160,7 +167,10 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               placeholder="http://192.168.1.20:32400"
               value={plexUrl}
               disabled={managed("plex_url")}
-              onChange={(event) => setPlexUrl(event.target.value)}
+              onChange={(event) => {
+                setPlexUrl(event.target.value);
+                setConnection(null);
+              }}
             />
             <ManagedLabel managed={managed("plex_url")} />
           </Stack>
@@ -174,6 +184,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               placeholder={settings.plex_token_configured ? "Configured — leave blank to keep" : "Enter token"}
               inputRef={plexTokenInput}
               disabled={managed("plex_token")}
+              onChange={() => setConnection(null)}
               helperText="A blank value preserves the current token."
             />
             <ManagedLabel managed={managed("plex_token")} />
@@ -189,13 +200,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
             <Button
               variant="outlined"
-              disabled={!settings.plex_url || !settings.plex_token_configured || connectionTest.isPending}
-              onClick={() => connectionTest.mutate()}
+              disabled={!plexUrl.trim() || connectionTest.isPending}
+              onClick={testCurrentConnection}
             >
-              {connectionTest.isPending ? "Testing…" : "Test saved connection"}
+              {connectionTest.isPending ? "Testing…" : "Test connection"}
             </Button>
             <Typography color="text.secondary" variant="body2">
-              Save URL or token changes before testing.
+              Tests the values currently in this form without saving them.
             </Typography>
           </Stack>
           {connection && (

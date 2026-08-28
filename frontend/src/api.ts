@@ -2,6 +2,7 @@ import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
   HealthResponse,
+  PlexConnectionRequest,
   PlexConnectionResult,
 } from "./types";
 
@@ -60,10 +61,13 @@ export async function updateSettings(
   return parseResponse<ApplicationSettings>(response, "Settings update");
 }
 
-export async function testPlexConnection(): Promise<PlexConnectionResult> {
+export async function testPlexConnection(
+  connection: PlexConnectionRequest,
+): Promise<PlexConnectionResult> {
   const response = await fetch("/api/settings/plex/test", {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(connection),
   });
   return parseResponse<PlexConnectionResult>(response, "Plex connection test");
 }

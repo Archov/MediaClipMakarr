@@ -96,7 +96,7 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
 def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     tmp_path, monkeypatch
 ) -> None:
-    observed_tokens: list[str | None] = []
+    observed_connections: list[tuple[str, str | None]] = []
 
     async def healthy_media_tools(_settings):
         return MediaToolInspection(
@@ -105,8 +105,8 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
             details={"identity_ok": True, "libx264": True, "aac": True},
         )
 
-    async def capture_connection_token(_plex_url, plex_token):
-        observed_tokens.append(plex_token)
+    async def capture_connection_token(plex_url, plex_token):
+        observed_connections.append((plex_url, plex_token))
         return PlexConnectionResult(
             connected=True,
             code="PLEX_CONNECTED",
@@ -118,13 +118,21 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     settings = api_settings(tmp_path)
     secret = "must-not-appear-in-a-response"
     replacement_secret = "replacement-must-also-stay-secret"
+    candidate_secret = "unsaved-candidate-secret"
 
     with TestClient(main_module.create_app(settings)) as client:
         created = client.put("/api/settings", json={"plex_token": secret})
         replaced = client.put("/api/settings", json={"plex_token": replacement_secret})
         preserved = client.put("/api/settings", json={"plex_token": ""})
         fetched = client.get("/api/settings")
-        connection = client.post("/api/settings/plex/test")
+        candidate_connection = client.post(
+            "/api/settings/plex/test",
+            json={
+                "plex_url": "http://candidate-plex:32400",
+                "plex_token": candidate_secret,
+            },
+        )
+        saved_connection = client.post("/api/settings/plex/test")
         cleared = client.put("/api/settings", json={"clear_plex_token": True})
 
     assert created.status_code == 200
@@ -133,14 +141,19 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert replaced.json()["plex_token_configured"] is True
     assert preserved.json()["plex_token_configured"] is True
     assert fetched.json()["plex_token_configured"] is True
-    assert connection.json()["connected"] is True
-    assert observed_tokens == [replacement_secret]
+    assert candidate_connection.json()["connected"] is True
+    assert saved_connection.json()["connected"] is True
+    assert observed_connections == [
+        ("http://candidate-plex:32400", candidate_secret),
+        ("", replacement_secret),
+    ]
     assert cleared.json()["plex_token_configured"] is False
     serialized_responses = (
         created.text + replaced.text + preserved.text + fetched.text + cleared.text
     )
     assert secret not in serialized_responses
     assert replacement_secret not in serialized_responses
+    assert candidate_secret not in serialized_responses
     assert "plex_token" not in fetched.json()
 
 
