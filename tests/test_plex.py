@@ -9,15 +9,17 @@ from mediaclipmakarr.plex import test_plex_connection as check_plex_connection
 @pytest.mark.asyncio
 async def test_valid_plex_identity_passes_connection_test() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/identity"
         assert request.headers["X-Plex-Token"] == "valid-token"
-        return httpx.Response(
-            200,
-            content=(
-                b'<MediaContainer friendlyName="Living Room Plex" version="1.2.3" '
-                b'machineIdentifier="abc" />'
-            ),
-        )
+        if request.url.path == "/identity":
+            return httpx.Response(
+                200,
+                content=(
+                    b'<MediaContainer friendlyName="Living Room Plex" version="1.2.3" '
+                    b'machineIdentifier="abc" />'
+                ),
+            )
+        assert request.url.path == "/library/sections"
+        return httpx.Response(200, content=b'<MediaContainer size="0" />')
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await check_plex_connection(
@@ -33,7 +35,10 @@ async def test_valid_plex_identity_passes_connection_test() -> None:
 async def test_invalid_url_and_token_have_distinct_connection_failures() -> None:
     invalid_url = await check_plex_connection("not-a-url", "token")
 
-    def reject_token(_request: httpx.Request) -> httpx.Response:
+    def reject_token(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/identity":
+            return httpx.Response(200, content=b'<MediaContainer version="1.2.3" />')
+        assert request.url.path == "/library/sections"
         return httpx.Response(401)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reject_token)) as client:
