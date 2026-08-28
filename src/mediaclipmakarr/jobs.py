@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
+
+logger = logging.getLogger(__name__)
 
 JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "FAILED"]
 JobType = Literal["clip_create"]
@@ -67,12 +71,18 @@ class JobEventBroker:
     def __init__(self) -> None:
         self._condition = asyncio.Condition()
         self._versions: dict[str, int] = {}
+        self._snapshots: dict[str, JobSnapshot] = {}
 
     def version(self, job_id: str) -> int:
         return self._versions.get(job_id, 0)
 
-    async def publish(self, job_id: str) -> None:
+    def snapshot(self, job_id: str) -> JobSnapshot | None:
+        return self._snapshots.get(job_id)
+
+    async def publish(self, job_id: str, snapshot: JobSnapshot | None = None) -> None:
         async with self._condition:
+            if snapshot is not None:
+                self._snapshots[job_id] = snapshot
             self._versions[job_id] = self.version(job_id) + 1
             self._condition.notify_all()
 
@@ -449,12 +459,14 @@ class JobRunner:
         run_blocking: BlockingRunner,
         events: JobEventBroker,
         renderer: ClipRenderer = render_clip_file,
+        progress_persist_interval_seconds: float = 1.0,
     ) -> None:
         self.engine = engine
         self.settings = settings
         self.run_blocking = run_blocking
         self.events = events
         self.renderer = renderer
+        self.progress_persist_interval_seconds = progress_persist_interval_seconds
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
@@ -463,7 +475,7 @@ class JobRunner:
         recovered = await recover_finalizing_jobs(self.engine, self.run_blocking)
         abandoned = await fail_abandoned_jobs(self.engine)
         for job_id in [*recovered, *abandoned]:
-            await self.events.publish(job_id)
+            await self._publish_durable_job_update(job_id)
         self._task = asyncio.create_task(self._run(), name="media-job-runner")
 
     async def stop(self) -> None:
@@ -481,34 +493,59 @@ class JobRunner:
     async def _run(self) -> None:
         while not self._stopping:
             self._wake.clear()
-            claimed = await claim_next_job(self.engine, f"run-{uuid4()}")
+            try:
+                claimed = await claim_next_job(self.engine, f"run-{uuid4()}")
+            except Exception:
+                logger.exception("The job runner could not claim the next queued job.")
+                await asyncio.sleep(1.0)
+                continue
             if claimed is None:
                 await self._wake.wait()
                 continue
-            await self.events.publish(claimed.id)
+            await self._publish_durable_job_update(claimed.id)
             try:
                 await self._execute_claimed_job(claimed)
             except asyncio.CancelledError:
-                await fail_job(
-                    self.engine,
-                    claimed.id,
-                    claimed.run_token,
-                    code="APP_SHUTDOWN",
-                    message="The application shut down before this job completed.",
-                    retryable=True,
-                )
-                await self.events.publish(claimed.id)
+                with contextlib.suppress(Exception):
+                    await fail_job(
+                        self.engine,
+                        claimed.id,
+                        claimed.run_token,
+                        code="APP_SHUTDOWN",
+                        message="The application shut down before this job completed.",
+                        retryable=True,
+                    )
+                    await self._publish_durable_job_update(claimed.id)
                 raise
             except Exception as error:
-                await fail_job(
-                    self.engine,
-                    claimed.id,
-                    claimed.run_token,
-                    code=type(error).__name__.upper(),
-                    message=str(error) or "Clip render failed unexpectedly.",
-                    retryable=True,
-                )
-                await self.events.publish(claimed.id)
+                logger.exception("Clip render job %s failed.", claimed.id)
+                try:
+                    await fail_job(
+                        self.engine,
+                        claimed.id,
+                        claimed.run_token,
+                        code=type(error).__name__.upper(),
+                        message=str(error) or "Clip render failed unexpectedly.",
+                        retryable=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "The failure state for job %s could not be stored.", claimed.id
+                    )
+                await self._publish_durable_job_update(claimed.id)
+
+    async def _publish_durable_job_update(self, job_id: str) -> JobSnapshot | None:
+        snapshot = await get_job_snapshot(self.engine, job_id)
+        await self._publish_job_update(job_id, snapshot)
+        return snapshot
+
+    async def _publish_job_update(
+        self, job_id: str, snapshot: JobSnapshot | None = None
+    ) -> None:
+        try:
+            await self.events.publish(job_id, snapshot)
+        except Exception:
+            logger.exception("The job runner could not publish an update for job %s.", job_id)
 
     async def _execute_claimed_job(self, claimed: ClaimedJob) -> None:
         plan = claimed.render_plan
@@ -521,19 +558,46 @@ class JobRunner:
             current_stage_progress=1,
             message="Source media resolved. Preparing render.",
         )
-        await self.events.publish(claimed.id)
+        await self._publish_durable_job_update(claimed.id)
+        last_render_progress_persisted_at = 0.0
+        rendering_transition_persisted = False
 
         async def render_progress(stage_progress: float, message: str) -> None:
-            await update_running_job(
-                self.engine,
-                claimed.id,
-                claimed.run_token,
+            nonlocal latest_snapshot, last_render_progress_persisted_at
+            nonlocal rendering_transition_persisted
+
+            progress = 0.05 + stage_progress * 0.9
+            now = time.monotonic()
+            should_persist = (
+                not rendering_transition_persisted
+                or stage_progress >= 1.0
+                or now - last_render_progress_persisted_at
+                >= self.progress_persist_interval_seconds
+            )
+            if should_persist:
+                await update_running_job(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    stage="rendering",
+                    progress=progress,
+                    current_stage_progress=stage_progress,
+                    message=message,
+                )
+                rendering_transition_persisted = True
+                last_render_progress_persisted_at = now
+                latest_snapshot = await self._publish_durable_job_update(claimed.id)
+                return
+
+            live_snapshot = _live_progress_snapshot(
+                latest_snapshot,
+                job_id=claimed.id,
                 stage="rendering",
-                progress=0.05 + stage_progress * 0.9,
+                progress=progress,
                 current_stage_progress=stage_progress,
                 message=message,
             )
-            await self.events.publish(claimed.id)
+            await self._publish_job_update(claimed.id, live_snapshot)
 
         rendered = await self.renderer(plan, self.settings, progress=render_progress)
         destination = await self.run_blocking(
@@ -561,12 +625,12 @@ class JobRunner:
             destination=destination,
             clip=clip,
         )
-        await self.events.publish(claimed.id)
+        latest_snapshot = await self._publish_durable_job_update(claimed.id)
 
         await self.run_blocking(_install_rendered_clip, rendered.path, destination)
         await insert_clip(self.engine, clip)
         await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
-        await self.events.publish(claimed.id)
+        await self._publish_durable_job_update(claimed.id)
 
 
 async def create_pending_operation(
@@ -732,6 +796,46 @@ def _snapshot_from_row(row: dict[str, Any], *, queue_position: int | None) -> Jo
         created_at=row["created_at"],
         started_at=started_at,
         finished_at=finished_at,
+    )
+
+
+def _live_progress_snapshot(
+    base: JobSnapshot | None,
+    *,
+    job_id: str,
+    stage: JobStage,
+    progress: float,
+    current_stage_progress: float,
+    message: str,
+) -> JobSnapshot:
+    if base is not None:
+        started_at = base.started_at
+        elapsed_ms = base.elapsed_ms
+        if started_at is not None:
+            elapsed_ms = max(0, round((utc_now() - started_at).total_seconds() * 1000))
+        return base.model_copy(
+            update={
+                "state": "RUNNING",
+                "stage": stage,
+                "progress": _clamp(progress),
+                "current_stage_progress": _clamp(current_stage_progress),
+                "elapsed_ms": elapsed_ms,
+                "queue_position": None,
+                "message": message,
+            }
+        )
+
+    return JobSnapshot(
+        id=job_id,
+        type="clip_create",
+        state="RUNNING",
+        stage=stage,
+        progress=_clamp(progress),
+        current_stage_progress=_clamp(current_stage_progress),
+        elapsed_ms=None,
+        queue_position=None,
+        message=message,
+        created_at=utc_now(),
     )
 
 

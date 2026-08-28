@@ -75,7 +75,7 @@ class PlexSession(BaseModel):
     plex_media_key: str | None = None
     plex_part_id: str | None = None
     plex_part_key: str | None = None
-    plex_part_file: str | None = None
+    plex_part_file: str | None = Field(default=None, exclude=True)
     selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import mediaclipmakarr.jobs as jobs_module
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.jobs import (
@@ -92,6 +93,19 @@ def request_range():
     )
 
 
+async def run_blocking(function, *args):
+    return function(*args)
+
+
+async def wait_for_job_state(engine, job_id: str, state: str):
+    for _ in range(50):
+        snapshot = await get_job_snapshot(engine, job_id)
+        if snapshot is not None and snapshot.state == state:
+            return snapshot
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"Job {job_id} did not reach {state}.")
+
+
 @pytest.mark.asyncio
 async def test_claim_next_job_is_atomic_and_rejects_stale_token(tmp_path) -> None:
     database_path = tmp_path / "application.db"
@@ -140,9 +154,6 @@ async def test_job_runner_finalizes_clip_and_serves_by_managed_id(tmp_path) -> N
     work_dir = tmp_path / "work"
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
-
-    async def run_blocking(function, *args):
-        return function(*args)
 
     async def renderer(plan, settings, *, progress):
         await progress(1.0, "rendered")
@@ -232,9 +243,6 @@ async def test_finalizing_job_recovers_pending_temp_install_after_restart(tmp_pa
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    async def run_blocking(function, *args):
-        return function(*args)
-
     try:
         plan = build_clip_render_plan(
             session=session(),
@@ -293,3 +301,250 @@ async def test_finalizing_job_recovers_pending_temp_install_after_restart(tmp_pa
     assert snapshot.state == "SUCCEEDED"
     assert recovered_clip is not None
     assert await asyncio.to_thread(destination.read_bytes) == b"rendered mp4"
+
+
+@pytest.mark.asyncio
+async def test_runner_survives_claim_failure_and_continues(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    calls = 0
+    logged_messages: list[str] = []
+
+    async def fail_then_stop(_engine, _run_token):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary sqlite failure")
+        runner._stopping = True
+        runner._wake.set()
+        return None
+
+    async def no_sleep(_seconds):
+        return None
+
+    try:
+        runner = JobRunner(
+            engine,
+            Settings(_env_file=None),
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+        )
+        monkeypatch.setattr(jobs_module, "claim_next_job", fail_then_stop)
+        monkeypatch.setattr(jobs_module.asyncio, "sleep", no_sleep)
+        monkeypatch.setattr(
+            jobs_module.logger,
+            "exception",
+            lambda message, *args, **kwargs: logged_messages.append(message),
+        )
+
+        await runner._run()
+    finally:
+        await engine.dispose()
+
+    assert calls == 2
+    assert logged_messages == ["The job runner could not claim the next queued job."]
+
+
+@pytest.mark.asyncio
+async def test_render_progress_is_live_but_sqlite_persistence_is_throttled(
+    monkeypatch, tmp_path
+) -> None:
+    class RecordingEvents(JobEventBroker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.snapshots = []
+
+        async def publish(self, job_id, snapshot=None):
+            if snapshot is not None:
+                self.snapshots.append(snapshot)
+            await super().publish(job_id, snapshot)
+
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    monotonic_values = [100.0, 100.1]
+
+    async def renderer(_plan, _settings, *, progress):
+        await progress(0.10, "first progress")
+        await progress(0.20, "second progress")
+        raise RuntimeError("stop before finalization")
+
+    try:
+        settings = Settings(_env_file=None, work_dir=tmp_path / "work", clip_dir=tmp_path / "clips")
+        events = RecordingEvents()
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=events,
+            renderer=renderer,
+            progress_persist_interval_seconds=10.0,
+        )
+        def fake_monotonic():
+            return monotonic_values.pop(0) if monotonic_values else 100.2
+
+        monkeypatch.setattr(jobs_module.time, "monotonic", fake_monotonic)
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-token")
+        assert claimed is not None
+
+        with pytest.raises(RuntimeError, match="stop before finalization"):
+            await runner._execute_claimed_job(claimed)
+
+        durable = await get_job_snapshot(engine, queued.id)
+    finally:
+        await engine.dispose()
+
+    assert durable is not None
+    assert durable.stage == "rendering"
+    assert durable.current_stage_progress == pytest.approx(0.10)
+    assert events.snapshots[-1].stage == "rendering"
+    assert events.snapshots[-1].current_stage_progress == pytest.approx(0.20)
+
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown_fails_running_job_with_app_shutdown(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    renderer_started = asyncio.Event()
+
+    async def renderer(_plan, _settings, *, progress):
+        renderer_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("renderer should be cancelled")
+
+    try:
+        settings = Settings(_env_file=None, work_dir=tmp_path / "work", clip_dir=tmp_path / "clips")
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+            renderer=renderer,
+        )
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        await runner.start()
+        queued = await enqueue_clip_create_job(engine, plan)
+        runner.wake()
+        await asyncio.wait_for(renderer_started.wait(), timeout=1.0)
+        await runner.stop()
+        snapshot = await get_job_snapshot(engine, queued.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.error is not None
+    assert snapshot.error.code == "APP_SHUTDOWN"
+
+
+@pytest.mark.asyncio
+async def test_queued_job_is_preserved_across_shutdown_and_runs_after_restart(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    rendered = asyncio.Event()
+
+    async def renderer(plan, settings, *, progress):
+        await progress(1.0, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered mp4")
+        rendered.set()
+        return RenderedClipFile(path=output, duration_ms=plan.source_end_ms - plan.source_start_ms)
+
+    try:
+        settings = Settings(_env_file=None, work_dir=tmp_path / "work", clip_dir=tmp_path / "clips")
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        first_runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+            renderer=renderer,
+        )
+        await first_runner.start()
+        queued = await enqueue_clip_create_job(engine, plan)
+        await first_runner.stop()
+        preserved = await get_job_snapshot(engine, queued.id)
+
+        second_runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+            renderer=renderer,
+        )
+        await second_runner.start()
+        second_runner.wake()
+        await asyncio.wait_for(rendered.wait(), timeout=1.0)
+        completed = await wait_for_job_state(engine, queued.id, "SUCCEEDED")
+        await second_runner.stop()
+    finally:
+        await engine.dispose()
+
+    assert preserved is not None
+    assert preserved.state == "QUEUED"
+    assert completed.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_restart_marks_abandoned_running_job_failed(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    try:
+        settings = Settings(_env_file=None, work_dir=tmp_path / "work", clip_dir=tmp_path / "clips")
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        claimed = await claim_next_job(engine, "abandoned-run-token")
+        assert claimed is not None
+
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+        )
+        await runner.start()
+        snapshot = await get_job_snapshot(engine, queued.id)
+        await runner.stop()
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.error is not None
+    assert snapshot.error.code == "APP_RESTARTED"

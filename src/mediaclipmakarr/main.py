@@ -317,7 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request.app.state.database_engine,
                 render_plan,
             )
-            await request.app.state.job_events.publish(job.id)
+            await request.app.state.job_events.publish(job.id, job)
             request.app.state.job_runner.wake()
             return job
         except ClipCreateValidationError as error:
@@ -372,7 +372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     job_id, version, timeout_seconds=15.0
                 )
                 if changed:
-                    snapshot = await get_job_snapshot(
+                    snapshot = broker.snapshot(job_id) or await get_job_snapshot(
                         request.app.state.database_engine, job_id
                     )
                     if snapshot is not None:

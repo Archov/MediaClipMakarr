@@ -198,7 +198,13 @@ function useJobSnapshot(initialJob: JobSnapshot | null) {
       setJob(JSON.parse(event.data) as JobSnapshot);
     };
     const handleError = () => {
-      if (!closed) void fetchJob(initialJob.id).then(setJob).catch(() => undefined);
+      if (!closed) {
+        void fetchJob(initialJob.id)
+          .then((snapshot) => {
+            if (!closed && snapshot.id === initialJob.id) setJob(snapshot);
+          })
+          .catch(() => undefined);
+      }
     };
 
     eventSource.addEventListener("snapshot", handleSnapshot as EventListener);

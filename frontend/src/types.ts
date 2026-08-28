@@ -91,7 +91,6 @@ export interface PlexSession {
   plex_media_key: string | null;
   plex_part_id: string | null;
   plex_part_key: string | null;
-  plex_part_file: string | null;
   selected_audio_streams: PlexPartStream[];
 }
 
