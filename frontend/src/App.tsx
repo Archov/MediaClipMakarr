@@ -183,7 +183,6 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
     event.preventDefault();
     const submittedToken = enteredToken(plexToken);
     const baseUpdate: ApplicationSettingsUpdate = {
-      ...(!submittedToken && !managed("plex_url") && { plex_url: plexUrl }),
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
       ...(!managed("timezone") && { timezone }),
       ...(!managed("x264_preset") && { x264_preset: x264Preset }),

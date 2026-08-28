@@ -156,6 +156,10 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
                 "plex_token": candidate_secret,
             },
         )
+        blocked_url_change = client.put(
+            "/api/settings",
+            json={"plex_url": "http://untrusted.example:32400"},
+        )
         saved_connection = client.post("/api/settings/plex/test")
         url_only_connection = client.post(
             "/api/settings/plex/test",
@@ -178,6 +182,8 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert preserved.json()["plex_token_configured"] is True
     assert fetched.json()["plex_token_configured"] is True
     assert candidate_connection.json()["connected"] is True
+    assert blocked_url_change.status_code == 409
+    assert blocked_url_change.json()["detail"]["code"] == "PLEX_CREDENTIALS_REQUIRED"
     assert saved_connection.json()["connected"] is True
     assert url_only_connection.status_code == 422
     assert token_only_connection.status_code == 422
