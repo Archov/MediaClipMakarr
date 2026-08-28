@@ -55,12 +55,12 @@ def test_valid_clip_create_request_preserves_integer_millisecond_range() -> None
         end_ms=67_890,
     )
 
-    accepted = validate_clip_create_request(request, make_snapshot(make_session()))
+    result = validate_clip_create_request(request, make_snapshot(make_session()))
 
-    assert accepted.accepted is True
-    assert accepted.start_ms == 12_345
-    assert accepted.end_ms == 67_890
-    assert accepted.duration_ms == 55_545
+    assert result.valid is True
+    assert result.start_ms == 12_345
+    assert result.end_ms == 67_890
+    assert result.duration_ms == 55_545
 
 
 def test_invalid_range_order_is_rejected_before_submission_work() -> None:
@@ -158,7 +158,8 @@ def test_clip_api_returns_structured_validation_errors(tmp_path, monkeypatch) ->
             },
         )
 
-    assert valid_response.status_code == 202
+    assert valid_response.status_code == 200
+    assert valid_response.json()["valid"] is True
     assert valid_response.json()["duration_ms"] == 55_545
     assert invalid_response.status_code == 422
     assert invalid_response.json()["detail"]["code"] == "CLIP_RANGE_ORDER"

@@ -113,10 +113,9 @@ export interface ClipCreateRequest {
 }
 
 export interface ClipCreateResult {
-  accepted: boolean;
+  valid: boolean;
   code: string;
   message: string;
-  job_id: string | null;
   session_identity: string;
   media_identity: string;
   start_ms: number;

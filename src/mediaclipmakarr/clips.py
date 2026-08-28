@@ -32,11 +32,10 @@ class ClipCreateRequest(BaseModel):
     end_ms: int
 
 
-class ClipCreateAccepted(BaseModel):
-    accepted: bool
+class ClipCreateValidationResult(BaseModel):
+    valid: bool
     code: str
     message: str
-    job_id: str | None = None
     session_identity: str
     media_identity: str
     start_ms: int
@@ -61,7 +60,7 @@ class ClipCreateValidationError(Exception):
 
 def validate_clip_create_request(
     request: ClipCreateRequest, snapshot: PlexSessionSnapshot
-) -> ClipCreateAccepted:
+) -> ClipCreateValidationResult:
     if request.start_ms < 0 or request.end_ms < 0:
         raise ClipCreateValidationError(
             "CLIP_RANGE_NEGATIVE",
@@ -102,12 +101,11 @@ def validate_clip_create_request(
             "End must be within the selected media duration.",
         )
 
-    return ClipCreateAccepted(
-        accepted=True,
+    return ClipCreateValidationResult(
+        valid=True,
         code="CLIP_REQUEST_VALIDATED",
         message=(
-            "Clip request validated. Rendering will be queued once the durable job runner is "
-            "available."
+            "Clip request validated. Durable clip job creation will be added with the job runner."
         ),
         session_identity=session.session_identity,
         media_identity=session.media_identity,

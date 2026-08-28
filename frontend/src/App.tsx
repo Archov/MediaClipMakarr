@@ -935,7 +935,9 @@ export function App() {
       <Container maxWidth="md" sx={{ py: { xs: 4, md: 7 } }}>
         <Stack spacing={3}>
           <Box>
-            <Typography variant="h3" component="h1" gutterBottom sx={{ fontWeight: 800 }}>Make Clip</Typography>
+            <Typography variant="h3" component="h1" gutterBottom sx={{ fontWeight: 800 }}>
+              {page === "make-clip" ? "Make Clip" : "Settings"}
+            </Typography>
             <Typography color="text.secondary">
               {page === "make-clip"
                 ? "Select the active Plex playback session before capturing clip boundaries."

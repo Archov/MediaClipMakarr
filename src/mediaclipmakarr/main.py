@@ -21,9 +21,9 @@ from mediaclipmakarr.application_settings import (
     serialize_update,
 )
 from mediaclipmakarr.clips import (
-    ClipCreateAccepted,
     ClipCreateRequest,
     ClipCreateValidationError,
+    ClipCreateValidationResult,
     validate_clip_create_request,
 )
 from mediaclipmakarr.concurrency import BlockingIOExecutor
@@ -269,10 +269,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.post("/api/clips", response_model=ClipCreateAccepted, status_code=202)
+    @app.post("/api/clips", response_model=ClipCreateValidationResult)
     async def create_clip(
         clip_request: ClipCreateRequest, request: Request
-    ) -> ClipCreateAccepted:
+    ) -> ClipCreateValidationResult:
         try:
             return validate_clip_create_request(
                 clip_request, request.app.state.plex_session_poller.snapshot
