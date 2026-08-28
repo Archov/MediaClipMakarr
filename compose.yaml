@@ -4,10 +4,11 @@ services:
       context: .
     ports:
       - "${MCM_COMPOSE_PORT:-3623}:8000"
+    user: "${MCM_PUID:-1000}:${MCM_PGID:-1000}"
     environment:
-      MCM_PRIVATE_DATA_DIR: "${MCM_PRIVATE_DATA_DIR:-/data/private}"
-      MCM_WORK_DIR: "${MCM_WORK_DIR:-/data/work}"
-      MCM_CLIP_DIR: "${MCM_CLIP_DIR:-/data/clips}"
+      MCM_PRIVATE_DATA_DIR: /data/private
+      MCM_WORK_DIR: /data/work
+      MCM_CLIP_DIR: /data/clips
       MCM_SOURCE_DIRS: '${MCM_SOURCE_DIRS:-["/media"]}'
       MCM_FFMPEG_PATH: "${MCM_FFMPEG_PATH:-/opt/jellyfin-ffmpeg/ffmpeg}"
       MCM_FFPROBE_PATH: "${MCM_FFPROBE_PATH:-/opt/jellyfin-ffmpeg/ffprobe}"
@@ -23,13 +24,8 @@ services:
       MCM_DEV_API_PORT: "${MCM_DEV_API_PORT:-8000}"
       MCM_DEV_WEB_PORT: "${MCM_DEV_WEB_PORT:-5173}"
     volumes:
-      - "private-data:${MCM_PRIVATE_DATA_DIR:-/data/private}"
-      - "work-data:${MCM_WORK_DIR:-/data/work}"
-      - "clip-library:${MCM_CLIP_DIR:-/data/clips}"
+      - "${MCM_PRIVATE_DATA_DIR:-./data/private}:/data/private"
+      - "${MCM_WORK_DIR:-./data/work}:/data/work"
+      - "${MCM_CLIP_DIR:-./data/clips}:/data/clips"
       - "${MCM_COMPOSE_SOURCE_DIR:-./data/sources}:/media:ro"
     restart: unless-stopped
-
-volumes:
-  private-data:
-  work-data:
-  clip-library:

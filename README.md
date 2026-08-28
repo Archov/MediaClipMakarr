@@ -40,9 +40,12 @@ docker compose up --build
 On macOS or Linux, use `cp .env.example .env` instead. Open
 `http://127.0.0.1:<MCM_COMPOSE_PORT>` (port `3623` in the template). `MCM_COMPOSE_SOURCE_DIR`
 selects the host media directory mounted read-only at `/media`; `MCM_SOURCE_DIRS` must therefore
-include `/media`. The Compose stack preserves application-owned data in named volumes. The runtime
-image runs as UID/GID `10001`, launches exactly one Uvicorn worker, and contains the
-checksum-verified official Jellyfin FFmpeg `7.1.4-3` GPL portable release for amd64 or arm64.
+include `/media`. `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR` are ordinary persistent
+directories on the Docker host. Ensure custom directories exist and are writable by `MCM_PUID` and
+`MCM_PGID` before starting Compose. Existing Docker named volumes from older configurations are
+left untouched and are not migrated automatically. The runtime launches exactly one Uvicorn worker
+and contains the checksum-verified official Jellyfin FFmpeg `7.1.4-3` GPL portable release for
+amd64 or arm64.
 
 ## Verification commands
 
@@ -74,7 +77,8 @@ until the user saves a timezone.
 All Compose and application environment variables use the `MCM_` prefix. The main values are:
 
 - `MCM_COMPOSE_PORT` and `MCM_COMPOSE_SOURCE_DIR` configure the published port and host media mount
-- `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR`
+- `MCM_PUID` and `MCM_PGID` select the container process identity for bind-mount permissions
+- `MCM_PRIVATE_DATA_DIR`, `MCM_WORK_DIR`, and `MCM_CLIP_DIR` select persistent host directories
 - `MCM_SOURCE_DIRS`, as a JSON array of read-only container source roots
 - `MCM_FFMPEG_PATH` and `MCM_FFPROBE_PATH`
 - `MCM_EXPECTED_FFMPEG_IDENTITY` (defaults to `7.1.4-Jellyfin`)
