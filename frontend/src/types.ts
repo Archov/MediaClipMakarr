@@ -65,3 +65,36 @@ export interface PlexConnectionRequest {
   plex_url?: string;
   plex_token?: string;
 }
+
+export type PlexSessionSnapshotStatus =
+  | "ok"
+  | "not_configured"
+  | "invalid_url"
+  | "invalid_token"
+  | "http_error"
+  | "invalid_response"
+  | "unreachable"
+  | "error";
+
+export interface PlexSession {
+  session_identity: string;
+  media_identity: string;
+  title: string;
+  media_type: string;
+  plex_user: string | null;
+  player: string | null;
+  state: string;
+  position_ms: number;
+  duration_ms: number | null;
+  sampled_at: string;
+  plex_rating_key: string | null;
+  plex_media_key: string | null;
+  plex_part_id: string | null;
+}
+
+export interface PlexSessionSnapshot {
+  status: PlexSessionSnapshotStatus;
+  message: string;
+  sampled_at: string;
+  sessions: PlexSession[];
+}

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -33,6 +33,9 @@ from mediaclipmakarr.health import (
 from mediaclipmakarr.plex import (
     PlexConnectionRequest,
     PlexConnectionResult,
+    PlexSessionPoller,
+    PlexSessionSnapshot,
+    snapshot_sse_payload,
     test_plex_connection,
 )
 from mediaclipmakarr.process_lock import ProcessLock
@@ -90,6 +93,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             database_engine = create_database_engine(application_settings.database_path)
             app.state.database_engine = database_engine
+            app.state.effective_application_settings = await get_effective_application_settings(
+                database_engine, application_settings
+            )
+
+            async def load_cached_application_settings():
+                return app.state.effective_application_settings
+
+            app.state.plex_session_poller = PlexSessionPoller(
+                load_cached_application_settings
+            )
+            await app.state.plex_session_poller.start()
 
             app.state.media_tools = await inspect_media_tools(application_settings)
             if app.state.media_tools.status != "ok":
@@ -99,6 +113,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     logger.warning(error)
             yield
         finally:
+            if hasattr(app.state, "plex_session_poller"):
+                await app.state.plex_session_poller.stop()
             if database_engine is not None:
                 await database_engine.dispose()
             if process_lock is not None:
@@ -164,18 +180,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/settings", response_model=ApplicationSettingsResponse)
     async def get_application_settings(request: Request) -> ApplicationSettingsResponse:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
-        return effective.to_response()
+        return request.app.state.effective_application_settings.to_response()
 
     @app.put("/api/settings", response_model=ApplicationSettingsResponse)
     async def update_application_settings(
         update: ApplicationSettingsUpdate, request: Request
     ) -> ApplicationSettingsResponse:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
+        effective = request.app.state.effective_application_settings
         managed_fields = managed_update_fields(update, effective.environment_managed)
         if managed_fields:
             raise HTTPException(
@@ -211,15 +222,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         updated = await get_effective_application_settings(
             request.app.state.database_engine, application_settings
         )
+        request.app.state.effective_application_settings = updated
         return updated.to_response()
 
     @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
     async def test_current_plex_connection(
         request: Request, connection: PlexConnectionRequest | None = None
     ) -> PlexConnectionResult:
-        effective = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
+        effective = request.app.state.effective_application_settings
         if connection is None or connection.plex_url is None or connection.plex_token is None:
             candidate_url = effective.plex_url
             candidate_token = effective.plex_token
@@ -227,6 +237,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             candidate_url = connection.plex_url
             candidate_token = connection.plex_token.get_secret_value().strip()
         return await test_plex_connection(candidate_url, candidate_token)
+
+    @app.get("/api/sessions", response_model=PlexSessionSnapshot)
+    async def get_current_plex_sessions(request: Request) -> PlexSessionSnapshot:
+        return request.app.state.plex_session_poller.snapshot
+
+    @app.get("/api/sessions/events")
+    async def stream_plex_sessions(request: Request) -> StreamingResponse:
+        async def events():
+            poller: PlexSessionPoller = request.app.state.plex_session_poller
+            version = poller.version
+            yield snapshot_sse_payload(poller.snapshot)
+            while not await request.is_disconnected():
+                snapshot, version, changed = await poller.wait_for_change(
+                    version, timeout_seconds=15.0
+                )
+                if changed:
+                    yield snapshot_sse_payload(snapshot)
+                else:
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
     if frontend_dist.is_dir():

@@ -1,10 +1,15 @@
 import AddRounded from "@mui/icons-material/AddRounded";
 import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
 import ArrowUpwardRounded from "@mui/icons-material/ArrowUpwardRounded";
+import AvTimerRounded from "@mui/icons-material/AvTimerRounded";
 import CheckCircleRounded from "@mui/icons-material/CheckCircleRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import ErrorRounded from "@mui/icons-material/ErrorRounded";
+import MovieRounded from "@mui/icons-material/MovieRounded";
+import PersonRounded from "@mui/icons-material/PersonRounded";
+import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
+import SmartDisplayRounded from "@mui/icons-material/SmartDisplayRounded";
 import WarningRounded from "@mui/icons-material/WarningRounded";
 import {
   Alert,
@@ -22,7 +27,9 @@ import {
   FormControl,
   IconButton,
   InputLabel,
+  LinearProgress,
   List,
+  ListItemButton,
   ListItem,
   ListItemIcon,
   ListItemText,
@@ -38,7 +45,13 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 
-import { fetchHealth, fetchSettings, testPlexConnection, updateSettings } from "./api";
+import {
+  fetchHealth,
+  fetchPlexSessions,
+  fetchSettings,
+  testPlexConnection,
+  updateSettings,
+} from "./api";
 import type {
   ApplicationSettingField,
   ApplicationSettings,
@@ -46,6 +59,9 @@ import type {
   HealthStatus,
   PlexConnectionRequest,
   PlexConnectionResult,
+  PlexSession,
+  PlexSessionSnapshot,
+  PlexSessionSnapshotStatus,
   SourcePathMapping,
 } from "./types";
 
@@ -55,7 +71,7 @@ const theme = createTheme({
     primary: { main: "#60a5fa" },
     background: { default: "#0b1120", paper: "#111827" },
   },
-  shape: { borderRadius: 14 },
+  shape: { borderRadius: 8 },
 });
 
 const x264Presets = [
@@ -70,6 +86,20 @@ const x264Presets = [
   "veryslow",
 ];
 const PLEX_TOKEN_MASK = "●●●●●●●●";
+
+const sessionStatusSeverity: Record<
+  PlexSessionSnapshotStatus,
+  "success" | "info" | "warning" | "error"
+> = {
+  ok: "success",
+  not_configured: "info",
+  invalid_url: "error",
+  invalid_token: "error",
+  http_error: "warning",
+  invalid_response: "error",
+  unreachable: "warning",
+  error: "error",
+};
 
 function tokenDraft(settings: ApplicationSettings): string {
   return settings.plex_token_configured ? PLEX_TOKEN_MASK : "";
@@ -93,6 +123,185 @@ function StatusChip({ status }: { status: HealthStatus }) {
 
 function ManagedLabel({ managed }: { managed: boolean }) {
   return managed ? <Chip label="Environment managed" size="small" variant="outlined" /> : null;
+}
+
+function formatMilliseconds(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "--:--";
+  const total = Math.max(0, Math.floor(value));
+  const hours = Math.floor(total / 3_600_000);
+  const minutes = Math.floor((total % 3_600_000) / 60_000);
+  const seconds = Math.floor((total % 60_000) / 1_000);
+  const milliseconds = total % 1_000;
+  return [
+    hours.toString().padStart(2, "0"),
+    minutes.toString().padStart(2, "0"),
+    seconds.toString().padStart(2, "0"),
+  ].join(":") + `.${milliseconds.toString().padStart(3, "0")}`;
+}
+
+function useClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+
+function displayedPosition(session: PlexSession, now: number): number {
+  if (session.state.toLowerCase() !== "playing") return session.position_ms;
+  const sampledAt = Date.parse(session.sampled_at);
+  if (!Number.isFinite(sampledAt)) return session.position_ms;
+  const extrapolated = session.position_ms + Math.max(0, now - sampledAt);
+  return session.duration_ms === null ? extrapolated : Math.min(session.duration_ms, extrapolated);
+}
+
+function useLivePlexSessions() {
+  const queryClient = useQueryClient();
+  const sessions = useQuery({
+    queryKey: ["plex-sessions"],
+    queryFn: fetchPlexSessions,
+    refetchInterval: 15_000,
+  });
+
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return undefined;
+    const eventSource = new EventSource("/api/sessions/events");
+    const handleSnapshot = (event: MessageEvent<string>) => {
+      const snapshot = JSON.parse(event.data) as PlexSessionSnapshot;
+      queryClient.setQueryData(["plex-sessions"], snapshot);
+    };
+    const handleError = () => {
+      void queryClient.invalidateQueries({ queryKey: ["plex-sessions"] });
+    };
+    eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
+    eventSource.addEventListener("error", handleError);
+    return () => {
+      eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
+      eventSource.removeEventListener("error", handleError);
+      eventSource.close();
+    };
+  }, [queryClient]);
+
+  return sessions;
+}
+
+function SessionDetail({ session }: { session: PlexSession }) {
+  const now = useClock(session.state.toLowerCase() === "playing");
+  const position = displayedPosition(session, now);
+  const progress =
+    session.duration_ms && session.duration_ms > 0
+      ? Math.min(100, Math.max(0, (position / session.duration_ms) * 100))
+      : 0;
+  return (
+    <Stack spacing={2}>
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+        <Chip
+          icon={<PlayArrowRounded />}
+          label={session.state}
+          color={session.state.toLowerCase() === "playing" ? "success" : "default"}
+          sx={{ alignSelf: "flex-start", textTransform: "capitalize" }}
+        />
+        <Chip
+          icon={<MovieRounded />}
+          label={session.media_type}
+          variant="outlined"
+          sx={{ alignSelf: "flex-start", textTransform: "capitalize" }}
+        />
+        {session.plex_user && (
+          <Chip icon={<PersonRounded />} label={session.plex_user} variant="outlined" />
+        )}
+        {session.player && (
+          <Chip icon={<SmartDisplayRounded />} label={session.player} variant="outlined" />
+        )}
+      </Stack>
+      <Box>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
+          <Typography variant="body2" color="text.secondary">Playback position</Typography>
+          <Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>
+            {formatMilliseconds(position)} / {formatMilliseconds(session.duration_ms)}
+          </Typography>
+        </Stack>
+        <LinearProgress variant="determinate" value={progress} aria-label="Playback progress" />
+      </Box>
+    </Stack>
+  );
+}
+
+function MakeClipScreen() {
+  const sessions = useLivePlexSessions();
+  const [selectedSessionIdentity, setSelectedSessionIdentity] = useState<string | null>(null);
+  const [selectedMediaIdentity, setSelectedMediaIdentity] = useState<string | null>(null);
+  const snapshot = sessions.data;
+  const selectedSession = snapshot?.sessions.find(
+    (session) => session.session_identity === selectedSessionIdentity,
+  );
+  const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
+  const selectedMediaChanged = Boolean(
+    selectedSession && selectedMediaIdentity && selectedSession.media_identity !== selectedMediaIdentity,
+  );
+
+  return (
+    <Card variant="outlined">
+      <CardContent>
+        <Stack spacing={3}>
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={2}>
+            <Box>
+              <Typography variant="h5" gutterBottom>Make Clip</Typography>
+              <Typography color="text.secondary">Live Plex video sessions</Typography>
+            </Box>
+            {sessions.isFetching && <CircularProgress size={24} aria-label="Refreshing sessions" />}
+          </Stack>
+
+          {sessions.error && <Alert severity="error">{sessions.error.message}</Alert>}
+          {snapshot && (
+            <Alert severity={sessionStatusSeverity[snapshot.status]}>
+              {snapshot.message}
+            </Alert>
+          )}
+          {selectedSessionEnded && (
+            <Alert severity="warning">The selected Plex session ended.</Alert>
+          )}
+          {selectedMediaChanged && (
+            <Alert severity="info">The selected player changed media.</Alert>
+          )}
+
+          {snapshot && snapshot.sessions.length > 0 ? (
+            <List disablePadding>
+              {snapshot.sessions.map((session) => {
+                const selected = session.session_identity === selectedSessionIdentity;
+                return (
+                  <ListItemButton
+                    key={session.session_identity}
+                    selected={selected}
+                    onClick={() => {
+                      setSelectedSessionIdentity(session.session_identity);
+                      setSelectedMediaIdentity(session.media_identity);
+                    }}
+                    sx={{ borderRadius: 1, mb: 1, alignItems: "flex-start" }}
+                  >
+                    <ListItemIcon sx={{ minWidth: 42, pt: 0.5 }}>
+                      <AvTimerRounded color={selected ? "primary" : "inherit"} />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={session.title}
+                      secondary={<SessionDetail session={session} />}
+                      slotProps={{ secondary: { component: "div" } }}
+                    />
+                  </ListItemButton>
+                );
+              })}
+            </List>
+          ) : (
+            <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 3 }}>
+              <Typography color="text.secondary">No active sessions.</Typography>
+            </Box>
+          )}
+        </Stack>
+      </CardContent>
+    </Card>
+  );
 }
 
 function initialTimezone(settings: ApplicationSettings): string {
@@ -462,9 +671,9 @@ export function App() {
       <Container maxWidth="md" sx={{ py: { xs: 4, md: 7 } }}>
         <Stack spacing={3}>
           <Box>
-            <Typography variant="h3" component="h1" gutterBottom sx={{ fontWeight: 800 }}>Settings</Typography>
+            <Typography variant="h3" component="h1" gutterBottom sx={{ fontWeight: 800 }}>Make Clip</Typography>
             <Typography color="text.secondary">
-              Connect Plex, map its media paths to read-only local sources, and choose encoding defaults.
+              Select the active Plex playback session before capturing clip boundaries.
             </Typography>
           </Box>
 
@@ -474,6 +683,7 @@ export function App() {
             </Box>
           )}
           {settings.error && <Alert severity="error">{settings.error.message}</Alert>}
+          <MakeClipScreen />
           {settings.data && <SettingsForm settings={settings.data} />}
 
           {health.error && <Alert severity="error">{health.error.message}</Alert>}
