@@ -99,7 +99,7 @@ interface PlexCandidate {
 }
 
 interface SettingsOperation {
-  kind: "clear" | "save" | "test";
+  kind: "save" | "test";
   baseUpdate: ApplicationSettingsUpdate;
   plexCandidate?: PlexCandidate;
 }
@@ -131,7 +131,7 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
         return {
           settings: updated,
           connection: null,
-          notice: operation.kind === "clear" ? "Plex token cleared." : "Settings saved.",
+          notice: "Settings saved.",
         };
       }
 
@@ -258,25 +258,13 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
               type="password"
               name="plex_token"
               label="Plex token"
-              placeholder={settings.plex_token_configured ? "Configured — leave blank to keep" : "Enter token"}
+              placeholder={settings.plex_token_configured ? "●●●●●●●●" : "Enter token"}
               inputRef={plexTokenInput}
               disabled={managed("plex_token")}
               onChange={() => setConnection(null)}
-              helperText="A blank value preserves the current token."
+              helperText="The saved token is replaced only when you enter a new one."
             />
             <ManagedLabel managed={managed("plex_token")} />
-            <Button
-              color="warning"
-              disabled={managed("plex_token") || !settings.plex_token_configured || save.isPending}
-              onClick={() =>
-                save.mutate({
-                  kind: "clear",
-                  baseUpdate: { clear_plex_token: true },
-                })
-              }
-            >
-              Clear token
-            </Button>
           </Stack>
 
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
