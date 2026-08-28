@@ -28,6 +28,7 @@ from mediaclipmakarr.source_media import (
     MediaStreamIdentity,
     ResolvedSourceMedia,
     SourceFingerprint,
+    SubtitleSelection,
     VideoColorMetadata,
     VideoStreamIdentity,
 )
@@ -229,6 +230,102 @@ def test_ffmpeg_args_force_phase_one_output_contract(tmp_path) -> None:
         argv.index("-movflags") : argv.index("-movflags") + 2
     ]
     assert any(value.startswith("comment=MediaClipMakarr ") for value in argv)
+
+
+def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "subtitle_streams": [
+                MediaStreamIdentity(
+                    stream_index=3,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                )
+            ],
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=3,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        subtitle_preroll_ms=1_000,
+        work_dir=tmp_path / "job",
+    )
+
+    assert ["-ss", "0.000"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
+    assert ["-t", "4.000"] == argv[argv.index("-t") : argv.index("-t") + 2]
+    vf = argv[argv.index("-vf") + 1]
+    assert "subtitles=" in vf
+    assert "si=3" in vf
+    assert "trim=start=1.000:duration=3.000" in vf
+    assert ["-af", "atrim=start=1.000,asetpts=PTS-STARTPTS"] == argv[
+        argv.index("-af") : argv.index("-af") + 2
+    ]
+
+
+def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="subtitle",
+                    codec_name="hdmv_pgs_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        subtitle_preroll_ms=500,
+    )
+
+    assert ["-ss", "0.500"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
+    assert "-filter_complex" in argv
+    filter_complex = argv[argv.index("-filter_complex") + 1]
+    assert "[0:4]setpts=PTS-STARTPTS[s]" in filter_complex
+    assert "[v][s]overlay" in filter_complex
+    assert "trim=start=0.500:duration=3.000" in filter_complex
+    assert "[0:1]atrim=start=0.500,asetpts=PTS-STARTPTS[outa]" in filter_complex
+    assert ["-map", "[outv]"] == argv[argv.index("-map") : argv.index("-map") + 2]
+    second_map = argv.index("-map", argv.index("-map") + 1)
+    assert ["-map", "[outa]"] == argv[second_map : second_map + 2]
 
 
 @pytest.mark.asyncio

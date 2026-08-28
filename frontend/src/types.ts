@@ -92,10 +92,12 @@ export interface PlexSession {
   plex_part_id: string | null;
   plex_part_key: string | null;
   selected_audio_streams: PlexPartStream[];
+  selected_subtitle_streams: PlexPartStream[];
 }
 
 export interface PlexPartStream {
   id: string | null;
+  key: string | null;
   stream_index: number | null;
   stream_type: number | null;
   codec: string | null;
@@ -122,6 +124,9 @@ export interface ClipCreateRequest {
   media_identity: string;
   start_ms: number;
   end_ms: number;
+  audio_stream_index?: number | null;
+  subtitle_stream_index?: number | null;
+  subtitles_enabled?: boolean;
 }
 
 export interface SourceFingerprint {
@@ -150,6 +155,44 @@ export interface VideoStreamIdentity extends MediaStreamIdentity {
   color: VideoColorMetadata;
 }
 
+export type TrackKind = "video" | "audio" | "subtitle" | "attachment";
+export type SubtitleKind = "text" | "bitmap" | "unsupported";
+
+export interface TrackDescriptor {
+  kind: TrackKind;
+  stream_index: number | null;
+  plex_track_id: string | null;
+  plex_key: string | null;
+  codec: string | null;
+  language: string | null;
+  title: string | null;
+  selected: boolean;
+  available: boolean;
+  unavailable_reason: string | null;
+  subtitle_kind: SubtitleKind | null;
+  external: boolean;
+}
+
+export interface HdrCapabilities {
+  hdr10: boolean;
+  hlg: boolean;
+  dolby_vision: boolean;
+  color: VideoColorMetadata;
+}
+
+export interface MediaCapabilities {
+  duration_ms: number | null;
+  video_tracks: TrackDescriptor[];
+  audio_tracks: TrackDescriptor[];
+  subtitle_tracks: TrackDescriptor[];
+  attachment_tracks: TrackDescriptor[];
+  default_audio_stream_index: number;
+  default_subtitle_stream_index: number | null;
+  subtitles_forced_off: boolean;
+  hdr: HdrCapabilities;
+  warnings: string[];
+}
+
 export interface ResolvedSourceMedia {
   plex_path: string;
   local_path: string;
@@ -158,7 +201,15 @@ export interface ResolvedSourceMedia {
   video_streams: VideoStreamIdentity[];
   audio_streams: MediaStreamIdentity[];
   subtitle_streams: MediaStreamIdentity[];
+  attachment_streams: MediaStreamIdentity[];
+  capabilities: MediaCapabilities | null;
   selected_audio_stream: MediaStreamIdentity;
+  selected_subtitle: {
+    enabled: boolean;
+    stream: MediaStreamIdentity | null;
+    strategy: "off" | "embedded_text" | "external_text" | "bitmap";
+    external_url: string | null;
+  };
   subtitles_forced_off: boolean;
 }
 

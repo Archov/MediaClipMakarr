@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from mediaclipmakarr.plex import PlexSession, PlexSessionSnapshot
-from mediaclipmakarr.source_media import ResolvedSourceMedia
+from mediaclipmakarr.source_media import ResolvedSourceMedia, SubtitleSelection
 
 StructuredErrorCode = Literal[
     "CLIP_RANGE_NEGATIVE",
@@ -25,7 +25,10 @@ StructuredErrorCode = Literal[
     "VIDEO_STREAM_UNAVAILABLE",
     "AUDIO_STREAM_UNAVAILABLE",
     "AUDIO_STREAM_AMBIGUOUS",
-    "ADVANCED_MEDIA_NOT_SUPPORTED",
+    "SUBTITLE_STREAM_UNAVAILABLE",
+    "SUBTITLE_STREAM_AMBIGUOUS",
+    "SUBTITLE_STREAM_UNSUPPORTED",
+    "DOLBY_VISION_UNSUPPORTED",
 ]
 
 
@@ -33,6 +36,7 @@ class StructuredError(BaseModel):
     code: str
     message: str
     retryable: bool = False
+    alternatives: list[dict[str, object]] | None = None
 
 
 class ClipCreateRequest(BaseModel):
@@ -42,6 +46,9 @@ class ClipCreateRequest(BaseModel):
     media_identity: str = Field(min_length=1)
     start_ms: int
     end_ms: int
+    audio_stream_index: int | None = None
+    subtitle_stream_index: int | None = None
+    subtitles_enabled: bool = False
 
 
 class ClipCreateValidationResult(BaseModel):
@@ -55,6 +62,7 @@ class ClipCreateValidationResult(BaseModel):
     duration_ms: int
     validated_at: datetime
     source_media: ResolvedSourceMedia | None = None
+    subtitle_selection: SubtitleSelection | None = None
 
 
 class ClipCreateValidationError(Exception):

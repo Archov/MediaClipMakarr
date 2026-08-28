@@ -52,6 +52,7 @@ class PlexConnectionRequest(BaseModel):
 
 class PlexPartStream(BaseModel):
     id: str | None = None
+    key: str | None = None
     stream_index: int | None = None
     stream_type: int | None = None
     codec: str | None = None
@@ -77,6 +78,7 @@ class PlexSession(BaseModel):
     plex_part_key: str | None = None
     plex_part_file: str | None = Field(default=None, exclude=True)
     selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
+    selected_subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
 
 
 class PlexSessionSnapshot(BaseModel):
@@ -158,6 +160,7 @@ def _display_title(video: ElementTree.Element) -> str:
 def _parse_part_stream(stream: ElementTree.Element) -> PlexPartStream:
     return PlexPartStream(
         id=stream.attrib.get("id"),
+        key=stream.attrib.get("key"),
         stream_index=_int_attribute(stream, "index"),
         stream_type=_int_attribute(stream, "streamType"),
         codec=stream.attrib.get("codec"),
@@ -209,6 +212,11 @@ def parse_video_sessions(
             for parsed in (_parse_part_stream(stream) for stream in _children(part, "Stream"))
             if parsed.stream_type == 2 and parsed.selected
         ]
+        selected_subtitle_streams = [
+            parsed
+            for parsed in (_parse_part_stream(stream) for stream in _children(part, "Stream"))
+            if parsed.stream_type == 3 and parsed.selected
+        ]
 
         sessions.append(
             PlexSession(
@@ -234,6 +242,7 @@ def parse_video_sessions(
                 plex_part_key=part_key,
                 plex_part_file=part_file,
                 selected_audio_streams=selected_audio_streams,
+                selected_subtitle_streams=selected_subtitle_streams,
             )
         )
     return sessions

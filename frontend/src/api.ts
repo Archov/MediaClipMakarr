@@ -4,6 +4,7 @@ import type {
   ClipCreateRequest,
   HealthResponse,
   JobSnapshot,
+  MediaCapabilities,
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSessionSnapshot,
@@ -84,6 +85,16 @@ export async function fetchPlexSessions(): Promise<PlexSessionSnapshot> {
     headers: { Accept: "application/json" },
   });
   return parseResponse<PlexSessionSnapshot>(response, "Plex sessions request");
+}
+
+export async function fetchMediaCapabilities(sessionIdentity: string): Promise<MediaCapabilities> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionIdentity)}/media-capabilities`,
+    {
+      headers: { Accept: "application/json" },
+    },
+  );
+  return parseResponse<MediaCapabilities>(response, "Media capabilities request");
 }
 
 export async function createClip(request: ClipCreateRequest): Promise<JobSnapshot> {

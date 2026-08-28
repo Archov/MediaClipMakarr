@@ -93,6 +93,12 @@ def probe_payload(*, color_transfer: str = "bt709", audio_indexes=(1,)) -> str:
                     "codec_name": "subrip",
                     "tags": {"language": "eng"},
                 },
+                {
+                    "index": 4,
+                    "codec_type": "subtitle",
+                    "codec_name": "hdmv_pgs_subtitle",
+                    "tags": {"language": "jpn"},
+                },
             ],
             "format": {"duration": "12.345"},
         }
@@ -143,6 +149,8 @@ async def test_resolve_and_probe_captures_fingerprint_duration_and_selected_audi
     assert result.duration_ms == 12_345
     assert result.video_streams[0].color.color_transfer == "bt709"
     assert result.selected_audio_stream.stream_index == 1
+    assert result.capabilities is not None
+    assert result.capabilities.audio_tracks[0].selected is True
     assert result.subtitle_streams[0].codec_name == "subrip"
     assert result.subtitles_forced_off is True
 
@@ -240,6 +248,91 @@ async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
             "",
         )
 
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.capabilities is not None
+    assert result.capabilities.hdr.hdr10 is True
+
+
+@pytest.mark.asyncio
+async def test_requested_audio_and_subtitle_tracks_are_selected_explicitly(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(
+            tuple(str(value) for value in argv),
+            0,
+            probe_payload(audio_indexes=(1, 2)),
+            "",
+        )
+
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_audio_stream_index=2,
+        requested_subtitle_stream_index=3,
+        subtitles_enabled=True,
+    )
+
+    assert result.selected_audio_stream.stream_index == 2
+    assert result.selected_subtitle.enabled is True
+    assert result.selected_subtitle.strategy == "embedded_text"
+    assert result.selected_subtitle.stream is not None
+    assert result.selected_subtitle.stream.stream_index == 3
+
+
+@pytest.mark.asyncio
+async def test_bitmap_subtitle_track_selects_bitmap_strategy(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_subtitle_stream_index=4,
+        subtitles_enabled=True,
+    )
+
+    assert result.selected_subtitle.strategy == "bitmap"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_subtitle_selection_returns_alternatives(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.dumps(
+        {
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                {"index": 2, "codec_type": "subtitle", "codec_name": "unknown_subtitle"},
+            ],
+            "format": {"duration": "12.345"},
+        }
+    )
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, payload, "")
+
     with pytest.raises(SourceMediaError) as error:
         await resolve_and_probe_source_media(
             session(),
@@ -247,6 +340,9 @@ async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
             Settings(_env_file=None, source_dirs=[source_root]),
             run_blocking=run_blocking,
             runner=runner,
+            requested_subtitle_stream_index=2,
+            subtitles_enabled=True,
         )
 
-    assert error.value.code == "ADVANCED_MEDIA_NOT_SUPPORTED"
+    assert error.value.code == "SUBTITLE_STREAM_UNSUPPORTED"
+    assert error.value.alternatives == []

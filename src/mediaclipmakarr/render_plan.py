@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mediaclipmakarr.clips import ClipCreateRequest
 from mediaclipmakarr.plex import PlexSession
-from mediaclipmakarr.source_media import MediaStreamIdentity, ResolvedSourceMedia
+from mediaclipmakarr.source_media import (
+    MediaStreamIdentity,
+    ResolvedSourceMedia,
+    SubtitleSelection,
+)
 
 OutputProfileId = Literal["p1-h264-aac-sdr-v1"]
 
@@ -48,7 +52,7 @@ class ClipRenderPlan(BaseModel):
     source_start_ms: int
     source_end_ms: int
     selected_audio_stream: MediaStreamIdentity
-    subtitle_stream_index: int | None = None
+    selected_subtitle: SubtitleSelection = Field(default_factory=SubtitleSelection)
     output_profile: OutputProfileId = "p1-h264-aac-sdr-v1"
     x264_preset: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -79,6 +83,7 @@ def build_clip_render_plan(
         "source_start_ms": request.start_ms,
         "source_end_ms": request.end_ms,
         "selected_audio_stream": source_media.selected_audio_stream,
+        "selected_subtitle": source_media.selected_subtitle,
         "x264_preset": x264_preset,
         "render_plan_hash": "",
     }

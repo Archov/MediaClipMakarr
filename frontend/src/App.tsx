@@ -49,6 +49,7 @@ import { type FormEvent, useEffect, useState } from "react";
 
 import {
   createClip,
+  fetchMediaCapabilities,
   fetchJob,
   fetchHealth,
   fetchPlexSessions,
@@ -65,12 +66,14 @@ import type {
   HealthStatus,
   JobSnapshot,
   JobState,
+  MediaCapabilities,
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSession,
   PlexSessionSnapshot,
   PlexSessionSnapshotStatus,
   SourcePathMapping,
+  TrackDescriptor,
 } from "./types";
 
 const theme = createTheme({
@@ -269,6 +272,97 @@ function SessionDetail({ session }: { session: PlexSession }) {
   );
 }
 
+function trackLabel(track: TrackDescriptor): string {
+  const parts = [
+    track.language?.toUpperCase(),
+    track.title,
+    track.codec,
+    track.stream_index === null ? null : `#${track.stream_index}`,
+  ].filter(Boolean);
+  return parts.join(" · ") || "Unnamed track";
+}
+
+function selectedTrackIndex(tracks: TrackDescriptor[], fallback: number | null): number | "" {
+  const selected = tracks.find((track) => track.selected && track.stream_index !== null);
+  return selected?.stream_index ?? fallback ?? "";
+}
+
+function MediaTrackSelectors({
+  capabilities,
+  audioStreamIndex,
+  subtitleStreamIndex,
+  subtitlesEnabled,
+  onAudioChange,
+  onSubtitleChange,
+}: {
+  capabilities: MediaCapabilities | undefined;
+  audioStreamIndex: number | "";
+  subtitleStreamIndex: number | "";
+  subtitlesEnabled: boolean;
+  onAudioChange: (value: number | "") => void;
+  onSubtitleChange: (enabled: boolean, value: number | "") => void;
+}) {
+  if (!capabilities) return null;
+  const subtitleOptions = capabilities.subtitle_tracks.filter((track) => track.stream_index !== null);
+  return (
+    <Stack spacing={2}>
+      <Typography variant="h6">Tracks</Typography>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+        <FormControl fullWidth>
+          <InputLabel id="audio-track-label">Audio</InputLabel>
+          <Select
+            labelId="audio-track-label"
+            label="Audio"
+            value={audioStreamIndex}
+            onChange={(event) => onAudioChange(event.target.value as number | "")}
+          >
+            {capabilities.audio_tracks.map((track) => (
+              <MenuItem
+                key={track.stream_index}
+                value={track.stream_index ?? ""}
+                disabled={!track.available}
+              >
+                {trackLabel(track)}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <FormControl fullWidth>
+          <InputLabel id="subtitle-track-label">Subtitles</InputLabel>
+          <Select
+            labelId="subtitle-track-label"
+            label="Subtitles"
+            value={subtitlesEnabled ? subtitleStreamIndex : ""}
+            onChange={(event) => {
+              const value = event.target.value as number | "";
+              onSubtitleChange(value !== "", value);
+            }}
+          >
+            <MenuItem value="">Off</MenuItem>
+            {subtitleOptions.map((track) => (
+              <MenuItem
+                key={track.stream_index}
+                value={track.stream_index ?? ""}
+                disabled={!track.available}
+              >
+                {trackLabel(track)}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      </Stack>
+      {capabilities.subtitle_tracks.some((track) => !track.available) && (
+        <Alert severity="warning">
+          Some subtitle tracks are unavailable for burning. Choose a listed available track or Off.
+        </Alert>
+      )}
+      {(capabilities.hdr.hdr10 || capabilities.hdr.hlg) && (
+        <Alert severity="info">HDR source detected. SDR tone mapping is handled in a later phase.</Alert>
+      )}
+    </Stack>
+  );
+}
+
 type Boundary = "start" | "end";
 type AppPage = "make-clip" | "settings";
 
@@ -297,6 +391,9 @@ function MakeClipScreen() {
   const [endInput, setEndInput] = useState("");
   const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
+  const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
+  const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [submittedJob, setSubmittedJob] = useState<JobSnapshot | null>(null);
   const snapshot = sessions.data;
   const selectedSession = snapshot?.sessions.find(
@@ -308,6 +405,11 @@ function MakeClipScreen() {
   const startParse = parseTimestampMs(startInput);
   const endParse = parseTimestampMs(endInput);
   const activeJob = useJobSnapshot(submittedJob);
+  const capabilities = useQuery({
+    queryKey: ["media-capabilities", selectedSessionIdentity],
+    queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
+    enabled: Boolean(selectedSessionIdentity && selectedSession),
+  });
   const clipCreate = useMutation({
     mutationFn: createClip,
     onSuccess: (job) => setSubmittedJob(job),
@@ -355,6 +457,21 @@ function MakeClipScreen() {
     setBoundaryNotice("The selected player changed media, so captured boundaries were cleared.");
   }, [selectedMediaIdentity, selectedSession]);
 
+  useEffect(() => {
+    if (!capabilities.data) return;
+    const nextAudio = selectedTrackIndex(
+      capabilities.data.audio_tracks,
+      capabilities.data.default_audio_stream_index,
+    );
+    const nextSubtitle = selectedTrackIndex(
+      capabilities.data.subtitle_tracks,
+      capabilities.data.default_subtitle_stream_index,
+    );
+    setAudioStreamIndex(nextAudio);
+    setSubtitleStreamIndex(nextSubtitle);
+    setSubtitlesEnabled(nextSubtitle !== "");
+  }, [capabilities.data]);
+
   const rangeError =
     startParse.error ??
     endParse.error ??
@@ -377,6 +494,10 @@ function MakeClipScreen() {
       media_identity: selectedMediaIdentity,
       start_ms: startMs,
       end_ms: endMs,
+      audio_stream_index: audioStreamIndex === "" ? null : Number(audioStreamIndex),
+      subtitle_stream_index:
+        subtitlesEnabled && subtitleStreamIndex !== "" ? Number(subtitleStreamIndex) : null,
+      subtitles_enabled: subtitlesEnabled,
     };
     clipCreate.mutate(request);
   };
@@ -435,6 +556,9 @@ function MakeClipScreen() {
                       setBoundary("start", displayedPosition(session, Date.now()));
                       setBoundary("end", null);
                       setBoundaryNotice(null);
+                      setAudioStreamIndex("");
+                      setSubtitleStreamIndex("");
+                      setSubtitlesEnabled(false);
                     }}
                     sx={{ borderRadius: 1, mb: 1, alignItems: "flex-start" }}
                   >
@@ -473,6 +597,33 @@ function MakeClipScreen() {
                     </Typography>
                   </Box>
                 </Stack>
+
+                {capabilities.isFetching && (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} aria-label="Loading media capabilities" />
+                    <Typography color="text.secondary">Loading media tracks…</Typography>
+                  </Stack>
+                )}
+                {capabilities.error && (
+                  <Alert severity="error">{capabilities.error.message}</Alert>
+                )}
+                <MediaTrackSelectors
+                  capabilities={capabilities.data}
+                  audioStreamIndex={audioStreamIndex}
+                  subtitleStreamIndex={subtitleStreamIndex}
+                  subtitlesEnabled={subtitlesEnabled}
+                  onAudioChange={(value) => {
+                    setAudioStreamIndex(value);
+                    setSubmittedJob(null);
+                    clipCreate.reset();
+                  }}
+                  onSubtitleChange={(enabled, value) => {
+                    setSubtitlesEnabled(enabled);
+                    setSubtitleStreamIndex(value);
+                    setSubmittedJob(null);
+                    clipCreate.reset();
+                  }}
+                />
 
                 <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start">
                   <Stack direction="row" spacing={1} alignItems="flex-start">
