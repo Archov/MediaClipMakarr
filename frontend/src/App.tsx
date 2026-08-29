@@ -46,7 +46,7 @@ import {
   createTheme,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   createClip,
@@ -446,6 +446,29 @@ function MakeClipScreen() {
     clipCreate.reset();
   };
 
+  const adjustmentInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const input = adjustmentInputRef.current;
+    if (!input) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+
+      event.preventDefault();
+
+      setAdjustmentSeconds((current) =>
+        clampAdjustmentSeconds(current + (event.deltaY < 0 ? 1 : -1)),
+      );
+    };
+
+    input.addEventListener("wheel", handleWheel, { passive: false });
+
+    return () => {
+      input.removeEventListener("wheel", handleWheel);
+    };
+  }, []);
+
   const handleBoundaryInput = (boundary: Boundary, value: string) => {
     const parsed = parseTimestampMs(value);
     if (boundary === "start") {
@@ -498,9 +521,9 @@ function MakeClipScreen() {
       ? "End must be later than Start."
       : null) ??
     (selectedSession?.duration_ms !== null &&
-    selectedSession?.duration_ms !== undefined &&
-    endMs !== null &&
-    endMs > selectedSession.duration_ms
+      selectedSession?.duration_ms !== undefined &&
+      endMs !== null &&
+      endMs > selectedSession.duration_ms
       ? "End must be within the selected media duration."
       : null);
 
@@ -705,14 +728,10 @@ function MakeClipScreen() {
 
                 <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start">
                   <TextField
+                    inputRef={adjustmentInputRef}
                     type="number"
                     label="Seconds"
                     value={adjustmentSeconds}
-                    onWheelCapture={(event) => {
-                      if (event.deltaY === 0) return;
-                      event.preventDefault();
-                      changeAdjustmentSeconds(event.deltaY < 0 ? 1 : -1);
-                    }}
                     onChange={(event) => {
                       const value = Number(event.target.value);
                       setAdjustmentSeconds(
@@ -925,14 +944,14 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
       baseUpdate,
       ...(!managed("plex_token") &&
         submittedToken && {
-          plexCandidate: {
-            test: { plex_url: plexUrl, plex_token: submittedToken },
-            save: {
-              ...(!managed("plex_url") && { plex_url: plexUrl }),
-              plex_token: submittedToken,
-            },
+        plexCandidate: {
+          test: { plex_url: plexUrl, plex_token: submittedToken },
+          save: {
+            ...(!managed("plex_url") && { plex_url: plexUrl }),
+            plex_token: submittedToken,
           },
-        }),
+        },
+      }),
     });
   };
   const testCurrentConnection = () => {
