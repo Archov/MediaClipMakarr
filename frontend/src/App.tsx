@@ -708,7 +708,7 @@ function MakeClipScreen() {
                     type="number"
                     label="Seconds"
                     value={adjustmentSeconds}
-                    onWheel={(event) => {
+                    onWheelCapture={(event) => {
                       if (event.deltaY === 0) return;
                       event.preventDefault();
                       changeAdjustmentSeconds(event.deltaY < 0 ? 1 : -1);
