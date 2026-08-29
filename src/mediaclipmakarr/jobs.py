@@ -217,7 +217,9 @@ async def fail_abandoned_jobs(engine: AsyncEngine) -> list[str]:
     return ids
 
 
-async def recover_finalizing_jobs(engine: AsyncEngine, run_blocking: BlockingRunner) -> list[str]:
+async def recover_finalizing_jobs(
+    engine: AsyncEngine, run_blocking: BlockingRunner, *, preserve_workdirs: bool = False
+) -> list[str]:
     async with engine.connect() as connection:
         rows = (
             await connection.execute(
@@ -248,6 +250,7 @@ async def recover_finalizing_jobs(engine: AsyncEngine, run_blocking: BlockingRun
             _recover_pending_installation,
             Path(str(row["temp_path"])),
             Path(str(row["target_path"])),
+            preserve_workdirs,
         )
         if not installed:
             await fail_job(
@@ -472,7 +475,11 @@ class JobRunner:
         self._stopping = False
 
     async def start(self) -> None:
-        recovered = await recover_finalizing_jobs(self.engine, self.run_blocking)
+        recovered = await recover_finalizing_jobs(
+            self.engine,
+            self.run_blocking,
+            preserve_workdirs=self.settings.preserve_job_workdirs,
+        )
         abandoned = await fail_abandoned_jobs(self.engine)
         for job_id in [*recovered, *abandoned]:
             await self._publish_durable_job_update(job_id)
@@ -506,6 +513,7 @@ class JobRunner:
             try:
                 await self._execute_claimed_job(claimed)
             except asyncio.CancelledError:
+                self._log_preserved_workdir(claimed.id, "application shutdown")
                 with contextlib.suppress(Exception):
                     await fail_job(
                         self.engine,
@@ -518,6 +526,7 @@ class JobRunner:
                     await self._publish_durable_job_update(claimed.id)
                 raise
             except Exception as error:
+                self._log_preserved_workdir(claimed.id, "job failure")
                 logger.exception("Clip render job %s failed.", claimed.id)
                 try:
                     await fail_job(
@@ -538,6 +547,13 @@ class JobRunner:
         snapshot = await get_job_snapshot(self.engine, job_id)
         await self._publish_job_update(job_id, snapshot)
         return snapshot
+
+    def _log_preserved_workdir(self, job_id: str, reason: str) -> None:
+        if not self.settings.preserve_job_workdirs:
+            return
+        workdir = self.settings.resolved_work_dir / "jobs" / job_id
+        if workdir.exists():
+            logger.warning("Preserving media job work directory after %s: %s", reason, workdir)
 
     async def _publish_job_update(
         self, job_id: str, snapshot: JobSnapshot | None = None
@@ -627,7 +643,12 @@ class JobRunner:
         )
         latest_snapshot = await self._publish_durable_job_update(claimed.id)
 
-        await self.run_blocking(_install_rendered_clip, rendered.path, destination)
+        await self.run_blocking(
+            _install_rendered_clip,
+            rendered.path,
+            destination,
+            self.settings.preserve_job_workdirs,
+        )
         await insert_clip(self.engine, clip)
         await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
         await self._publish_durable_job_update(claimed.id)
@@ -725,23 +746,33 @@ def _clip_payload(
     }
 
 
-def _install_rendered_clip(temp_path: Path, destination: Path) -> None:
+def _install_rendered_clip(
+    temp_path: Path, destination: Path, preserve_workdir: bool = False
+) -> None:
     destination = destination.resolve(strict=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise FileExistsError("The resolved clip destination already exists.")
     temp_path.replace(destination)
-    shutil.rmtree(temp_path.parent, ignore_errors=True)
+    if preserve_workdir:
+        logger.warning("Preserving completed media job work directory: %s", temp_path.parent)
+    else:
+        shutil.rmtree(temp_path.parent, ignore_errors=True)
 
 
-def _recover_pending_installation(temp_path: Path, destination: Path) -> bool:
+def _recover_pending_installation(
+    temp_path: Path, destination: Path, preserve_workdir: bool = False
+) -> bool:
     destination = destination.resolve(strict=False)
     if destination.exists():
-        shutil.rmtree(temp_path.parent, ignore_errors=True)
+        if preserve_workdir:
+            logger.warning("Preserving recovered media job work directory: %s", temp_path.parent)
+        else:
+            shutil.rmtree(temp_path.parent, ignore_errors=True)
         return True
     if not temp_path.exists():
         return False
-    _install_rendered_clip(temp_path, destination)
+    _install_rendered_clip(temp_path, destination, preserve_workdir)
     return True
 
 

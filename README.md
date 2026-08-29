@@ -49,7 +49,9 @@ Compose does not silently start against the wrong data root. Keep `MCM_COMPOSE_S
 custom directories exist and are writable by `MCM_PUID` and `MCM_PGID` before starting Compose.
 Existing Docker named volumes from older configurations are left untouched and are not migrated
 automatically. The runtime launches exactly one Uvicorn worker and contains the checksum-verified
-official Jellyfin FFmpeg `7.1.4-3` GPL portable release for amd64 or arm64.
+official Jellyfin FFmpeg `7.1.4-3` GPL portable release for amd64 or arm64. It also includes
+fontconfig and the compact DejaVu core font set so libass can resolve a reliable fallback for ASS
+styles that omit a font name; job-local embedded fonts remain the preferred subtitle-font source.
 
 ## Verification commands
 
@@ -89,6 +91,7 @@ All Compose and application environment variables use the `MCM_` prefix. The mai
 - `MCM_BLOCKING_IO_WORKERS` (defaults to 4, maximum 16)
 - `MCM_SUBPROCESS_TIMEOUT_SECONDS` (defaults to 10 seconds for tool inspection and probes)
 - `MCM_MEDIA_PREPARATION_TIMEOUT_SECONDS` (defaults to 300 seconds for cancellable subtitle/font preparation)
+- `MCM_PRESERVE_JOB_WORKDIRS` (debug only; defaults to false and preserves completed/failed job work directories when true)
 
 Plex and encoding values are normally saved from the Settings screen. Non-empty environment
 values take precedence and make their corresponding UI/API fields read-only:

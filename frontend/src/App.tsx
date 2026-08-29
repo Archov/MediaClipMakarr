@@ -567,6 +567,7 @@ function MakeClipScreen() {
                     key={session.session_identity}
                     selected={selected}
                     onClick={() => {
+                      if (selected) return;
                       setSelectedSessionIdentity(session.session_identity);
                       setSelectedMediaIdentity(session.media_identity);
                       setBoundary("start", displayedPosition(session, Date.now()));

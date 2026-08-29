@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -206,6 +207,38 @@ async def test_job_runner_finalizes_clip_and_serves_by_managed_id(tmp_path) -> N
     assert snapshot.result["clip_id"] == plan.clip_id
     assert clip is not None
     assert await asyncio.to_thread(Path(clip["file_path"]).read_bytes) == b"rendered mp4"
+
+
+def test_install_rendered_clip_preserves_workdir_only_when_enabled(tmp_path) -> None:
+    preserved_workdir = tmp_path / "work" / "jobs" / "preserved"
+    preserved_output = preserved_workdir / "rendered.mp4"
+    prepared_subtitle = preserved_workdir / "subtitles" / "selected-subtitle.ass"
+    prepared_subtitle.parent.mkdir(parents=True)
+    preserved_output.write_bytes(b"rendered")
+    prepared_subtitle.write_text("[Script Info]", encoding="utf-8")
+    preserved_destination = tmp_path / "clips" / "preserved.mp4"
+
+    with patch.object(jobs_module.logger, "warning") as warning:
+        jobs_module._install_rendered_clip(
+            preserved_output, preserved_destination, preserve_workdir=True
+        )
+
+    assert preserved_destination.read_bytes() == b"rendered"
+    assert prepared_subtitle.exists()
+    warning.assert_called_once_with(
+        "Preserving completed media job work directory: %s", preserved_workdir
+    )
+
+    cleaned_workdir = tmp_path / "work" / "jobs" / "cleaned"
+    cleaned_output = cleaned_workdir / "rendered.mp4"
+    cleaned_output.parent.mkdir(parents=True)
+    cleaned_output.write_bytes(b"rendered")
+    cleaned_destination = tmp_path / "clips" / "cleaned.mp4"
+
+    jobs_module._install_rendered_clip(cleaned_output, cleaned_destination)
+
+    assert cleaned_destination.read_bytes() == b"rendered"
+    assert not cleaned_workdir.exists()
 
 
 def test_ffmpeg_args_force_phase_one_output_contract(tmp_path) -> None:
