@@ -96,7 +96,7 @@ values take precedence and make their corresponding UI/API fields read-only:
 - `MCM_PLEX_URL` and `MCM_PLEX_TOKEN`
 - `MCM_SOURCE_PATH_MAPPINGS`, an ordered JSON array of `plex_prefix`/`local_prefix` objects
 - `MCM_TIMEZONE`, as an IANA timezone name such as `America/Chicago`
-- `MCM_X264_PRESET`, from `ultrafast` through `veryslow` (default `medium`)
+- `MCM_X264_PRESET`, from `ultrafast` through `veryslow` (default `veryfast`)
 
 For example, a Plex server reporting `D:\Media\Movies\Film.mkv` can map prefix `D:\Media` to
 the container prefix `/media`; a POSIX Plex server can similarly map `/srv/plex/media` to `/media`.

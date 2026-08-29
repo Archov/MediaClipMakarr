@@ -17,10 +17,23 @@ from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_c
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
-TEXT_SUBTITLE_PREROLL_MS = 5_000
+TEXT_SUBTITLE_PREROLL_MS = 30_000
 BITMAP_SUBTITLE_PROBE_WINDOW_MS = 15_000
 SUPPORTED_FONT_ATTACHMENT_CODECS = {"ttf", "otf", "ttc", "woff", "woff2"}
 SUPPORTED_FONT_ATTACHMENT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".woff", ".woff2"}
+SUPPORTED_FONT_ATTACHMENT_MIME_TYPES = {
+    "application/font-sfnt",
+    "application/font-woff",
+    "application/font-woff2",
+    "application/vnd.ms-opentype",
+    "application/x-font-ttf",
+    "application/x-truetype-font",
+    "font/collection",
+    "font/otf",
+    "font/ttf",
+    "font/woff",
+    "font/woff2",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,10 +109,11 @@ def build_ffmpeg_clip_args(
         "-y",
         "-ss",
         f"{start_seconds:.3f}",
-        "-i",
-        plan.source_media.local_path,
+        # Input option: decode only the requested range plus any subtitle preroll.
         "-t",
         f"{input_duration_seconds:.3f}",
+        "-i",
+        plan.source_media.local_path,
     ]
 
     subtitle_filter = _subtitle_video_filter(
@@ -148,6 +162,9 @@ def build_ffmpeg_clip_args(
             f"title={plan.title}",
             "-metadata",
             f"comment={metadata}",
+            # Output option: prevent preroll or a delayed stream from extending the clip.
+            "-t",
+            f"{duration_seconds:.3f}",
             "-progress",
             "pipe:1",
             "-nostats",
@@ -349,7 +366,11 @@ async def _extract_font_attachments(
     attachment_indexes = [
         attachment.stream_index
         for attachment in plan.source_media.attachment_streams
-        if _is_supported_font_attachment(attachment.codec_name, attachment.title)
+        if _is_supported_font_attachment(
+            attachment.codec_name,
+            attachment.filename,
+            attachment.mime_type,
+        )
     ]
     if not attachment_indexes:
         return
@@ -366,6 +387,13 @@ async def _extract_font_attachments(
             *dump_args,
             "-i",
             plan.source_media.local_path,
+            # Attachments are available after input initialization. Map a single
+            # video stream and emit zero frames so FFmpeg exits without traversing
+            # or decoding the source.
+            "-map",
+            f"0:{plan.source_media.video_streams[0].stream_index}",
+            "-frames:v",
+            "0",
             "-f",
             "null",
             "-",
@@ -375,12 +403,17 @@ async def _extract_font_attachments(
     )
 
 
-def _is_supported_font_attachment(codec_name: str | None, filename: str | None) -> bool:
+def _is_supported_font_attachment(
+    codec_name: str | None, filename: str | None, mime_type: str | None
+) -> bool:
     codec = (codec_name or "").casefold()
     if codec in SUPPORTED_FONT_ATTACHMENT_CODECS:
         return True
     suffix = Path(filename or "").suffix.casefold()
-    return suffix in SUPPORTED_FONT_ATTACHMENT_EXTENSIONS
+    if suffix in SUPPORTED_FONT_ATTACHMENT_EXTENSIONS:
+        return True
+    normalized_mime_type = (mime_type or "").split(";", maxsplit=1)[0].strip().casefold()
+    return normalized_mime_type in SUPPORTED_FONT_ATTACHMENT_MIME_TYPES
 
 
 async def _subtitle_preroll_ms(plan: ClipRenderPlan, settings: Settings) -> int:

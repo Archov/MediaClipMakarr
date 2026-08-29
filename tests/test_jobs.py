@@ -8,6 +8,7 @@ import pytest
 
 import mediaclipmakarr.jobs as jobs_module
 import mediaclipmakarr.media_renderer as media_renderer_module
+from mediaclipmakarr.clips import ClipCreateRequest
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.jobs import (
@@ -91,8 +92,6 @@ def session() -> PlexSession:
 
 
 def request_range():
-    from mediaclipmakarr.clips import ClipCreateRequest
-
     return ClipCreateRequest(
         session_identity="plex-session:living-room",
         media_identity="plex-media:movie",
@@ -239,7 +238,8 @@ def test_ffmpeg_args_force_phase_one_output_contract(tmp_path) -> None:
     assert any(value.startswith("comment=MediaClipMakarr ") for value in argv)
 
 
-def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_ass_subtitle_preroll_keeps_active_cues_and_exact_trim(tmp_path) -> None:
     source_file = tmp_path / "Movie.mkv"
     source_file.write_bytes(b"media")
     media = source_media(source_file).model_copy(
@@ -248,7 +248,7 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
                 MediaStreamIdentity(
                     stream_index=3,
                     codec_type="subtitle",
-                    codec_name="subrip",
+                    codec_name="ass",
                     language="eng",
                 )
             ],
@@ -265,41 +265,54 @@ def test_ffmpeg_args_burn_text_subtitles_with_preroll_and_exact_trim(tmp_path) -
                 stream=MediaStreamIdentity(
                     stream_index=3,
                     codec_type="subtitle",
-                    codec_name="subrip",
+                    codec_name="ass",
                     language="eng",
                 ),
                 strategy="embedded_text",
             ),
             "subtitles_forced_off": False,
+            "duration_ms": 120_000,
         }
     )
     plan = build_clip_render_plan(
         session=session(),
-        request=request_range(),
+        request=ClipCreateRequest(
+            session_identity="plex-session:living-room",
+            media_identity="plex-media:movie",
+            start_ms=60_000,
+            end_ms=65_000,
+        ),
         source_media=media,
         x264_preset="veryfast",
+    )
+    subtitle_preroll_ms = await media_renderer_module._subtitle_preroll_ms(
+        plan, Settings(_env_file=None)
     )
 
     argv = build_ffmpeg_clip_args(
         plan,
         Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
         tmp_path / "out.mp4",
-        subtitle_preroll_ms=1_000,
+        subtitle_preroll_ms=subtitle_preroll_ms,
         prepared_text_subtitle=PreparedTextSubtitle(
             path=tmp_path / "job" / "subtitles" / "selected-subtitle.ass",
             fonts_dir=tmp_path / "job" / "fonts",
         ),
     )
 
-    assert ["-ss", "0.000"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
-    assert ["-t", "4.000"] == argv[argv.index("-t") : argv.index("-t") + 2]
+    assert subtitle_preroll_ms == 30_000
+    assert ["-ss", "30.000"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
+    input_limit = argv.index("-t")
+    assert ["-t", "35.000", "-i"] == argv[input_limit : input_limit + 3]
+    output_limit = argv.index("-t", input_limit + 1)
+    assert ["-t", "5.000"] == argv[output_limit : output_limit + 2]
     vf = argv[argv.index("-vf") + 1]
     assert "subtitles=" in vf
     assert "filename=" in vf
     assert "selected-subtitle.ass" in vf
     assert ":si=" not in vf
-    assert "trim=start=1.000:duration=3.000" in vf
-    assert ["-af", "atrim=start=1.000:duration=3.000,asetpts=PTS-STARTPTS"] == argv[
+    assert "trim=start=30.000:duration=5.000" in vf
+    assert ["-af", "atrim=start=30.000:duration=5.000,asetpts=PTS-STARTPTS"] == argv[
         argv.index("-af") : argv.index("-af") + 2
     ]
 
@@ -332,8 +345,8 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
                 MediaStreamIdentity(
                     stream_index=4,
                     codec_type="attachment",
-                    codec_name="ttf",
-                    title="Show Font.ttf",
+                    filename="Show Font.ttf",
+                    mime_type="font/ttf",
                 )
             ],
             "selected_subtitle": SubtitleSelection(
@@ -397,6 +410,9 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
     assert subtitle_extract[-1].endswith("selected-subtitle.ass")
     font_extract = commands[1]
     assert "-dump_attachment:4" in font_extract
+    assert ["-map", "0:0", "-frames:v", "0", "-f", "null", "-"] == list(font_extract)[
+        font_extract.index("-map") :
+    ]
 
     assert render_argv is not None
     assert render_cwd == settings.resolved_work_dir / "jobs" / plan.job_id

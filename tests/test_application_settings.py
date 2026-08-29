@@ -60,6 +60,19 @@ async def test_timezone_catalog_distinguishes_default_from_saved_value(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_default_x264_preset_is_veryfast(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        effective = await get_effective_application_settings(engine, Settings(_env_file=None))
+    finally:
+        await engine.dispose()
+
+    assert effective.x264_preset == "veryfast"
+
+
+@pytest.mark.asyncio
 async def test_non_empty_environment_values_override_persisted_settings(tmp_path) -> None:
     database_path = tmp_path / "application.db"
     upgrade_database(database_path)
@@ -112,6 +125,7 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert all(effective.environment_managed.values())
     assert empty_overrides.plex_url == "http://database-plex:32400"
     assert empty_overrides.plex_token == "database-secret"
+    assert empty_overrides.x264_preset == "slow"
     assert not any(empty_overrides.environment_managed.values())
 
 

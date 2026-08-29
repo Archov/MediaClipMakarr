@@ -77,6 +77,8 @@ class MediaStreamIdentity(BaseModel):
     codec_name: str | None = None
     language: str | None = None
     title: str | None = None
+    filename: str | None = None
+    mime_type: str | None = None
 
 
 TrackKind = Literal["video", "audio", "subtitle", "attachment"]
@@ -399,6 +401,8 @@ def _stream_identity(stream: FFProbeStream) -> MediaStreamIdentity:
         codec_name=stream.codec_name,
         language=_stream_language(stream),
         title=_stream_title(stream),
+        filename=_attachment_filename(stream),
+        mime_type=_attachment_mime_type(stream),
     )
 
 
@@ -428,13 +432,27 @@ def _track_descriptor(
 
 
 def _stream_language(stream: FFProbeStream) -> str | None:
-    value = stream.tags.get("language")
-    return str(value) if value else None
+    return _stream_tag(stream, "language")
 
 
 def _stream_title(stream: FFProbeStream) -> str | None:
-    value = stream.tags.get("title")
-    return str(value) if value else None
+    return _stream_tag(stream, "title")
+
+
+def _attachment_filename(stream: FFProbeStream) -> str | None:
+    return _stream_tag(stream, "filename")
+
+
+def _attachment_mime_type(stream: FFProbeStream) -> str | None:
+    return _stream_tag(stream, "mimetype", "mime_type", "content_type")
+
+
+def _stream_tag(stream: FFProbeStream, *names: str) -> str | None:
+    expected = {name.casefold() for name in names}
+    for name, value in stream.tags.items():
+        if name.casefold() in expected and value:
+            return str(value)
+    return None
 
 
 def _audio_streams(probe: FFProbePayload) -> list[FFProbeStream]:

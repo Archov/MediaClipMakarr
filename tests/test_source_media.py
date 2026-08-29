@@ -156,6 +156,39 @@ async def test_resolve_and_probe_captures_fingerprint_duration_and_selected_audi
 
 
 @pytest.mark.asyncio
+async def test_probe_preserves_attachment_filename_and_mime_type(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"].append(
+        {
+            "index": 5,
+            "codec_type": "attachment",
+            "tags": {
+                "filename": "Cabin-Bold.otf",
+                "mimetype": "application/vnd.ms-opentype",
+            },
+        }
+    )
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
+
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    attachment = result.attachment_streams[0]
+    assert attachment.filename == "Cabin-Bold.otf"
+    assert attachment.mime_type == "application/vnd.ms-opentype"
+
+
+@pytest.mark.asyncio
 async def test_unmapped_or_missing_paths_do_not_reach_ffprobe(tmp_path) -> None:
     calls = 0
 
