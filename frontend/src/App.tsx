@@ -9,6 +9,7 @@ import ErrorRounded from "@mui/icons-material/ErrorRounded";
 import MovieRounded from "@mui/icons-material/MovieRounded";
 import PersonRounded from "@mui/icons-material/PersonRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
+import RemoveRounded from "@mui/icons-material/RemoveRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRounded from "@mui/icons-material/SmartDisplayRounded";
@@ -535,6 +536,10 @@ function MakeClipScreen() {
     );
   };
 
+  const changeAdjustmentSeconds = (change: number) => {
+    setAdjustmentSeconds((current) => clampAdjustmentSeconds(current + change));
+  };
+
   return (
     <Card variant="outlined">
       <CardContent>
@@ -703,6 +708,11 @@ function MakeClipScreen() {
                     type="number"
                     label="Seconds"
                     value={adjustmentSeconds}
+                    onWheel={(event) => {
+                      if (event.deltaY === 0) return;
+                      event.preventDefault();
+                      changeAdjustmentSeconds(event.deltaY < 0 ? 1 : -1);
+                    }}
                     onChange={(event) => {
                       const value = Number(event.target.value);
                       setAdjustmentSeconds(
@@ -718,6 +728,22 @@ function MakeClipScreen() {
                     }}
                     sx={{ width: "12ch" }}
                   />
+                  <Stack direction="row" spacing={0.5} sx={{ minHeight: 56 }}>
+                    <IconButton
+                      aria-label="Decrease seconds"
+                      onClick={() => changeAdjustmentSeconds(-1)}
+                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                    >
+                      <RemoveRounded />
+                    </IconButton>
+                    <IconButton
+                      aria-label="Increase seconds"
+                      onClick={() => changeAdjustmentSeconds(1)}
+                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                    >
+                      <AddRounded />
+                    </IconButton>
+                  </Stack>
                   <Button
                     variant="outlined"
                     disabled={startMs === null}
