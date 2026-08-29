@@ -381,6 +381,21 @@ function clampBoundaryMs(value: number, maximumMs: number | null): number {
   return maximumMs === null ? nonNegative : Math.min(nonNegative, maximumMs);
 }
 
+function mediaCapabilitiesVersion(session: PlexSession | undefined): string {
+  if (!session) return "";
+  const streamSelection = (streams: PlexSession["selected_audio_streams"]): string[] =>
+    streams
+      .map((stream) => [stream.id, stream.key, stream.stream_index, stream.codec].join("/"))
+      .sort();
+  return JSON.stringify({
+    mediaIdentity: session.media_identity,
+    partId: session.plex_part_id,
+    partKey: session.plex_part_key,
+    audio: streamSelection(session.selected_audio_streams),
+    subtitles: streamSelection(session.selected_subtitle_streams),
+  });
+}
+
 function MakeClipScreen() {
   const sessions = useLivePlexSessions();
   const [selectedSessionIdentity, setSelectedSessionIdentity] = useState<string | null>(null);
@@ -402,11 +417,12 @@ function MakeClipScreen() {
   const now = useClock(selectedSession?.state.toLowerCase() === "playing");
   const livePositionMs = selectedSession ? displayedPosition(selectedSession, now) : null;
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
+  const capabilitiesVersion = mediaCapabilitiesVersion(selectedSession);
   const startParse = parseTimestampMs(startInput);
   const endParse = parseTimestampMs(endInput);
   const activeJob = useJobSnapshot(submittedJob);
   const capabilities = useQuery({
-    queryKey: ["media-capabilities", selectedSessionIdentity],
+    queryKey: ["media-capabilities", selectedSessionIdentity, capabilitiesVersion],
     queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
     enabled: Boolean(selectedSessionIdentity && selectedSession),
   });
