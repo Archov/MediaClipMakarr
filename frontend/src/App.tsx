@@ -447,8 +447,11 @@ function MakeClipScreen() {
   };
 
   const adjustmentInputRef = useRef<HTMLInputElement>(null);
+  const hasSelectedSession = Boolean(selectedSession);
 
   useEffect(() => {
+    if (!hasSelectedSession) return;
+
     const input = adjustmentInputRef.current;
     if (!input) return;
 
@@ -467,7 +470,7 @@ function MakeClipScreen() {
     return () => {
       input.removeEventListener("wheel", handleWheel);
     };
-  }, []);
+  }, [hasSelectedSession]);
 
   const handleBoundaryInput = (boundary: Boundary, value: string) => {
     const parsed = parseTimestampMs(value);
