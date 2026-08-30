@@ -38,6 +38,7 @@ SourceMediaErrorCode = Literal[
     "EXTERNAL_SUBTITLE_STREAM_UNAVAILABLE",
     "EXTERNAL_SUBTITLE_URL_UNAVAILABLE",
     "EXTERNAL_SUBTITLE_URL_INVALID",
+    "HDR_TONEMAPPING_UNSUPPORTED",
     "DOLBY_VISION_UNSUPPORTED",
 ]
 
@@ -263,7 +264,7 @@ async def resolve_and_probe_source_media(
         bootstrap_settings.resolved_source_dirs,
     )
     probe = await _probe_source(source_file.path, bootstrap_settings, runner=runner)
-    _reject_unsupported_dolby_vision(probe)
+    _reject_unsupported_hdr(probe)
     video_streams = _video_streams(probe)
     if not video_streams:
         raise SourceMediaError(
@@ -819,7 +820,7 @@ def _hdr_capabilities(stream: FFProbeStream | None) -> HdrCapabilities:
     )
 
 
-def _reject_unsupported_dolby_vision(probe: FFProbePayload) -> None:
+def _reject_unsupported_hdr(probe: FFProbePayload) -> None:
     for stream in probe.streams:
         if stream.codec_type != "video":
             continue
@@ -828,12 +829,17 @@ def _reject_unsupported_dolby_vision(probe: FFProbePayload) -> None:
                 "DOLBY_VISION_UNSUPPORTED",
                 "Dolby Vision sources need a confirmed compatible base layer before rendering.",
             )
+        transfer = (stream.color_transfer or "").casefold()
+        if transfer in {"smpte2084", "arib-std-b67"}:
+            raise SourceMediaError(
+                "HDR_TONEMAPPING_UNSUPPORTED",
+                "HDR10 and HLG sources cannot be rendered until SDR tone mapping is available.",
+            )
 
 
 def _has_dolby_vision_metadata(stream: FFProbeStream) -> bool:
-    values: list[str] = []
-    values.extend(str(value) for value in stream.tags.values())
     for item in stream.side_data_list:
-        values.extend(str(value) for value in item.values())
-    text = " ".join(values).casefold()
-    return "dolby vision" in text or "dovi" in text
+        side_data_type = str(item.get("side_data_type") or "").casefold()
+        if side_data_type == "dovi configuration record" or item.get("dv_profile") is not None:
+            return True
+    return (stream.model_extra or {}).get("dv_profile") is not None

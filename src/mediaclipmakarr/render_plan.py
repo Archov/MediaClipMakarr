@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mediaclipmakarr.clips import ClipCreateRequest
 from mediaclipmakarr.plex import PlexSession
@@ -57,6 +57,16 @@ class ClipRenderPlan(BaseModel):
     x264_preset: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_subtitle_stream_index(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        normalized = value.copy()
+        normalized.pop("subtitle_stream_index", None)
+        normalized.pop("selected_subtitle_stream_index", None)
+        return normalized
 
 
 def build_clip_render_plan(

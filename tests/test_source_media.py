@@ -272,7 +272,8 @@ async def test_selected_audio_must_map_unambiguously(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
+@pytest.mark.parametrize("transfer", ["smpte2084", "arib-std-b67"])
+async def test_hdr_sources_are_rejected_until_tone_mapping_is_available(tmp_path, transfer) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()
     (source_root / "Movie.mkv").write_bytes(b"fake media")
@@ -281,9 +282,35 @@ async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
         return CommandResult(
             tuple(str(value) for value in argv),
             0,
-            probe_payload(color_transfer="smpte2084"),
+            probe_payload(color_transfer=transfer),
             "",
         )
+
+    with pytest.raises(SourceMediaError) as error:
+        await resolve_and_probe_source_media(
+            session(),
+            effective_settings(source_root),
+            Settings(_env_file=None, source_dirs=[source_root]),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert error.value.code == "HDR_TONEMAPPING_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_dolby_vision_detection_uses_authoritative_ffprobe_metadata_only(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"][0]["tags"] = {
+        "title": "Dovi is a character name",
+        "encoder": "dovi-test-encoder",
+    }
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
 
     result = await resolve_and_probe_source_media(
         session(),
@@ -294,7 +321,32 @@ async def test_hdr_sources_are_rejected_for_phase_one(tmp_path) -> None:
     )
 
     assert result.capabilities is not None
-    assert result.capabilities.hdr.hdr10 is True
+    assert result.capabilities.hdr.dolby_vision is False
+
+
+@pytest.mark.asyncio
+async def test_dolby_vision_configuration_record_is_rejected(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"][0]["side_data_list"] = [
+        {"side_data_type": "DOVI configuration record", "dv_profile": 8}
+    ]
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
+
+    with pytest.raises(SourceMediaError) as error:
+        await resolve_and_probe_source_media(
+            session(),
+            effective_settings(source_root),
+            Settings(_env_file=None, source_dirs=[source_root]),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert error.value.code == "DOLBY_VISION_UNSUPPORTED"
 
 
 @pytest.mark.asyncio

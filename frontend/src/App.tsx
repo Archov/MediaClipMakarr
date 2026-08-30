@@ -284,8 +284,10 @@ function trackLabel(track: TrackDescriptor): string {
 }
 
 function selectedTrackIndex(tracks: TrackDescriptor[], fallback: number | null): number | "" {
-  const selected = tracks.find((track) => track.selected && track.stream_index !== null);
-  return selected?.stream_index ?? fallback ?? "";
+  const available = tracks.filter((track) => track.available && track.stream_index !== null);
+  const selected = available.find((track) => track.selected);
+  const fallbackTrack = available.find((track) => track.stream_index === fallback);
+  return selected?.stream_index ?? fallbackTrack?.stream_index ?? available[0]?.stream_index ?? "";
 }
 
 function MediaTrackSelectors({
@@ -355,6 +357,9 @@ function MediaTrackSelectors({
       {capabilities.warnings.map((warning) => (
         <Alert key={warning} severity="warning">{warning}</Alert>
       ))}
+      {capabilities.hdr.dolby_vision && (
+        <Alert severity="warning">Dolby Vision rendering is unavailable.</Alert>
+      )}
       {(capabilities.hdr.hdr10 || capabilities.hdr.hlg) && (
         <Alert severity="info">HDR source detected. SDR tone mapping is handled in a later phase.</Alert>
       )}
