@@ -148,6 +148,9 @@ def test_video_session_uses_selected_media_part_and_audio_stream() -> None:
             <Stream id="stream-video" streamType="1" index="0" />
             <Stream id="stream-audio" streamType="2" index="2" codec="aac"
               languageCode="eng" title="Stereo" selected="1" />
+            <Stream id="stream-subtitle-external" streamType="3" index="-1" codec="srt"
+              languageCode="eng" title="External English" key="/library/streams/501.srt"
+              selected="1" />
           </Part>
         </Media>
       </Video>
@@ -163,6 +166,8 @@ def test_video_session_uses_selected_media_part_and_audio_stream() -> None:
     assert len(session.selected_audio_streams) == 1
     assert session.selected_audio_streams[0].stream_index == 2
     assert session.selected_audio_streams[0].language == "eng"
+    assert session.selected_subtitle_streams[0].key == "/library/streams/501.srt"
+    assert session.subtitle_streams[0].codec == "srt"
 
 
 @pytest.mark.asyncio

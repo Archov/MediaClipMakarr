@@ -121,6 +121,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async def load_cached_application_settings():
                 return app.state.effective_application_settings
 
+            async def load_cached_plex_token() -> str | None:
+                return app.state.effective_application_settings.plex_token
+
             app.state.plex_session_poller = PlexSessionPoller(
                 load_cached_application_settings
             )
@@ -138,6 +141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 application_settings,
                 run_blocking=executor.run,
                 events=app.state.job_events,
+                plex_token_loader=load_cached_plex_token,
             )
             await app.state.job_runner.start()
             yield

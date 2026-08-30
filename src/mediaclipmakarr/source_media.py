@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -34,6 +35,9 @@ SourceMediaErrorCode = Literal[
     "SUBTITLE_STREAM_UNAVAILABLE",
     "SUBTITLE_STREAM_AMBIGUOUS",
     "SUBTITLE_STREAM_UNSUPPORTED",
+    "EXTERNAL_SUBTITLE_STREAM_UNAVAILABLE",
+    "EXTERNAL_SUBTITLE_URL_UNAVAILABLE",
+    "EXTERNAL_SUBTITLE_URL_INVALID",
     "DOLBY_VISION_UNSUPPORTED",
 ]
 
@@ -273,9 +277,11 @@ async def resolve_and_probe_source_media(
     )
     selected_subtitle = _select_subtitle_stream(
         probe,
+        session.subtitle_streams or session.selected_subtitle_streams,
         session.selected_subtitle_streams,
         requested_stream_index=requested_subtitle_stream_index,
         subtitles_enabled=subtitles_enabled,
+        plex_url=effective_settings.plex_url,
     )
     capabilities = _media_capabilities(
         probe,
@@ -520,12 +526,15 @@ def _select_audio_stream(
 
 def _select_subtitle_stream(
     probe: FFProbePayload,
+    plex_subtitle_streams: Sequence[PlexPartStream],
     selected_subtitle_streams: Sequence[PlexPartStream],
     *,
     requested_stream_index: int | None,
     subtitles_enabled: bool,
+    plex_url: str,
 ) -> SubtitleSelection:
     subtitle_streams = [stream for stream in probe.streams if stream.codec_type == "subtitle"]
+    external_streams = _external_text_subtitle_streams(probe, plex_subtitle_streams)
     if not subtitles_enabled:
         return SubtitleSelection(enabled=False, strategy="off")
 
@@ -536,6 +545,16 @@ def _select_subtitle_stream(
             None,
         )
         if selected is None:
+            external = next(
+                (
+                    stream
+                    for stream in external_streams
+                    if stream.stream_index == requested_stream_index
+                ),
+                None,
+            )
+            if external is not None:
+                return _external_subtitle_selection(external, plex_url)
             raise SourceMediaError(
                 "SUBTITLE_STREAM_UNAVAILABLE",
                 "The requested subtitle stream is not present in the probed source file.",
@@ -563,6 +582,16 @@ def _select_subtitle_stream(
                 None,
             )
         if selected is None:
+            external = next(
+                (
+                    stream
+                    for stream in external_streams
+                    if _same_plex_stream(stream, plex_selected)
+                ),
+                None,
+            )
+            if external is not None:
+                return _external_subtitle_selection(external, plex_url)
             raise SourceMediaError(
                 "SUBTITLE_STREAM_UNAVAILABLE",
                 "The Plex-selected subtitle stream is not present in the probed source file.",
@@ -585,6 +614,72 @@ def _select_subtitle_stream(
     )
 
 
+def _external_text_subtitle_streams(
+    probe: FFProbePayload, plex_subtitle_streams: Sequence[PlexPartStream]
+) -> list[PlexPartStream]:
+    embedded_indexes = {
+        stream.index for stream in probe.streams if stream.codec_type == "subtitle"
+    }
+    return [
+        stream
+        for stream in plex_subtitle_streams
+        if stream.key
+        and stream.stream_index not in embedded_indexes
+        and _subtitle_kind(stream.codec) == "text"
+    ]
+
+
+def _external_subtitle_selection(stream: PlexPartStream, plex_url: str) -> SubtitleSelection:
+    if stream.stream_index is None:
+        raise SourceMediaError(
+            "EXTERNAL_SUBTITLE_STREAM_UNAVAILABLE",
+            "Plex did not provide a selectable stream index for the external subtitle.",
+            retryable=True,
+        )
+    if not stream.key:
+        raise SourceMediaError(
+            "EXTERNAL_SUBTITLE_URL_UNAVAILABLE",
+            "Plex did not provide a download path for the selected external subtitle.",
+            retryable=True,
+        )
+    return SubtitleSelection(
+        enabled=True,
+        stream=MediaStreamIdentity(
+            stream_index=stream.stream_index,
+            codec_type="subtitle",
+            codec_name=stream.codec,
+            language=stream.language,
+            title=stream.title,
+        ),
+        strategy="external_text",
+        external_url=_external_subtitle_url(plex_url, stream.key),
+    )
+
+
+def _external_subtitle_url(plex_url: str, key: str) -> str:
+    parsed = urlsplit(key)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+        raise SourceMediaError(
+            "EXTERNAL_SUBTITLE_URL_INVALID",
+            "Plex returned an invalid download path for the selected external subtitle.",
+        )
+    if not plex_url:
+        raise SourceMediaError(
+            "EXTERNAL_SUBTITLE_URL_UNAVAILABLE",
+            "The Plex server URL is unavailable for the selected external subtitle.",
+            retryable=True,
+        )
+    return f"{plex_url}{key}"
+
+
+def _same_plex_stream(left: PlexPartStream, right: PlexPartStream) -> bool:
+    return (
+        (left.id is not None and left.id == right.id)
+        or (left.key is not None and left.key == right.key)
+        or (left.stream_index is not None and left.stream_index == right.stream_index)
+    )
+
+
 def _media_capabilities(
     probe: FFProbePayload,
     session: PlexSession,
@@ -595,6 +690,7 @@ def _media_capabilities(
     video = _video_streams(probe)
     audio = _audio_streams(probe)
     subtitles = [stream for stream in probe.streams if stream.codec_type == "subtitle"]
+    external_subtitles = _external_text_subtitle_streams(probe, session.subtitle_streams)
     attachments = [stream for stream in probe.streams if stream.codec_type == "attachment"]
     selected_subtitle_index = (
         selected_subtitle.stream.stream_index
@@ -602,6 +698,21 @@ def _media_capabilities(
         else _default_plex_stream_index(session.selected_subtitle_streams)
     )
     first_video = video[0] if video else None
+    subtitle_tracks = [
+        _track_descriptor(
+            stream,
+            kind="subtitle",
+            selected=stream.index == selected_subtitle_index,
+            plex_stream=_matching_plex_stream(stream, session.selected_subtitle_streams),
+        )
+        for stream in subtitles
+    ] + [
+        _external_subtitle_track_descriptor(
+            stream,
+            selected=stream.stream_index == selected_subtitle_index,
+        )
+        for stream in external_subtitles
+    ]
     return MediaCapabilities(
         duration_ms=_duration_ms(probe),
         video_tracks=[
@@ -617,15 +728,7 @@ def _media_capabilities(
             )
             for stream in audio
         ],
-        subtitle_tracks=[
-            _track_descriptor(
-                stream,
-                kind="subtitle",
-                selected=stream.index == selected_subtitle_index,
-                plex_stream=_matching_plex_stream(stream, session.selected_subtitle_streams),
-            )
-            for stream in subtitles
-        ],
+        subtitle_tracks=subtitle_tracks,
         attachment_tracks=[
             _track_descriptor(stream, kind="attachment", selected=False)
             for stream in attachments
@@ -634,7 +737,11 @@ def _media_capabilities(
         default_subtitle_stream_index=selected_subtitle_index,
         subtitles_forced_off=selected_subtitle_index is None,
         hdr=_hdr_capabilities(first_video),
-        warnings=[],
+        warnings=[
+            track.unavailable_reason
+            for track in subtitle_tracks
+            if track.unavailable_reason is not None
+        ],
     )
 
 
@@ -644,6 +751,31 @@ def _matching_plex_stream(
     return next(
         (candidate for candidate in plex_streams if candidate.stream_index == stream.index),
         None,
+    )
+
+
+def _external_subtitle_track_descriptor(
+    stream: PlexPartStream, *, selected: bool
+) -> TrackDescriptor:
+    available = stream.stream_index is not None and bool(stream.key)
+    reason = None
+    if stream.stream_index is None:
+        reason = "Plex did not provide a selectable stream index for this external subtitle."
+    elif not stream.key:
+        reason = "Plex did not provide a download path for this external subtitle."
+    return TrackDescriptor(
+        kind="subtitle",
+        stream_index=stream.stream_index,
+        plex_track_id=stream.id,
+        plex_key=stream.key,
+        codec=stream.codec,
+        language=stream.language,
+        title=stream.title,
+        selected=selected,
+        available=available,
+        unavailable_reason=reason,
+        subtitle_kind="text",
+        external=True,
     )
 
 
@@ -663,7 +795,7 @@ def _alternative_tracks(streams: Sequence[FFProbeStream]) -> list[dict[str, Any]
 
 def _subtitle_kind(codec_name: str | None) -> SubtitleKind:
     codec = (codec_name or "").casefold()
-    if codec in {"subrip", "ass", "ssa", "webvtt", "mov_text", "text"}:
+    if codec in {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}:
         return "text"
     if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}:
         return "bitmap"

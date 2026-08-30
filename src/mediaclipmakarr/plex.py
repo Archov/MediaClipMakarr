@@ -79,6 +79,7 @@ class PlexSession(BaseModel):
     plex_part_file: str | None = Field(default=None, exclude=True)
     selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
     selected_subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
+    subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
 
 
 class PlexSessionSnapshot(BaseModel):
@@ -207,16 +208,12 @@ def parse_video_sessions(
         part_id = part.attrib.get("id") if part is not None else None
         part_key = part.attrib.get("key") if part is not None else None
         part_file = part.attrib.get("file") if part is not None else None
+        part_streams = [_parse_part_stream(stream) for stream in _children(part, "Stream")]
         selected_audio_streams = [
-            parsed
-            for parsed in (_parse_part_stream(stream) for stream in _children(part, "Stream"))
-            if parsed.stream_type == 2 and parsed.selected
+            parsed for parsed in part_streams if parsed.stream_type == 2 and parsed.selected
         ]
-        selected_subtitle_streams = [
-            parsed
-            for parsed in (_parse_part_stream(stream) for stream in _children(part, "Stream"))
-            if parsed.stream_type == 3 and parsed.selected
-        ]
+        subtitle_streams = [parsed for parsed in part_streams if parsed.stream_type == 3]
+        selected_subtitle_streams = [parsed for parsed in subtitle_streams if parsed.selected]
 
         sessions.append(
             PlexSession(
@@ -243,6 +240,7 @@ def parse_video_sessions(
                 plex_part_file=part_file,
                 selected_audio_streams=selected_audio_streams,
                 selected_subtitle_streams=selected_subtitle_streams,
+                subtitle_streams=subtitle_streams,
             )
         )
     return sessions

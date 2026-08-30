@@ -8,7 +8,11 @@ import pytest
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.plex import PlexPartStream, PlexSession
-from mediaclipmakarr.source_media import SourceMediaError, resolve_and_probe_source_media
+from mediaclipmakarr.source_media import (
+    SourceMediaError,
+    resolve_and_probe_source_media,
+    resolve_media_capabilities,
+)
 from mediaclipmakarr.source_paths import SourcePathMapping
 from mediaclipmakarr.subprocesses import CommandResult
 
@@ -348,6 +352,47 @@ async def test_bitmap_subtitle_track_selects_bitmap_strategy(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_external_text_subtitle_uses_the_plex_stream_download_path(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    external = PlexPartStream(
+        id="external-subtitle",
+        key="/library/streams/501.srt",
+        stream_index=-1,
+        stream_type=3,
+        codec="srt",
+        language="eng",
+        selected=True,
+    )
+    selected_session = session().model_copy(
+        update={
+            "selected_subtitle_streams": [external],
+            "subtitle_streams": [external],
+        }
+    )
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        selected_session,
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_subtitle_stream_index=-1,
+        subtitles_enabled=True,
+    )
+
+    assert result.selected_subtitle.strategy == "external_text"
+    assert result.selected_subtitle.external_url == "http://plex.example:32400/library/streams/501.srt"
+    assert result.capabilities is not None
+    assert result.capabilities.subtitle_tracks[-1].external is True
+    assert result.capabilities.subtitle_tracks[-1].selected is True
+
+
+@pytest.mark.asyncio
 async def test_unsupported_subtitle_selection_returns_alternatives(tmp_path) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()
@@ -379,3 +424,28 @@ async def test_unsupported_subtitle_selection_returns_alternatives(tmp_path) -> 
 
     assert error.value.code == "SUBTITLE_STREAM_UNSUPPORTED"
     assert error.value.alternatives == []
+
+
+@pytest.mark.asyncio
+async def test_media_capabilities_report_unavailable_subtitle_warnings(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"].append(
+        {"index": 9, "codec_type": "subtitle", "codec_name": "unknown_subtitle"}
+    )
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
+
+    result = await resolve_media_capabilities(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.capabilities is not None
+    assert result.capabilities.warnings == ["This subtitle codec cannot be burned yet."]

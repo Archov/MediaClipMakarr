@@ -352,11 +352,9 @@ function MediaTrackSelectors({
           </Select>
         </FormControl>
       </Stack>
-      {capabilities.subtitle_tracks.some((track) => !track.available) && (
-        <Alert severity="warning">
-          Some subtitle tracks are unavailable for burning. Choose a listed available track or Off.
-        </Alert>
-      )}
+      {capabilities.warnings.map((warning) => (
+        <Alert key={warning} severity="warning">{warning}</Alert>
+      ))}
       {(capabilities.hdr.hdr10 || capabilities.hdr.hlg) && (
         <Alert severity="info">HDR source detected. SDR tone mapping is handled in a later phase.</Alert>
       )}

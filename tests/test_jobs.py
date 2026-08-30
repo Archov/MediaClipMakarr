@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 import mediaclipmakarr.jobs as jobs_module
@@ -209,6 +213,150 @@ async def test_job_runner_finalizes_clip_and_serves_by_managed_id(tmp_path) -> N
     assert await asyncio.to_thread(Path(clip["file_path"]).read_bytes) == b"rendered mp4"
 
 
+@pytest.mark.asyncio
+async def test_job_runner_supplies_current_plex_token_for_external_subtitle(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    observed_token: str | None = None
+
+    async def renderer(plan, settings, *, progress):
+        nonlocal observed_token
+        observed_token = settings.plex_token
+        await progress(1.0, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered mp4")
+        return RenderedClipFile(path=output, duration_ms=plan.source_end_ms - plan.source_start_ms)
+
+    async def load_plex_token() -> str | None:
+        return "current-plex-token"
+
+    try:
+        settings = Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=tmp_path / "work",
+            clip_dir=tmp_path / "clips",
+            source_dirs=[tmp_path],
+        )
+        media = source_media(source_file).model_copy(
+            update={
+                "selected_subtitle": SubtitleSelection(
+                    enabled=True,
+                    stream=MediaStreamIdentity(
+                        stream_index=-1,
+                        codec_type="subtitle",
+                        codec_name="srt",
+                    ),
+                    strategy="external_text",
+                    external_url="http://plex.example:32400/library/streams/501.srt",
+                ),
+                "subtitles_forced_off": False,
+            }
+        )
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=media,
+            x264_preset="veryfast",
+        )
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+            renderer=renderer,
+            plex_token_loader=load_plex_token,
+        )
+        await enqueue_clip_create_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-token")
+        assert claimed is not None
+        await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert observed_token == "current-plex-token"
+
+
+@pytest.mark.asyncio
+async def test_preparation_failure_is_structured_and_cleans_its_workdir(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    started = asyncio.Event()
+
+    async def renderer(plan, settings, *, progress):
+        workdir = settings.resolved_work_dir / "jobs" / plan.job_id
+        (workdir / "subtitles").mkdir(parents=True)
+        (workdir / "fonts").mkdir()
+        started.set()
+        raise media_renderer_module.SubtitleDecoderError(
+            "FFmpeg could not decode the selected subtitle during preparation."
+        )
+
+    try:
+        settings = Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=tmp_path / "work",
+            clip_dir=tmp_path / "clips",
+            source_dirs=[tmp_path],
+        )
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+            renderer=renderer,
+        )
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        await runner.start()
+        runner.wake()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        snapshot = await wait_for_job_state(engine, queued.id, "FAILED")
+        await runner.stop()
+    finally:
+        await engine.dispose()
+
+    assert snapshot.error is not None
+    assert snapshot.error.code == "SUBTITLE_DECODER_FAILED"
+    assert not (settings.resolved_work_dir / "jobs" / plan.job_id).exists()
+
+
+def test_stale_workdir_cleanup_skips_active_and_recent_jobs(tmp_path) -> None:
+    jobs_dir = tmp_path / "work" / "jobs"
+    stale = jobs_dir / "job-stale"
+    active = jobs_dir / "job-active"
+    recent = jobs_dir / "job-recent"
+    for directory in (stale, active, recent):
+        directory.mkdir(parents=True)
+    stale_time = time.time() - jobs_module.STALE_WORKDIR_AGE_SECONDS - 1
+    os.utime(stale, (stale_time, stale_time))
+    os.utime(active, (stale_time, stale_time))
+
+    removed = jobs_module._remove_stale_job_workdirs(
+        jobs_dir,
+        {"job-active"},
+        time.time() - jobs_module.STALE_WORKDIR_AGE_SECONDS,
+    )
+
+    assert removed == [stale]
+    assert not stale.exists()
+    assert active.exists()
+    assert recent.exists()
+
+
 def test_install_rendered_clip_preserves_workdir_only_when_enabled(tmp_path) -> None:
     preserved_workdir = tmp_path / "work" / "jobs" / "preserved"
     preserved_output = preserved_workdir / "rendered.mp4"
@@ -351,6 +499,96 @@ async def test_ass_subtitle_preroll_keeps_active_cues_and_exact_trim(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_bitmap_fixture_packet_preroll_keeps_event_beginning_before_clip_start() -> None:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        pytest.skip("ffprobe is required for the bitmap subtitle fixture test")
+
+    fixture = Path(__file__).parent / "fixtures" / "bitmap-boundary.mkv"
+    media = source_media(fixture).model_copy(
+        update={
+            "duration_ms": 4_521,
+            "subtitle_streams": [
+                MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="dvd_subtitle",
+                    language="eng",
+                )
+            ],
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="dvd_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=ClipCreateRequest(
+            session_identity="plex-session:living-room",
+            media_identity="plex-media:movie",
+            start_ms=1_000,
+            end_ms=2_000,
+        ),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    preroll_ms = await media_renderer_module._subtitle_preroll_ms(
+        plan,
+        Settings(_env_file=None, ffprobe_path=Path(ffprobe)),
+    )
+
+    assert preroll_ms == 1_000
+
+
+@pytest.mark.asyncio
+async def test_bitmap_packet_probe_failure_is_a_structured_preroll_error(
+    monkeypatch, tmp_path
+) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="subtitle",
+                    codec_name="hdmv_pgs_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    async def fail_probe(*_args, **_kwargs):
+        raise media_renderer_module.CommandError("ffprobe timed out")
+
+    monkeypatch.setattr(media_renderer_module, "run_command", fail_probe)
+
+    with pytest.raises(media_renderer_module.BitmapSubtitlePrerollIndeterminateError) as error:
+        await media_renderer_module._subtitle_preroll_ms(plan, Settings(_env_file=None))
+
+    assert error.value.job_error_code == "BITMAP_SUBTITLE_PREROLL_INDETERMINATE"
+
+
+@pytest.mark.asyncio
 async def test_embedded_text_subtitle_is_prepared_before_libass_render(
     monkeypatch, tmp_path
 ) -> None:
@@ -455,6 +693,146 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
     assert "filename='subtitles/selected-subtitle.ass'" in subtitle_filter
     assert ":si=" not in subtitle_filter
     assert "fontsdir='fonts'" in subtitle_filter
+
+
+@pytest.mark.asyncio
+async def test_external_text_subtitle_download_uses_plex_authentication(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=-1,
+                    codec_type="subtitle",
+                    codec_name="srt",
+                ),
+                strategy="external_text",
+                external_url="http://plex.example:32400/library/streams/501.srt",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+    output_path = tmp_path / "selected-subtitle.srt"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "http://plex.example:32400/library/streams/501.srt"
+        assert request.headers["X-Plex-Token"] == "valid-token"
+        return httpx.Response(200, content=b"1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await media_renderer_module._download_external_text_subtitle(
+            plan,
+            Settings(_env_file=None, plex_token="valid-token"),
+            output_path,
+            client=client,
+        )
+
+    assert output_path.read_text(encoding="utf-8").endswith("Hello\n")
+
+
+@pytest.mark.asyncio
+async def test_external_subtitle_authentication_failure_leaves_no_prepared_file(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=-1,
+                    codec_type="subtitle",
+                    codec_name="srt",
+                ),
+                strategy="external_text",
+                external_url="http://plex.example:32400/library/streams/501.srt",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+    output_path = tmp_path / "selected-subtitle.srt"
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(401))
+    ) as client:
+        with pytest.raises(media_renderer_module.ExternalSubtitleAuthenticationError) as error:
+            await media_renderer_module._download_external_text_subtitle(
+                plan,
+                Settings(_env_file=None, plex_token="invalid-token"),
+                output_path,
+                client=client,
+            )
+
+    assert error.value.job_error_code == "EXTERNAL_SUBTITLE_AUTH_FAILED"
+    assert not output_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_external_subtitle_authentication_failure_cleans_the_job_workdir(
+    monkeypatch, tmp_path
+) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=-1,
+                    codec_type="subtitle",
+                    codec_name="srt",
+                ),
+                strategy="external_text",
+                external_url="http://plex.example:32400/library/streams/501.srt",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    class RejectingClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def get(self, _url, **_kwargs) -> httpx.Response:
+            return httpx.Response(401)
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(media_renderer_module.httpx, "AsyncClient", RejectingClient)
+    settings = Settings(
+        _env_file=None,
+        work_dir=tmp_path / "work",
+        plex_token="invalid-token",
+    )
+
+    with pytest.raises(media_renderer_module.ExternalSubtitleAuthenticationError):
+        await render_clip_file(
+            plan,
+            settings,
+            progress=lambda _progress, _message: asyncio.sleep(0),
+        )
+
+    assert not (settings.resolved_work_dir / "jobs" / plan.job_id).exists()
 
 
 def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import shutil
 from collections.abc import Awaitable, Callable
@@ -16,6 +17,7 @@ from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 TEXT_SUBTITLE_PREROLL_MS = 30_000
 BITMAP_SUBTITLE_PROBE_WINDOW_MS = 15_000
@@ -48,6 +50,22 @@ class PreparedTextSubtitle:
     fonts_dir: Path
 
 
+class SubtitlePreparationError(RuntimeError):
+    job_error_code = "SUBTITLE_PREPARATION_FAILED"
+
+
+class SubtitleDecoderError(SubtitlePreparationError):
+    job_error_code = "SUBTITLE_DECODER_FAILED"
+
+
+class SubtitleFontPreparationError(SubtitlePreparationError):
+    job_error_code = "SUBTITLE_FONT_PREPARATION_FAILED"
+
+
+class BitmapSubtitlePrerollIndeterminateError(SubtitlePreparationError):
+    job_error_code = "BITMAP_SUBTITLE_PREROLL_INDETERMINATE"
+
+
 async def render_clip_file(
     plan: ClipRenderPlan,
     settings: Settings,
@@ -57,35 +75,49 @@ async def render_clip_file(
     output_dir = settings.resolved_work_dir / "jobs" / plan.job_id
     output_path = output_dir / "rendered.mp4"
     await asyncio.to_thread(_prepare_output_path, output_dir, output_path)
-
-    duration_ms = plan.source_end_ms - plan.source_start_ms
-    subtitle_preroll_ms = await _subtitle_preroll_ms(plan, settings)
-    prepared_subtitle = await _prepare_text_subtitle_file(
-        plan,
-        settings,
-        output_dir,
-        subtitle_preroll_ms=subtitle_preroll_ms,
-    )
-    argv = build_ffmpeg_clip_args(
-        plan,
-        settings,
-        output_path,
-        subtitle_preroll_ms=subtitle_preroll_ms,
-        prepared_text_subtitle=prepared_subtitle,
-    )
-    await _run_ffmpeg_with_progress(
-        argv,
-        duration_ms=duration_ms,
-        progress=progress,
-        cwd=output_dir,
-    )
-    return RenderedClipFile(path=output_path, duration_ms=duration_ms)
+    try:
+        duration_ms = plan.source_end_ms - plan.source_start_ms
+        subtitle_preroll_ms = await _subtitle_preroll_ms(plan, settings)
+        prepared_subtitle = await _prepare_text_subtitle_file(
+            plan,
+            settings,
+            output_dir,
+            subtitle_preroll_ms=subtitle_preroll_ms,
+        )
+        argv = build_ffmpeg_clip_args(
+            plan,
+            settings,
+            output_path,
+            subtitle_preroll_ms=subtitle_preroll_ms,
+            prepared_text_subtitle=prepared_subtitle,
+        )
+        await _run_ffmpeg_with_progress(
+            argv,
+            duration_ms=duration_ms,
+            progress=progress,
+            cwd=output_dir,
+        )
+        return RenderedClipFile(path=output_path, duration_ms=duration_ms)
+    except BaseException:
+        await asyncio.to_thread(
+            _cleanup_failed_output_path,
+            output_dir,
+            settings.preserve_job_workdirs,
+        )
+        raise
 
 
 def _prepare_output_path(output_dir: Path, output_path: Path) -> None:
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _cleanup_failed_output_path(output_dir: Path, preserve_workdir: bool) -> None:
+    if preserve_workdir:
+        logger.warning("Preserving media job work directory after render failure: %s", output_dir)
+        return
+    shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def build_ffmpeg_clip_args(
@@ -275,20 +307,35 @@ async def _prepare_text_subtitle_file(
 
     subtitles_dir = work_dir / "subtitles"
     fonts_dir = work_dir / "fonts"
-    await asyncio.to_thread(subtitles_dir.mkdir, parents=True, exist_ok=True)
-    await asyncio.to_thread(fonts_dir.mkdir, parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(subtitles_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(fonts_dir.mkdir, parents=True, exist_ok=True)
+    except OSError as error:
+        raise SubtitlePreparationError(
+            "The selected subtitle could not be prepared in the job work directory."
+        ) from error
     prepared = subtitles_dir / _prepared_subtitle_filename(stream.codec_name)
 
     if strategy == "external_text":
-        await _download_external_text_subtitle(plan, prepared)
+        await _download_external_text_subtitle(plan, settings, prepared)
     else:
-        await _extract_embedded_text_subtitle(
-            plan,
-            settings,
-            prepared,
-            subtitle_preroll_ms=subtitle_preroll_ms,
-        )
-    await _extract_font_attachments(plan, settings, fonts_dir)
+        try:
+            await _extract_embedded_text_subtitle(
+                plan,
+                settings,
+                prepared,
+                subtitle_preroll_ms=subtitle_preroll_ms,
+            )
+        except CommandError as error:
+            raise SubtitleDecoderError(
+                "FFmpeg could not decode the selected subtitle during preparation."
+            ) from error
+    try:
+        await _extract_font_attachments(plan, settings, fonts_dir)
+    except CommandError as error:
+        raise SubtitleFontPreparationError(
+            "FFmpeg could not extract embedded subtitle fonts during preparation."
+        ) from error
     return PreparedTextSubtitle(path=prepared, fonts_dir=fonts_dir)
 
 
@@ -298,6 +345,7 @@ def _prepared_subtitle_filename(codec_name: str | None) -> str:
         "ass": "ass",
         "ssa": "ass",
         "subrip": "srt",
+        "srt": "srt",
         "webvtt": "vtt",
         "mov_text": "srt",
         "text": "srt",
@@ -348,15 +396,53 @@ def _subtitle_encoder(codec_name: str | None) -> str:
     return "srt"
 
 
+class ExternalSubtitleDownloadError(RuntimeError):
+    job_error_code = "EXTERNAL_SUBTITLE_DOWNLOAD_FAILED"
+
+
+class ExternalSubtitleAuthenticationError(ExternalSubtitleDownloadError):
+    job_error_code = "EXTERNAL_SUBTITLE_AUTH_FAILED"
+
+
 async def _download_external_text_subtitle(
-    plan: ClipRenderPlan, output_path: Path
+    plan: ClipRenderPlan,
+    settings: Settings,
+    output_path: Path,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     external_url = plan.selected_subtitle.external_url
     if not external_url:
-        raise ValueError("Selected external subtitle has no download URL.")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        response = await client.get(external_url)
-        response.raise_for_status()
+        raise ExternalSubtitleDownloadError("Selected external subtitle has no download URL.")
+    if not settings.plex_token:
+        raise ExternalSubtitleAuthenticationError(
+            "External subtitle download could not be authenticated because Plex credentials are "
+            "unavailable."
+        )
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+    try:
+        response = await client.get(
+            external_url,
+            headers={"X-Plex-Token": settings.plex_token},
+        )
+    except httpx.RequestError as error:
+        raise ExternalSubtitleDownloadError(
+            "The selected external subtitle could not be retrieved from Plex."
+        ) from error
+    finally:
+        if owns_client:
+            await client.aclose()
+    if response.status_code in {401, 403}:
+        raise ExternalSubtitleAuthenticationError(
+            "Plex rejected authentication while retrieving the selected external subtitle."
+        )
+    if response.status_code != 200:
+        raise ExternalSubtitleDownloadError(
+            f"Plex returned HTTP {response.status_code} while retrieving the selected external "
+            "subtitle."
+        )
     await asyncio.to_thread(output_path.write_bytes, response.content)
 
 
@@ -423,16 +509,22 @@ async def _subtitle_preroll_ms(plan: ClipRenderPlan, settings: Settings) -> int:
         return min(TEXT_SUBTITLE_PREROLL_MS, plan.source_start_ms)
     if plan.selected_subtitle.strategy != "bitmap":
         return 0
-    return min(
-        await _bitmap_packet_preroll_ms(plan, settings),
-        plan.source_start_ms,
-    )
+    try:
+        preroll_ms = await _bitmap_packet_preroll_ms(plan, settings)
+    except CommandError as error:
+        raise BitmapSubtitlePrerollIndeterminateError(
+            "The selected bitmap subtitle has no usable packet sequence to reconstruct at clip "
+            "start."
+        ) from error
+    return min(preroll_ms, plan.source_start_ms)
 
 
 async def _bitmap_packet_preroll_ms(plan: ClipRenderPlan, settings: Settings) -> int:
     stream = plan.selected_subtitle.stream
     if stream is None:
-        return 0
+        raise BitmapSubtitlePrerollIndeterminateError(
+            "The selected bitmap subtitle stream is unavailable for preroll inspection."
+        )
     window_start_ms = max(0, plan.source_start_ms - BITMAP_SUBTITLE_PROBE_WINDOW_MS)
     start = window_start_ms / 1000
     end = (plan.source_start_ms + 1_000) / 1000
@@ -442,7 +534,7 @@ async def _bitmap_packet_preroll_ms(plan: ClipRenderPlan, settings: Settings) ->
             "-v",
             "error",
             "-select_streams",
-            f"0:{stream.stream_index}",
+            str(stream.stream_index),
             "-show_packets",
             "-show_entries",
             "packet=pts_time,dts_time,duration_time,flags",
