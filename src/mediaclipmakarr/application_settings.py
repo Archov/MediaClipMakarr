@@ -209,7 +209,7 @@ async def get_effective_application_settings(
         str(environment_values["timezone"] or persisted.get("timezone", "UTC"))
     )
     x264_preset = validate_x264_preset(
-        str(environment_values["x264_preset"] or persisted.get("x264_preset", "medium"))
+        str(environment_values["x264_preset"] or persisted.get("x264_preset", "veryfast"))
     )
     token_value = environment_values["plex_token"] or persisted.get("plex_token")
 

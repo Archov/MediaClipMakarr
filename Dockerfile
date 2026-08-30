@@ -39,10 +39,38 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCM_EXPECTED_FFMPEG_IDENTITY=7.1.4-Jellyfin \
     MCM_FRONTEND_DIST_DIR=/app/frontend/dist \
     MCM_ALEMBIC_INI_PATH=/app/alembic.ini \
-    MCM_ALEMBIC_SCRIPT_DIR=/app/alembic
+    MCM_ALEMBIC_SCRIPT_DIR=/app/alembic \
+    XDG_CACHE_HOME=/tmp/fontconfig
 
 WORKDIR /app
 COPY --from=media-tools /opt/jellyfin-ffmpeg /opt/jellyfin-ffmpeg
+# Compose may override USER, so fontconfig needs readable system data and an arbitrary-UID cache.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache --force \
+    && fc-match --format='%{family}\n' sans-serif | grep --fixed-strings --quiet 'DejaVu Sans' \
+    && chmod -R a+rX /etc/fonts /usr/share/fonts /var/cache/fontconfig \
+    && mkdir -p /tmp/fontconfig \
+    && chmod 1777 /tmp/fontconfig \
+    && printf '%s\n' \
+        '[Script Info]' \
+        'ScriptType: v4.00+' \
+        'PlayResX: 32' \
+        'PlayResY: 32' \
+        '[V4+ Styles]' \
+        'Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding' \
+        'Style: Default,,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1' \
+        '[Events]' \
+        'Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text' \
+        'Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\p1}m 0 0 l 32 0 l 32 32 l 0 32' \
+        > /tmp/libass-fontconfig-smoke.ass \
+    && output="$(/opt/jellyfin-ffmpeg/ffmpeg -hide_banner -loglevel verbose \
+        -f lavfi -i color=c=black:s=32x32:r=1:d=1 \
+        -vf subtitles=filename=/tmp/libass-fontconfig-smoke.ass \
+        -frames:v 1 -f null - 2>&1)" \
+    && printf '%s\n' "$output" | grep --extended-regexp --quiet 'fontselect:.*DejaVu' \
+    && rm -f /tmp/libass-fontconfig-smoke.ass
 COPY pyproject.toml README.md alembic.ini ./
 COPY alembic ./alembic
 COPY src ./src

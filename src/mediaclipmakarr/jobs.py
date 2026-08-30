@@ -26,9 +26,12 @@ logger = logging.getLogger(__name__)
 JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "FAILED"]
 JobType = Literal["clip_create"]
 JobStage = Literal["queued", "validating", "rendering", "finalizing", "complete", "failed"]
+STALE_WORKDIR_REAP_INTERVAL_SECONDS = 3_600
+STALE_WORKDIR_AGE_SECONDS = 24 * 3_600
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 ClipRenderer = Callable[..., Awaitable[RenderedClipFile]]
+PlexTokenLoader = Callable[[], Awaitable[str | None]]
 
 
 class JobError(BaseModel):
@@ -217,7 +220,9 @@ async def fail_abandoned_jobs(engine: AsyncEngine) -> list[str]:
     return ids
 
 
-async def recover_finalizing_jobs(engine: AsyncEngine, run_blocking: BlockingRunner) -> list[str]:
+async def recover_finalizing_jobs(
+    engine: AsyncEngine, run_blocking: BlockingRunner, *, preserve_workdirs: bool = False
+) -> list[str]:
     async with engine.connect() as connection:
         rows = (
             await connection.execute(
@@ -248,6 +253,7 @@ async def recover_finalizing_jobs(engine: AsyncEngine, run_blocking: BlockingRun
             _recover_pending_installation,
             Path(str(row["temp_path"])),
             Path(str(row["target_path"])),
+            preserve_workdirs,
         )
         if not installed:
             await fail_job(
@@ -450,6 +456,33 @@ def _clip_with_safe_path(clip: dict[str, Any], clip_root: Path) -> dict[str, Any
     return clip
 
 
+def _remove_job_workdir(workdir: Path) -> None:
+    shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _remove_stale_job_workdirs(
+    jobs_dir: Path, active_job_ids: set[str], stale_before: float
+) -> list[Path]:
+    if not jobs_dir.is_dir():
+        return []
+    removed: list[Path] = []
+    for candidate in jobs_dir.iterdir():
+        if (
+            not candidate.name.startswith("job-")
+            or candidate.name in active_job_ids
+            or candidate.is_symlink()
+        ):
+            continue
+        try:
+            if not candidate.is_dir() or candidate.stat().st_mtime > stale_before:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
+        removed.append(candidate)
+    return removed
+
+
 class JobRunner:
     def __init__(
         self,
@@ -459,6 +492,7 @@ class JobRunner:
         run_blocking: BlockingRunner,
         events: JobEventBroker,
         renderer: ClipRenderer = render_clip_file,
+        plex_token_loader: PlexTokenLoader | None = None,
         progress_persist_interval_seconds: float = 1.0,
     ) -> None:
         self.engine = engine
@@ -466,16 +500,24 @@ class JobRunner:
         self.run_blocking = run_blocking
         self.events = events
         self.renderer = renderer
+        self.plex_token_loader = plex_token_loader
         self.progress_persist_interval_seconds = progress_persist_interval_seconds
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
+        self._next_stale_workdir_reap_at = 0.0
 
     async def start(self) -> None:
-        recovered = await recover_finalizing_jobs(self.engine, self.run_blocking)
+        recovered = await recover_finalizing_jobs(
+            self.engine,
+            self.run_blocking,
+            preserve_workdirs=self.settings.preserve_job_workdirs,
+        )
         abandoned = await fail_abandoned_jobs(self.engine)
         for job_id in [*recovered, *abandoned]:
+            await self._cleanup_job_workdir(job_id, "application restart")
             await self._publish_durable_job_update(job_id)
+        await self._cleanup_stale_job_workdirs()
         self._task = asyncio.create_task(self._run(), name="media-job-runner")
 
     async def stop(self) -> None:
@@ -493,6 +535,8 @@ class JobRunner:
     async def _run(self) -> None:
         while not self._stopping:
             self._wake.clear()
+            if time.monotonic() >= self._next_stale_workdir_reap_at:
+                await self._cleanup_stale_job_workdirs()
             try:
                 claimed = await claim_next_job(self.engine, f"run-{uuid4()}")
             except Exception:
@@ -500,12 +544,15 @@ class JobRunner:
                 await asyncio.sleep(1.0)
                 continue
             if claimed is None:
-                await self._wake.wait()
+                timeout_seconds = max(0.0, self._next_stale_workdir_reap_at - time.monotonic())
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), timeout=timeout_seconds)
                 continue
             await self._publish_durable_job_update(claimed.id)
             try:
                 await self._execute_claimed_job(claimed)
             except asyncio.CancelledError:
+                await self._cleanup_job_workdir(claimed.id, "application shutdown")
                 with contextlib.suppress(Exception):
                     await fail_job(
                         self.engine,
@@ -518,15 +565,16 @@ class JobRunner:
                     await self._publish_durable_job_update(claimed.id)
                 raise
             except Exception as error:
+                await self._cleanup_job_workdir(claimed.id, "job failure")
                 logger.exception("Clip render job %s failed.", claimed.id)
                 try:
                     await fail_job(
                         self.engine,
                         claimed.id,
                         claimed.run_token,
-                        code=type(error).__name__.upper(),
+                        code=getattr(error, "job_error_code", type(error).__name__.upper()),
                         message=str(error) or "Clip render failed unexpectedly.",
-                        retryable=True,
+                        retryable=getattr(error, "job_retryable", True),
                     )
                 except Exception:
                     logger.exception(
@@ -538,6 +586,35 @@ class JobRunner:
         snapshot = await get_job_snapshot(self.engine, job_id)
         await self._publish_job_update(job_id, snapshot)
         return snapshot
+
+    async def _cleanup_job_workdir(self, job_id: str, reason: str) -> None:
+        workdir = self.settings.resolved_work_dir / "jobs" / job_id
+        if self.settings.preserve_job_workdirs:
+            if workdir.exists():
+                logger.warning("Preserving media job work directory after %s: %s", reason, workdir)
+            return
+        await self.run_blocking(_remove_job_workdir, workdir)
+
+    async def _cleanup_stale_job_workdirs(self) -> None:
+        self._next_stale_workdir_reap_at = time.monotonic() + STALE_WORKDIR_REAP_INTERVAL_SECONDS
+        if self.settings.preserve_job_workdirs:
+            return
+        async with self.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT id FROM jobs WHERE state IN ('QUEUED', 'RUNNING', 'FINALIZING')")
+                )
+            ).mappings().all()
+        active_job_ids = {str(row["id"]) for row in rows}
+        removed = await self.run_blocking(
+            _remove_stale_job_workdirs,
+            self.settings.resolved_work_dir / "jobs",
+            active_job_ids,
+            time.time() - STALE_WORKDIR_AGE_SECONDS,
+        )
+        if removed:
+            noun = "directory" if len(removed) == 1 else "directories"
+            logger.info("Removed %s stale media job work %s.", len(removed), noun)
 
     async def _publish_job_update(
         self, job_id: str, snapshot: JobSnapshot | None = None
@@ -599,7 +676,12 @@ class JobRunner:
             )
             await self._publish_job_update(claimed.id, live_snapshot)
 
-        rendered = await self.renderer(plan, self.settings, progress=render_progress)
+        renderer_settings = self.settings
+        if plan.selected_subtitle.strategy == "external_text" and self.plex_token_loader:
+            renderer_settings = self.settings.model_copy(
+                update={"plex_token": await self.plex_token_loader()}
+            )
+        rendered = await self.renderer(plan, renderer_settings, progress=render_progress)
         destination = await self.run_blocking(
             resolve_unique_clip_path,
             self.settings.resolved_clip_dir,
@@ -627,7 +709,12 @@ class JobRunner:
         )
         latest_snapshot = await self._publish_durable_job_update(claimed.id)
 
-        await self.run_blocking(_install_rendered_clip, rendered.path, destination)
+        await self.run_blocking(
+            _install_rendered_clip,
+            rendered.path,
+            destination,
+            self.settings.preserve_job_workdirs,
+        )
         await insert_clip(self.engine, clip)
         await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
         await self._publish_durable_job_update(claimed.id)
@@ -725,23 +812,33 @@ def _clip_payload(
     }
 
 
-def _install_rendered_clip(temp_path: Path, destination: Path) -> None:
+def _install_rendered_clip(
+    temp_path: Path, destination: Path, preserve_workdir: bool = False
+) -> None:
     destination = destination.resolve(strict=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise FileExistsError("The resolved clip destination already exists.")
     temp_path.replace(destination)
-    shutil.rmtree(temp_path.parent, ignore_errors=True)
+    if preserve_workdir:
+        logger.warning("Preserving completed media job work directory: %s", temp_path.parent)
+    else:
+        shutil.rmtree(temp_path.parent, ignore_errors=True)
 
 
-def _recover_pending_installation(temp_path: Path, destination: Path) -> bool:
+def _recover_pending_installation(
+    temp_path: Path, destination: Path, preserve_workdir: bool = False
+) -> bool:
     destination = destination.resolve(strict=False)
     if destination.exists():
-        shutil.rmtree(temp_path.parent, ignore_errors=True)
+        if preserve_workdir:
+            logger.warning("Preserving recovered media job work directory: %s", temp_path.parent)
+        else:
+            shutil.rmtree(temp_path.parent, ignore_errors=True)
         return True
     if not temp_path.exists():
         return False
-    _install_rendered_clip(temp_path, destination)
+    _install_rendered_clip(temp_path, destination, preserve_workdir)
     return True
 
 

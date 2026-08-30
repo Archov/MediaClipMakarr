@@ -5,6 +5,27 @@ import pytest
 from mediaclipmakarr.config import Settings, validate_path_layout
 
 
+def test_media_preparation_timeout_is_separate_from_short_tool_timeout() -> None:
+    settings = Settings(
+        _env_file=None,
+        subprocess_timeout_seconds=3,
+        media_preparation_timeout_seconds=180,
+    )
+
+    assert settings.subprocess_timeout_seconds == 3
+    assert settings.media_preparation_timeout_seconds == 180
+
+
+def test_job_workdir_preservation_is_disabled_by_default() -> None:
+    assert Settings(_env_file=None).preserve_job_workdirs is False
+
+
+def test_job_workdir_preservation_can_be_enabled_with_environment(monkeypatch) -> None:
+    monkeypatch.setenv("MCM_PRESERVE_JOB_WORKDIRS", "true")
+
+    assert Settings(_env_file=None).preserve_job_workdirs is True
+
+
 def test_writable_directories_cannot_overlap_source_media(tmp_path) -> None:
     source = tmp_path / "source"
     settings = Settings(

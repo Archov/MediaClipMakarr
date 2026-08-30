@@ -8,11 +8,15 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mediaclipmakarr.clips import ClipCreateRequest
 from mediaclipmakarr.plex import PlexSession
-from mediaclipmakarr.source_media import MediaStreamIdentity, ResolvedSourceMedia
+from mediaclipmakarr.source_media import (
+    MediaStreamIdentity,
+    ResolvedSourceMedia,
+    SubtitleSelection,
+)
 
 OutputProfileId = Literal["p1-h264-aac-sdr-v1"]
 
@@ -48,11 +52,21 @@ class ClipRenderPlan(BaseModel):
     source_start_ms: int
     source_end_ms: int
     selected_audio_stream: MediaStreamIdentity
-    subtitle_stream_index: int | None = None
+    selected_subtitle: SubtitleSelection = Field(default_factory=SubtitleSelection)
     output_profile: OutputProfileId = "p1-h264-aac-sdr-v1"
     x264_preset: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_subtitle_stream_index(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        normalized = value.copy()
+        normalized.pop("subtitle_stream_index", None)
+        normalized.pop("selected_subtitle_stream_index", None)
+        return normalized
 
 
 def build_clip_render_plan(
@@ -79,6 +93,7 @@ def build_clip_render_plan(
         "source_start_ms": request.start_ms,
         "source_end_ms": request.end_ms,
         "selected_audio_stream": source_media.selected_audio_stream,
+        "selected_subtitle": source_media.selected_subtitle,
         "x264_preset": x264_preset,
         "render_plan_hash": "",
     }

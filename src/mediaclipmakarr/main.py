@@ -54,7 +54,12 @@ from mediaclipmakarr.plex import (
 )
 from mediaclipmakarr.process_lock import ProcessLock
 from mediaclipmakarr.render_plan import build_clip_render_plan
-from mediaclipmakarr.source_media import SourceMediaError, resolve_and_probe_source_media
+from mediaclipmakarr.source_media import (
+    MediaCapabilities,
+    SourceMediaError,
+    resolve_and_probe_source_media,
+    resolve_media_capabilities,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +121,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async def load_cached_application_settings():
                 return app.state.effective_application_settings
 
+            async def load_cached_plex_token() -> str | None:
+                return app.state.effective_application_settings.plex_token
+
             app.state.plex_session_poller = PlexSessionPoller(
                 load_cached_application_settings
             )
@@ -133,6 +141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 application_settings,
                 run_blocking=executor.run,
                 events=app.state.job_events,
+                plex_token_loader=load_cached_plex_token,
             )
             await app.state.job_runner.start()
             yield
@@ -268,6 +277,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_current_plex_sessions(request: Request) -> PlexSessionSnapshot:
         return request.app.state.plex_session_poller.snapshot
 
+    @app.get(
+        "/api/sessions/{session_identity}/media-capabilities",
+        response_model=MediaCapabilities,
+    )
+    async def get_media_capabilities(
+        session_identity: str, request: Request
+    ) -> MediaCapabilities:
+        snapshot = request.app.state.plex_session_poller.snapshot
+        session = next(
+            (
+                candidate
+                for candidate in snapshot.sessions
+                if candidate.session_identity == session_identity
+            ),
+            None,
+        )
+        if session is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "PLEX_SESSION_NOT_FOUND",
+                    "message": "The selected Plex session is no longer active.",
+                    "retryable": True,
+                },
+            )
+        try:
+            source_media = await resolve_media_capabilities(
+                session,
+                request.app.state.effective_application_settings,
+                application_settings,
+                run_blocking=request.app.state.blocking_io.run,
+            )
+            if source_media.capabilities is None:
+                raise RuntimeError("Source media capabilities were not produced.")
+            return source_media.capabilities
+        except SourceMediaError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                    "alternatives": error.alternatives,
+                },
+            ) from error
+
     @app.get("/api/sessions/events")
     async def stream_plex_sessions(request: Request) -> StreamingResponse:
         async def events():
@@ -306,6 +361,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request.app.state.effective_application_settings,
                 application_settings,
                 run_blocking=request.app.state.blocking_io.run,
+                requested_audio_stream_index=clip_request.audio_stream_index,
+                requested_subtitle_stream_index=clip_request.subtitle_stream_index,
+                subtitles_enabled=clip_request.subtitles_enabled,
             )
             render_plan = build_clip_render_plan(
                 session=session,
@@ -332,6 +390,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "code": error.code,
                     "message": error.message,
                     "retryable": error.retryable,
+                    "alternatives": error.alternatives,
                 },
             ) from error
 

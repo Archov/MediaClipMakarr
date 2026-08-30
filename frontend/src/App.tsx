@@ -9,6 +9,7 @@ import ErrorRounded from "@mui/icons-material/ErrorRounded";
 import MovieRounded from "@mui/icons-material/MovieRounded";
 import PersonRounded from "@mui/icons-material/PersonRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
+import RemoveRounded from "@mui/icons-material/RemoveRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRounded from "@mui/icons-material/SmartDisplayRounded";
@@ -45,10 +46,11 @@ import {
   createTheme,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   createClip,
+  fetchMediaCapabilities,
   fetchJob,
   fetchHealth,
   fetchPlexSessions,
@@ -65,12 +67,14 @@ import type {
   HealthStatus,
   JobSnapshot,
   JobState,
+  MediaCapabilities,
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSession,
   PlexSessionSnapshot,
   PlexSessionSnapshotStatus,
   SourcePathMapping,
+  TrackDescriptor,
 } from "./types";
 
 const theme = createTheme({
@@ -269,6 +273,100 @@ function SessionDetail({ session }: { session: PlexSession }) {
   );
 }
 
+function trackLabel(track: TrackDescriptor): string {
+  const parts = [
+    track.language?.toUpperCase(),
+    track.title,
+    track.codec,
+    track.stream_index === null ? null : `#${track.stream_index}`,
+  ].filter(Boolean);
+  return parts.join(" · ") || "Unnamed track";
+}
+
+function selectedTrackIndex(tracks: TrackDescriptor[], fallback: number | null): number | "" {
+  const available = tracks.filter((track) => track.available && track.stream_index !== null);
+  const selected = available.find((track) => track.selected);
+  const fallbackTrack = available.find((track) => track.stream_index === fallback);
+  return selected?.stream_index ?? fallbackTrack?.stream_index ?? available[0]?.stream_index ?? "";
+}
+
+function MediaTrackSelectors({
+  capabilities,
+  audioStreamIndex,
+  subtitleStreamIndex,
+  subtitlesEnabled,
+  onAudioChange,
+  onSubtitleChange,
+}: {
+  capabilities: MediaCapabilities | undefined;
+  audioStreamIndex: number | "";
+  subtitleStreamIndex: number | "";
+  subtitlesEnabled: boolean;
+  onAudioChange: (value: number | "") => void;
+  onSubtitleChange: (enabled: boolean, value: number | "") => void;
+}) {
+  if (!capabilities) return null;
+  const subtitleOptions = capabilities.subtitle_tracks.filter((track) => track.stream_index !== null);
+  return (
+    <Stack spacing={2}>
+      <Typography variant="h6">Tracks</Typography>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+        <FormControl fullWidth>
+          <InputLabel id="audio-track-label">Audio</InputLabel>
+          <Select
+            labelId="audio-track-label"
+            label="Audio"
+            value={audioStreamIndex}
+            onChange={(event) => onAudioChange(event.target.value as number | "")}
+          >
+            {capabilities.audio_tracks.map((track) => (
+              <MenuItem
+                key={track.stream_index}
+                value={track.stream_index ?? ""}
+                disabled={!track.available}
+              >
+                {trackLabel(track)}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <FormControl fullWidth>
+          <InputLabel id="subtitle-track-label">Subtitles</InputLabel>
+          <Select
+            labelId="subtitle-track-label"
+            label="Subtitles"
+            value={subtitlesEnabled ? subtitleStreamIndex : ""}
+            onChange={(event) => {
+              const value = event.target.value as number | "";
+              onSubtitleChange(value !== "", value);
+            }}
+          >
+            <MenuItem value="">Off</MenuItem>
+            {subtitleOptions.map((track) => (
+              <MenuItem
+                key={track.stream_index}
+                value={track.stream_index ?? ""}
+                disabled={!track.available}
+              >
+                {trackLabel(track)}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      </Stack>
+      {capabilities.warnings.map((warning) => (
+        <Alert key={warning} severity="warning">{warning}</Alert>
+      ))}
+      {capabilities.hdr.dolby_vision && (
+        <Alert severity="warning">Dolby Vision rendering is unavailable.</Alert>
+      )}
+      {(capabilities.hdr.hdr10 || capabilities.hdr.hlg) && (
+        <Alert severity="info">HDR source detected. SDR tone mapping is handled in a later phase.</Alert>
+      )}
+    </Stack>
+  );
+}
+
 type Boundary = "start" | "end";
 type AppPage = "make-clip" | "settings";
 
@@ -287,6 +385,21 @@ function clampBoundaryMs(value: number, maximumMs: number | null): number {
   return maximumMs === null ? nonNegative : Math.min(nonNegative, maximumMs);
 }
 
+function mediaCapabilitiesVersion(session: PlexSession | undefined): string {
+  if (!session) return "";
+  const streamSelection = (streams: PlexSession["selected_audio_streams"]): string[] =>
+    streams
+      .map((stream) => [stream.id, stream.key, stream.stream_index, stream.codec].join("/"))
+      .sort();
+  return JSON.stringify({
+    mediaIdentity: session.media_identity,
+    partId: session.plex_part_id,
+    partKey: session.plex_part_key,
+    audio: streamSelection(session.selected_audio_streams),
+    subtitles: streamSelection(session.selected_subtitle_streams),
+  });
+}
+
 function MakeClipScreen() {
   const sessions = useLivePlexSessions();
   const [selectedSessionIdentity, setSelectedSessionIdentity] = useState<string | null>(null);
@@ -297,6 +410,9 @@ function MakeClipScreen() {
   const [endInput, setEndInput] = useState("");
   const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
+  const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
+  const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [submittedJob, setSubmittedJob] = useState<JobSnapshot | null>(null);
   const snapshot = sessions.data;
   const selectedSession = snapshot?.sessions.find(
@@ -305,9 +421,15 @@ function MakeClipScreen() {
   const now = useClock(selectedSession?.state.toLowerCase() === "playing");
   const livePositionMs = selectedSession ? displayedPosition(selectedSession, now) : null;
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
+  const capabilitiesVersion = mediaCapabilitiesVersion(selectedSession);
   const startParse = parseTimestampMs(startInput);
   const endParse = parseTimestampMs(endInput);
   const activeJob = useJobSnapshot(submittedJob);
+  const capabilities = useQuery({
+    queryKey: ["media-capabilities", selectedSessionIdentity, capabilitiesVersion],
+    queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
+    enabled: Boolean(selectedSessionIdentity && selectedSession),
+  });
   const clipCreate = useMutation({
     mutationFn: createClip,
     onSuccess: (job) => setSubmittedJob(job),
@@ -326,6 +448,32 @@ function MakeClipScreen() {
     setSubmittedJob(null);
     clipCreate.reset();
   };
+
+  const adjustmentInputRef = useRef<HTMLInputElement>(null);
+  const hasSelectedSession = Boolean(selectedSession);
+
+  useEffect(() => {
+    if (!hasSelectedSession) return;
+
+    const input = adjustmentInputRef.current;
+    if (!input) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+
+      event.preventDefault();
+
+      setAdjustmentSeconds((current) =>
+        clampAdjustmentSeconds(current + (event.deltaY < 0 ? 1 : -1)),
+      );
+    };
+
+    input.addEventListener("wheel", handleWheel, { passive: false });
+
+    return () => {
+      input.removeEventListener("wheel", handleWheel);
+    };
+  }, [hasSelectedSession]);
 
   const handleBoundaryInput = (boundary: Boundary, value: string) => {
     const parsed = parseTimestampMs(value);
@@ -355,6 +503,21 @@ function MakeClipScreen() {
     setBoundaryNotice("The selected player changed media, so captured boundaries were cleared.");
   }, [selectedMediaIdentity, selectedSession]);
 
+  useEffect(() => {
+    if (!capabilities.data) return;
+    const nextAudio = selectedTrackIndex(
+      capabilities.data.audio_tracks,
+      capabilities.data.default_audio_stream_index,
+    );
+    const nextSubtitle = selectedTrackIndex(
+      capabilities.data.subtitle_tracks,
+      capabilities.data.default_subtitle_stream_index,
+    );
+    setAudioStreamIndex(nextAudio);
+    setSubtitleStreamIndex(nextSubtitle);
+    setSubtitlesEnabled(nextSubtitle !== "");
+  }, [capabilities.data]);
+
   const rangeError =
     startParse.error ??
     endParse.error ??
@@ -364,9 +527,9 @@ function MakeClipScreen() {
       ? "End must be later than Start."
       : null) ??
     (selectedSession?.duration_ms !== null &&
-    selectedSession?.duration_ms !== undefined &&
-    endMs !== null &&
-    endMs > selectedSession.duration_ms
+      selectedSession?.duration_ms !== undefined &&
+      endMs !== null &&
+      endMs > selectedSession.duration_ms
       ? "End must be within the selected media duration."
       : null);
 
@@ -377,6 +540,10 @@ function MakeClipScreen() {
       media_identity: selectedMediaIdentity,
       start_ms: startMs,
       end_ms: endMs,
+      audio_stream_index: audioStreamIndex === "" ? null : Number(audioStreamIndex),
+      subtitle_stream_index:
+        subtitlesEnabled && subtitleStreamIndex !== "" ? Number(subtitleStreamIndex) : null,
+      subtitles_enabled: subtitlesEnabled,
     };
     clipCreate.mutate(request);
   };
@@ -396,6 +563,10 @@ function MakeClipScreen() {
       "end",
       clampBoundaryMs(baseMs + adjustmentSeconds * 1_000, selectedSession.duration_ms),
     );
+  };
+
+  const changeAdjustmentSeconds = (change: number) => {
+    setAdjustmentSeconds((current) => clampAdjustmentSeconds(current + change));
   };
 
   return (
@@ -430,11 +601,15 @@ function MakeClipScreen() {
                     key={session.session_identity}
                     selected={selected}
                     onClick={() => {
+                      if (selected) return;
                       setSelectedSessionIdentity(session.session_identity);
                       setSelectedMediaIdentity(session.media_identity);
                       setBoundary("start", displayedPosition(session, Date.now()));
                       setBoundary("end", null);
                       setBoundaryNotice(null);
+                      setAudioStreamIndex("");
+                      setSubtitleStreamIndex("");
+                      setSubtitlesEnabled(false);
                     }}
                     sx={{ borderRadius: 1, mb: 1, alignItems: "flex-start" }}
                   >
@@ -473,6 +648,33 @@ function MakeClipScreen() {
                     </Typography>
                   </Box>
                 </Stack>
+
+                {capabilities.isFetching && (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} aria-label="Loading media capabilities" />
+                    <Typography color="text.secondary">Loading media tracks…</Typography>
+                  </Stack>
+                )}
+                {capabilities.error && (
+                  <Alert severity="error">{capabilities.error.message}</Alert>
+                )}
+                <MediaTrackSelectors
+                  capabilities={capabilities.data}
+                  audioStreamIndex={audioStreamIndex}
+                  subtitleStreamIndex={subtitleStreamIndex}
+                  subtitlesEnabled={subtitlesEnabled}
+                  onAudioChange={(value) => {
+                    setAudioStreamIndex(value);
+                    setSubmittedJob(null);
+                    clipCreate.reset();
+                  }}
+                  onSubtitleChange={(enabled, value) => {
+                    setSubtitlesEnabled(enabled);
+                    setSubtitleStreamIndex(value);
+                    setSubmittedJob(null);
+                    clipCreate.reset();
+                  }}
+                />
 
                 <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start">
                   <Stack direction="row" spacing={1} alignItems="flex-start">
@@ -532,6 +734,7 @@ function MakeClipScreen() {
 
                 <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start">
                   <TextField
+                    inputRef={adjustmentInputRef}
                     type="number"
                     label="Seconds"
                     value={adjustmentSeconds}
@@ -550,6 +753,22 @@ function MakeClipScreen() {
                     }}
                     sx={{ width: "12ch" }}
                   />
+                  <Stack direction="row" spacing={0.5} sx={{ minHeight: 56 }}>
+                    <IconButton
+                      aria-label="Decrease seconds"
+                      onClick={() => changeAdjustmentSeconds(-1)}
+                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                    >
+                      <RemoveRounded />
+                    </IconButton>
+                    <IconButton
+                      aria-label="Increase seconds"
+                      onClick={() => changeAdjustmentSeconds(1)}
+                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                    >
+                      <AddRounded />
+                    </IconButton>
+                  </Stack>
                   <Button
                     variant="outlined"
                     disabled={startMs === null}
@@ -731,14 +950,14 @@ function SettingsForm({ settings }: { settings: ApplicationSettings }) {
       baseUpdate,
       ...(!managed("plex_token") &&
         submittedToken && {
-          plexCandidate: {
-            test: { plex_url: plexUrl, plex_token: submittedToken },
-            save: {
-              ...(!managed("plex_url") && { plex_url: plexUrl }),
-              plex_token: submittedToken,
-            },
+        plexCandidate: {
+          test: { plex_url: plexUrl, plex_token: submittedToken },
+          save: {
+            ...(!managed("plex_url") && { plex_url: plexUrl }),
+            plex_token: submittedToken,
           },
-        }),
+        },
+      }),
     });
   };
   const testCurrentConnection = () => {
