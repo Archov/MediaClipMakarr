@@ -11,9 +11,10 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-import mediaclipmakarr.jobs as jobs_module
+import mediaclipmakarr.jobs.finalization as finalization_module
+import mediaclipmakarr.jobs.runner as jobs_module
 import mediaclipmakarr.media_renderer as media_renderer_module
-from mediaclipmakarr.clips import ClipCreateRequest
+from mediaclipmakarr.clips import ClipCreateRequest, get_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.jobs import (
@@ -22,7 +23,6 @@ from mediaclipmakarr.jobs import (
     claim_next_job,
     create_pending_operation,
     enqueue_clip_create_job,
-    get_clip,
     get_job_snapshot,
     recover_finalizing_jobs,
     transition_to_finalizing,
@@ -366,8 +366,8 @@ def test_install_rendered_clip_preserves_workdir_only_when_enabled(tmp_path) -> 
     prepared_subtitle.write_text("[Script Info]", encoding="utf-8")
     preserved_destination = tmp_path / "clips" / "preserved.mp4"
 
-    with patch.object(jobs_module.logger, "warning") as warning:
-        jobs_module._install_rendered_clip(
+    with patch.object(finalization_module.logger, "warning") as warning:
+        finalization_module.install_rendered_clip(
             preserved_output, preserved_destination, preserve_workdir=True
         )
 
@@ -383,7 +383,7 @@ def test_install_rendered_clip_preserves_workdir_only_when_enabled(tmp_path) -> 
     cleaned_output.write_bytes(b"rendered")
     cleaned_destination = tmp_path / "clips" / "cleaned.mp4"
 
-    jobs_module._install_rendered_clip(cleaned_output, cleaned_destination)
+    finalization_module.install_rendered_clip(cleaned_output, cleaned_destination)
 
     assert cleaned_destination.read_bytes() == b"rendered"
     assert not cleaned_workdir.exists()

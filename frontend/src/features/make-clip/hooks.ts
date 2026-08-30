@@ -1,0 +1,90 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+
+import { fetchJob, fetchPlexSessions } from "../../api";
+import type { JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
+
+export function useClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+
+export function displayedPosition(session: PlexSession, now: number): number {
+  if (session.state.toLowerCase() !== "playing") return session.position_ms;
+  const sampledAt = Date.parse(session.sampled_at);
+  if (!Number.isFinite(sampledAt)) return session.position_ms;
+  const extrapolated = session.position_ms + Math.max(0, now - sampledAt);
+  return session.duration_ms === null ? extrapolated : Math.min(session.duration_ms, extrapolated);
+}
+
+export function useLivePlexSessions() {
+  const queryClient = useQueryClient();
+  const sessions = useQuery({
+    queryKey: ["plex-sessions"],
+    queryFn: fetchPlexSessions,
+    refetchInterval: 15_000,
+  });
+
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return undefined;
+    const eventSource = new EventSource("/api/sessions/events");
+    const handleSnapshot = (event: MessageEvent<string>) => {
+      const snapshot = JSON.parse(event.data) as PlexSessionSnapshot;
+      queryClient.setQueryData(["plex-sessions"], snapshot);
+    };
+    const handleError = () => {
+      void queryClient.invalidateQueries({ queryKey: ["plex-sessions"] });
+    };
+    eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
+    eventSource.addEventListener("error", handleError);
+    return () => {
+      eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
+      eventSource.removeEventListener("error", handleError);
+      eventSource.close();
+    };
+  }, [queryClient]);
+
+  return sessions;
+}
+
+export function useJobSnapshot(initialJob: JobSnapshot | null) {
+  const [job, setJob] = useState<JobSnapshot | null>(initialJob);
+
+  useEffect(() => {
+    setJob(initialJob);
+    if (!initialJob || typeof EventSource === "undefined") return undefined;
+
+    let closed = false;
+    const eventSource = new EventSource(`/api/jobs/${encodeURIComponent(initialJob.id)}/events`);
+    const handleSnapshot = (event: MessageEvent<string>) => {
+      setJob(JSON.parse(event.data) as JobSnapshot);
+    };
+    const handleError = () => {
+      if (!closed) {
+        void fetchJob(initialJob.id)
+          .then((snapshot) => {
+            if (!closed && snapshot.id === initialJob.id) setJob(snapshot);
+          })
+          .catch(() => undefined);
+      }
+    };
+
+    eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
+    eventSource.addEventListener("error", handleError);
+    return () => {
+      closed = true;
+      eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
+      eventSource.removeEventListener("error", handleError);
+      eventSource.close();
+    };
+  }, [initialJob]);
+
+  return job;
+}
+
+

@@ -4,6 +4,22 @@
 
 Build MediaClipMakarr as a single-process modular monolith with one application container, SQLite, and sequential FFmpeg child processes.
 
+## Responsibility Layout
+
+The frontend keeps application composition in `frontend/src/app/App.tsx` and its
+theme in `frontend/src/app/theme.ts`. Make Clip workflow UI lives under
+`frontend/src/features/make-clip`, while settings screen presentation is under
+`frontend/src/features/settings`. Shared API, timestamp, and contract types
+remain at `frontend/src`.
+
+The backend job subsystem is a `mediaclipmakarr.jobs` package. Its public
+boundary is `jobs/__init__.py`; job-domain models, in-memory events, durable
+state transitions, runner orchestration, restart recovery, and filesystem
+finalization each have dedicated modules. General managed-clip persistence
+(`get_clip`, `insert_clip`, and recovery-safe insertion) belongs in `clips.py`.
+`main.py` remains the application assembly point, keeping lifecycle ownership
+and the stable HTTP contract together while calling the domain packages.
+
 ```text
 Browser
   │ REST + SSE + media streaming
