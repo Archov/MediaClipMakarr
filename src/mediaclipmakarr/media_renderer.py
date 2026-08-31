@@ -597,7 +597,7 @@ def _packet_time_ms(packet: dict[str, object]) -> int | None:
 
 def _metadata_envelope(plan: ClipRenderPlan) -> str:
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "application": "MediaClipMakarr",
         "clipId": plan.clip_id,
         "revision": plan.revision,
@@ -613,6 +613,22 @@ def _metadata_envelope(plan: ClipRenderPlan) -> str:
         "selectedSubtitle": plan.selected_subtitle.model_dump(mode="json"),
         "renderProfile": plan.output_profile,
         "renderPlanHash": plan.render_plan_hash,
+        "videoProcessing": {
+            "hdrStrategy": plan.hdr_strategy,
+            "sourceHdr": {
+                "hdr10": plan.hdr.hdr10,
+                "hlg": plan.hdr.hlg,
+                "dolbyVision": plan.hdr.dolby_vision,
+                "dolbyVisionProfile": plan.hdr.dolby_vision_profile,
+                "dolbyVisionBaseLayerCompatible": (
+                    plan.hdr.dolby_vision_base_layer_compatible
+                ),
+                "dolbyVisionBlCompatibilityId": (
+                    plan.hdr.dolby_vision_bl_compatibility_id
+                ),
+            },
+            "sourceColor": plan.hdr.color.model_dump(mode="json"),
+        },
     }
     return "MediaClipMakarr " + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 

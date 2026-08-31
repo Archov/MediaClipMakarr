@@ -117,14 +117,16 @@ async def test_hdr_fixture_renders_as_sane_limited_bt709_frame(
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,pix_fmt,color_space,color_transfer,color_primaries,color_range",
+            "stream=width,height,pix_fmt,color_space,color_transfer,color_primaries,color_range:"
+            "format_tags=comment",
             "-of",
             "json",
             output,
         ],
         timeout_seconds=10,
     )
-    [video] = json.loads(probe.stdout)["streams"]
+    probe_payload = json.loads(probe.stdout)
+    [video] = probe_payload["streams"]
     assert video == {
         "width": 128,
         "height": 72,
@@ -134,6 +136,10 @@ async def test_hdr_fixture_renders_as_sane_limited_bt709_frame(
         "color_transfer": "bt709",
         "color_primaries": "bt709",
     }
+    comment = probe_payload["format"]["tags"]["comment"]
+    recovery_metadata = json.loads(comment.removeprefix("MediaClipMakarr "))
+    assert recovery_metadata["videoProcessing"]["hdrStrategy"] == strategy
+    assert recovery_metadata["videoProcessing"]["sourceColor"]["color_transfer"] == transfer
 
     signal = await run_command(
         [

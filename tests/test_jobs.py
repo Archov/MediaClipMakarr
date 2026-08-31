@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -17,7 +18,7 @@ import mediaclipmakarr.media_renderer as media_renderer_module
 from mediaclipmakarr.clips import ClipCreateRequest, get_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
-from mediaclipmakarr.hdr import AdvancedMediaError
+from mediaclipmakarr.hdr import AdvancedMediaError, HdrCapabilities
 from mediaclipmakarr.jobs import (
     JobEventBroker,
     JobRunner,
@@ -466,6 +467,57 @@ def test_ffmpeg_args_force_phase_one_output_contract(tmp_path) -> None:
         argv.index("-movflags") : argv.index("-movflags") + 2
     ]
     assert any(value.startswith("comment=MediaClipMakarr ") for value in argv)
+
+
+def test_mp4_recovery_metadata_contains_hdr_classification_and_strategy(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=source_media(source_file),
+        x264_preset="veryfast",
+    ).model_copy(
+        update={
+            "hdr": HdrCapabilities(
+                hdr10=True,
+                dolby_vision=True,
+                dolby_vision_profile=8,
+                dolby_vision_base_layer_compatible=True,
+                dolby_vision_bl_compatibility_id=1,
+                color=VideoColorMetadata(
+                    color_space="bt2020nc",
+                    color_transfer="smpte2084",
+                    color_primaries="bt2020",
+                    color_range="tv",
+                ),
+            ),
+            "hdr_strategy": "tone_map_hdr10",
+        }
+    )
+
+    metadata = json.loads(media_renderer_module._metadata_envelope(plan).removeprefix(
+        "MediaClipMakarr "
+    ))
+
+    assert metadata["schemaVersion"] == 2
+    assert metadata["videoProcessing"] == {
+        "hdrStrategy": "tone_map_hdr10",
+        "sourceHdr": {
+            "hdr10": True,
+            "hlg": False,
+            "dolbyVision": True,
+            "dolbyVisionProfile": 8,
+            "dolbyVisionBaseLayerCompatible": True,
+            "dolbyVisionBlCompatibilityId": 1,
+        },
+        "sourceColor": {
+            "color_space": "bt2020nc",
+            "color_transfer": "smpte2084",
+            "color_primaries": "bt2020",
+            "color_range": "tv",
+        },
+    }
 
 
 @pytest.mark.asyncio
