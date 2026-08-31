@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import mediaclipmakarr.api.settings as settings_api
 import mediaclipmakarr.main as main_module
 from mediaclipmakarr.application_settings import (
     ApplicationSettingsUpdate,
@@ -150,7 +151,7 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
         )
 
     monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
-    monkeypatch.setattr(main_module, "test_plex_connection", capture_connection_token)
+    monkeypatch.setattr(settings_api, "test_plex_connection", capture_connection_token)
     settings = api_settings(tmp_path)
     secret = "must-not-appear-in-a-response"
     replacement_secret = "replacement-must-also-stay-secret"
@@ -258,7 +259,7 @@ def test_effective_settings_are_cached_until_settings_update(tmp_path, monkeypat
         )
 
     calls = 0
-    original_loader = main_module.get_effective_application_settings
+    original_loader = settings_api.get_effective_application_settings
 
     async def count_effective_settings_loads(engine, bootstrap):
         nonlocal calls
@@ -268,6 +269,9 @@ def test_effective_settings_are_cached_until_settings_update(tmp_path, monkeypat
     monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
     monkeypatch.setattr(
         main_module, "get_effective_application_settings", count_effective_settings_loads
+    )
+    monkeypatch.setattr(
+        settings_api, "get_effective_application_settings", count_effective_settings_loads
     )
     settings = api_settings(tmp_path)
 

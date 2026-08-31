@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.plex import PlexSession, PlexSessionSnapshot
 from mediaclipmakarr.source_media import ResolvedSourceMedia, SubtitleSelection
@@ -78,6 +81,62 @@ class ClipCreateValidationError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.error = StructuredError(code=code, message=message, retryable=retryable)
+
+
+async def get_clip(
+    engine: AsyncEngine, clip_id: str, clip_root: Path
+) -> dict[str, object] | None:
+    """Load a managed clip only when its stored path remains under the clip root."""
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(text("SELECT * FROM clips WHERE id = :id"), {"id": clip_id})
+        ).mappings().first()
+    if row is None:
+        return None
+    clip = dict(row)
+    path = Path(str(clip["file_path"])).resolve(strict=False)
+    if not path.is_relative_to(clip_root.resolve(strict=False)):
+        return None
+    clip["file_path"] = str(path)
+    return clip
+
+
+async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
+    """Persist a newly installed managed clip."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO clips "
+                "(id, title, library, media_type, file_path, duration_ms, revision, "
+                "source_start_ms, source_end_ms, source_path, source_size_bytes, "
+                "source_modified_at, selected_audio_stream_index, render_plan_hash, "
+                "created_at, updated_at) "
+                "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
+                ":revision, :source_start_ms, :source_end_ms, :source_path, "
+                ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
+                ":render_plan_hash, :created_at, :updated_at)"
+            ),
+            clip,
+        )
+
+
+async def insert_clip_if_missing(engine: AsyncEngine, clip: dict[str, object]) -> None:
+    """Persist recovery output without replacing an existing clip identity."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT OR IGNORE INTO clips "
+                "(id, title, library, media_type, file_path, duration_ms, revision, "
+                "source_start_ms, source_end_ms, source_path, source_size_bytes, "
+                "source_modified_at, selected_audio_stream_index, render_plan_hash, "
+                "created_at, updated_at) "
+                "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
+                ":revision, :source_start_ms, :source_end_ms, :source_path, "
+                ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
+                ":render_plan_hash, :created_at, :updated_at)"
+            ),
+            clip,
+        )
 
 
 def validate_clip_create_request(

@@ -1,5 +1,27 @@
 # MediaClipMakarr Refactor Guide
 
+## Critical: implementation must actually move
+
+Creating wrapper, re-export, façade, compatibility, or forwarding modules does NOT satisfy this refactor.
+
+When a responsibility is assigned to a new module, the implementation itself must be moved there.
+
+Examples of unacceptable results:
+
+- `runner.py` containing only `from ._implementation import JobRunner`
+- `SessionDetail.tsx` merely re-exporting a component still implemented in `App.tsx`
+- moving the original monolith to `_implementation.py`, `core.py`, `legacy.py`, `internal.py`, or another catch-all file
+- keeping the original implementation in place and adding thin wrappers around it
+
+Temporary forwarding imports may be used during intermediate edits, but they must be removed before the refactor is considered complete.
+
+At completion:
+
+- there must be no replacement monolith containing the implementations that were supposed to be extracted
+- each new module must contain the implementation of the responsibility it owns
+- the original large files must physically lose that implementation
+- `App.tsx`, `main.py`, and package `__init__.py` should primarily compose/import code rather than hide the original implementation
+
 ## Goal
 
 Refactor the current frontend and backend so large files stop accumulating unrelated responsibilities.
