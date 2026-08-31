@@ -81,9 +81,7 @@ async def test_unreachable_server_is_not_reported_as_bad_credentials() -> None:
         raise httpx.ConnectError("connection failed", request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(unreachable)) as client:
-        result = await check_plex_connection(
-            "http://missing.example:32400", "token", client=client
-        )
+        result = await check_plex_connection("http://missing.example:32400", "token", client=client)
 
     assert result.connected is False
     assert result.code == "PLEX_UNREACHABLE"
@@ -168,6 +166,33 @@ def test_video_session_uses_selected_media_part_and_audio_stream() -> None:
     assert session.selected_audio_streams[0].language == "eng"
     assert session.selected_subtitle_streams[0].key == "/library/streams/501.srt"
     assert session.subtitle_streams[0].codec == "srt"
+
+
+def test_video_session_preserves_plex_hdr_and_dolby_vision_metadata() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="Movie" type="movie" duration="90000">
+        <User id="1" title="Alice" />
+        <Player machineIdentifier="player-1" state="playing" />
+        <Session id="session-1" />
+        <Media id="media-1" selected="1" videoDynamicRange="HDR">
+          <Part id="part-1" file="/plex/Movie.mkv" selected="1">
+            <Stream streamType="1" index="0" colorTrc="smpte2084"
+                    colorPrimaries="bt2020" colorSpace="bt2020nc"
+                    DOVIProfile="8" DOVIBLCompatID="1" />
+            <Stream streamType="2" index="1" selected="1" />
+          </Part>
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    [parsed] = parse_video_sessions(payload)
+
+    assert parsed.video_metadata.dynamic_range == "HDR"
+    assert parsed.video_metadata.color_transfer == "smpte2084"
+    assert parsed.video_metadata.dolby_vision_profile == 8
+    assert parsed.video_metadata.dolby_vision_bl_compatibility_id == 1
 
 
 @pytest.mark.asyncio
@@ -294,9 +319,7 @@ async def test_session_poller_run_loop_continues_after_escaped_poll_error(monkey
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         poller = EscapingPoller(load_settings, interval_seconds=0.01, client=client)
         task = asyncio.create_task(poller._run())
-        first_snapshot, version, changed = await poller.wait_for_change(
-            0, timeout_seconds=1.0
-        )
+        first_snapshot, version, changed = await poller.wait_for_change(0, timeout_seconds=1.0)
         second_snapshot, _version, changed_again = await poller.wait_for_change(
             version, timeout_seconds=1.0
         )

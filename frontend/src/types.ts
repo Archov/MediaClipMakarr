@@ -117,6 +117,8 @@ export interface StructuredError {
   code: string;
   message: string;
   retryable: boolean;
+  alternatives: Array<Record<string, unknown>>;
+  context: Record<string, unknown>;
 }
 
 export interface ClipCreateRequest {
@@ -177,7 +179,11 @@ export interface HdrCapabilities {
   hdr10: boolean;
   hlg: boolean;
   dolby_vision: boolean;
+  dolby_vision_profile: number | null;
+  dolby_vision_base_layer_compatible: boolean | null;
+  dolby_vision_bl_compatibility_id: number | null;
   color: VideoColorMetadata;
+  probe_context: Record<string, unknown>;
 }
 
 export interface MediaCapabilities {

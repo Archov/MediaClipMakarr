@@ -11,6 +11,8 @@
     "build": "tsc -b && vite build",
     "test:node-version": "node -e \"const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 20)) { console.error('Node.js >=22.20.0 is required for test:timestamps.'); process.exit(1); }\"",
     "test:timestamps": "npm run test:node-version && node --experimental-strip-types tests/timestamps.test.ts",
+    "test:track-selection": "npm run test:node-version && node --experimental-strip-types --test tests/trackSelection.test.ts",
+    "test": "npm run test:timestamps && npm run test:track-selection",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

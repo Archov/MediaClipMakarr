@@ -48,16 +48,17 @@ async def enqueue_clip_create_job(engine: AsyncEngine, plan: ClipRenderPlan) -> 
 async def get_job_snapshot(engine: AsyncEngine, job_id: str) -> JobSnapshot | None:
     async with engine.connect() as connection:
         row = (
-            await connection.execute(text("SELECT * FROM jobs WHERE id = :id"), {"id": job_id})
-        ).mappings().first()
+            (await connection.execute(text("SELECT * FROM jobs WHERE id = :id"), {"id": job_id}))
+            .mappings()
+            .first()
+        )
         if row is None:
             return None
         queue_position = None
         if row["state"] == "QUEUED":
             queue_position = await connection.scalar(
                 text(
-                    "SELECT COUNT(*) FROM jobs "
-                    "WHERE state = 'QUEUED' AND created_at <= :created_at"
+                    "SELECT COUNT(*) FROM jobs WHERE state = 'QUEUED' AND created_at <= :created_at"
                 ),
                 {"created_at": row["created_at"]},
             )
@@ -68,13 +69,17 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
     started_at = utc_now()
     async with engine.begin() as connection:
         candidate = (
-            await connection.execute(
-                text(
-                    "SELECT id, render_plan_json FROM jobs "
-                    "WHERE state = 'QUEUED' ORDER BY created_at LIMIT 1"
+            (
+                await connection.execute(
+                    text(
+                        "SELECT id, render_plan_json FROM jobs "
+                        "WHERE state = 'QUEUED' ORDER BY created_at LIMIT 1"
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         if candidate is None:
             return None
         result = await connection.execute(
@@ -99,6 +104,7 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
         run_token=run_token,
         render_plan=ClipRenderPlan.model_validate_json(str(candidate["render_plan_json"])),
     )
+
 
 async def update_running_job(
     engine: AsyncEngine,
@@ -242,9 +248,17 @@ async def fail_job(
     code: str,
     message: str,
     retryable: bool = False,
+    alternatives: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> None:
     finished_at = utc_now()
-    error = JobError(code=code, message=message, retryable=retryable)
+    error = JobError(
+        code=code,
+        message=message,
+        retryable=retryable,
+        alternatives=alternatives or [],
+        context=context or {},
+    )
     token_clause = "AND run_token = :run_token" if run_token else ""
     await _execute_update(
         engine,
@@ -262,6 +276,7 @@ async def fail_job(
             "message": message,
         },
     )
+
 
 async def create_pending_operation(
     engine: AsyncEngine,
@@ -293,6 +308,7 @@ async def create_pending_operation(
                 "created_at": utc_now(),
             },
         )
+
 
 async def _guarded_update(
     engine: AsyncEngine,
@@ -338,9 +354,7 @@ def _snapshot_from_row(row: dict[str, Any], *, queue_position: int | None) -> Jo
         message=str(row["message"]),
         result=_load_json(row.get("result_json")),
         error=(
-            JobError.model_validate(error)
-            if (error := _load_json(row.get("error_json")))
-            else None
+            JobError.model_validate(error) if (error := _load_json(row.get("error_json"))) else None
         ),
         created_at=row["created_at"],
         started_at=started_at,

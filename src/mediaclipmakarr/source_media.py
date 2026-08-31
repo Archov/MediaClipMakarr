@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.hdr import HdrCapabilities, VideoColorMetadata, classify_hdr
 from mediaclipmakarr.plex import PlexPartStream, PlexSession
 from mediaclipmakarr.source_paths import SourcePathMapping, resolve_mapped_source_path
 from mediaclipmakarr.subprocesses import (
@@ -38,8 +39,6 @@ SourceMediaErrorCode = Literal[
     "EXTERNAL_SUBTITLE_STREAM_UNAVAILABLE",
     "EXTERNAL_SUBTITLE_URL_UNAVAILABLE",
     "EXTERNAL_SUBTITLE_URL_INVALID",
-    "HDR_TONEMAPPING_UNSUPPORTED",
-    "DOLBY_VISION_UNSUPPORTED",
 ]
 
 CommandRunner = Callable[..., Awaitable[CommandResult]]
@@ -67,13 +66,6 @@ class SourceMediaError(Exception):
 class SourceFingerprint(BaseModel):
     size_bytes: int
     modified_at: datetime
-
-
-class VideoColorMetadata(BaseModel):
-    color_space: str | None = None
-    color_transfer: str | None = None
-    color_primaries: str | None = None
-    color_range: str | None = None
 
 
 class MediaStreamIdentity(BaseModel):
@@ -104,13 +96,6 @@ class TrackDescriptor(BaseModel):
     unavailable_reason: str | None = None
     subtitle_kind: SubtitleKind | None = None
     external: bool = False
-
-
-class HdrCapabilities(BaseModel):
-    hdr10: bool = False
-    hlg: bool = False
-    dolby_vision: bool = False
-    color: VideoColorMetadata = Field(default_factory=VideoColorMetadata)
 
 
 class MediaCapabilities(BaseModel):
@@ -264,7 +249,6 @@ async def resolve_and_probe_source_media(
         bootstrap_settings.resolved_source_dirs,
     )
     probe = await _probe_source(source_file.path, bootstrap_settings, runner=runner)
-    _reject_unsupported_hdr(probe)
     video_streams = _video_streams(probe)
     if not video_streams:
         raise SourceMediaError(
@@ -584,11 +568,7 @@ def _select_subtitle_stream(
             )
         if selected is None:
             external = next(
-                (
-                    stream
-                    for stream in external_streams
-                    if _same_plex_stream(stream, plex_selected)
-                ),
+                (stream for stream in external_streams if _same_plex_stream(stream, plex_selected)),
                 None,
             )
             if external is not None:
@@ -618,9 +598,7 @@ def _select_subtitle_stream(
 def _external_text_subtitle_streams(
     probe: FFProbePayload, plex_subtitle_streams: Sequence[PlexPartStream]
 ) -> list[PlexPartStream]:
-    embedded_indexes = {
-        stream.index for stream in probe.streams if stream.codec_type == "subtitle"
-    }
+    embedded_indexes = {stream.index for stream in probe.streams if stream.codec_type == "subtitle"}
     return [
         stream
         for stream in plex_subtitle_streams
@@ -731,13 +709,12 @@ def _media_capabilities(
         ],
         subtitle_tracks=subtitle_tracks,
         attachment_tracks=[
-            _track_descriptor(stream, kind="attachment", selected=False)
-            for stream in attachments
+            _track_descriptor(stream, kind="attachment", selected=False) for stream in attachments
         ],
         default_audio_stream_index=selected_audio_stream.stream_index,
         default_subtitle_stream_index=selected_subtitle_index,
         subtitles_forced_off=selected_subtitle_index is None,
-        hdr=_hdr_capabilities(first_video),
+        hdr=classify_hdr(first_video, session.video_metadata),
         warnings=[
             track.unavailable_reason
             for track in subtitle_tracks
@@ -801,45 +778,3 @@ def _subtitle_kind(codec_name: str | None) -> SubtitleKind:
     if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}:
         return "bitmap"
     return "unsupported"
-
-
-def _hdr_capabilities(stream: FFProbeStream | None) -> HdrCapabilities:
-    if stream is None:
-        return HdrCapabilities()
-    transfer = (stream.color_transfer or "").casefold()
-    return HdrCapabilities(
-        hdr10=transfer == "smpte2084",
-        hlg=transfer == "arib-std-b67",
-        dolby_vision=_has_dolby_vision_metadata(stream),
-        color=VideoColorMetadata(
-            color_space=stream.color_space,
-            color_transfer=stream.color_transfer,
-            color_primaries=stream.color_primaries,
-            color_range=stream.color_range,
-        ),
-    )
-
-
-def _reject_unsupported_hdr(probe: FFProbePayload) -> None:
-    for stream in probe.streams:
-        if stream.codec_type != "video":
-            continue
-        if _has_dolby_vision_metadata(stream):
-            raise SourceMediaError(
-                "DOLBY_VISION_UNSUPPORTED",
-                "Dolby Vision sources need a confirmed compatible base layer before rendering.",
-            )
-        transfer = (stream.color_transfer or "").casefold()
-        if transfer in {"smpte2084", "arib-std-b67"}:
-            raise SourceMediaError(
-                "HDR_TONEMAPPING_UNSUPPORTED",
-                "HDR10 and HLG sources cannot be rendered until SDR tone mapping is available.",
-            )
-
-
-def _has_dolby_vision_metadata(stream: FFProbeStream) -> bool:
-    for item in stream.side_data_list:
-        side_data_type = str(item.get("side_data_type") or "").casefold()
-        if side_data_type == "dovi configuration record" or item.get("dv_profile") is not None:
-            return True
-    return (stream.model_extra or {}).get("dv_profile") is not None

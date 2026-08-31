@@ -26,8 +26,10 @@ import type {
 import { ClipBoundaryEditor } from "./ClipBoundaryEditor";
 import { displayedPosition, useClock, useJobSnapshot, useLivePlexSessions } from "./hooks";
 import { JobStatus } from "./JobStatus";
-import { MediaTrackSelectors, selectedTrackIndex } from "./MediaTrackSelectors";
+import { MediaErrorAlert, structuredErrorFrom } from "./MediaErrorAlert";
+import { MediaTrackSelectors } from "./MediaTrackSelectors";
 import { SessionList } from "./SessionList";
+import { initialTrackSelection } from "./trackSelection";
 
 const sessionStatusSeverity: Record<
   PlexSessionSnapshotStatus,
@@ -42,6 +44,8 @@ const sessionStatusSeverity: Record<
   unreachable: "warning",
   error: "error",
 };
+
+const ACTIVE_CLIP_JOB_KEY = "mediaclipmakarr.activeClipJobId";
 
 function mediaCapabilitiesVersion(session: PlexSession | undefined): string {
   if (!session) return "";
@@ -72,6 +76,9 @@ export function MakeClipScreen() {
   const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [submittedJob, setSubmittedJob] = useState<JobSnapshot | null>(null);
+  const [submittedJobId, setSubmittedJobId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : window.sessionStorage.getItem(ACTIVE_CLIP_JOB_KEY),
+  );
   const snapshot = sessions.data;
   const selectedSession = snapshot?.sessions.find(
     (session) => session.session_identity === selectedSessionIdentity,
@@ -80,7 +87,7 @@ export function MakeClipScreen() {
   const livePositionMs = selectedSession ? displayedPosition(selectedSession, now) : null;
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
   const capabilitiesVersion = mediaCapabilitiesVersion(selectedSession);
-  const activeJob = useJobSnapshot(submittedJob);
+  const activeJob = useJobSnapshot(submittedJob, submittedJobId);
   const capabilities = useQuery({
     queryKey: ["media-capabilities", selectedSessionIdentity, capabilitiesVersion],
     queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
@@ -88,12 +95,22 @@ export function MakeClipScreen() {
   });
   const clipCreate = useMutation({
     mutationFn: createClip,
-    onSuccess: (job) => setSubmittedJob(job),
+    onSuccess: (job) => {
+      setSubmittedJob(job);
+      setSubmittedJobId(job.id);
+      window.sessionStorage.setItem(ACTIVE_CLIP_JOB_KEY, job.id);
+    },
   });
+
+  const clearSubmittedJob = () => {
+    setSubmittedJob(null);
+    setSubmittedJobId(null);
+    window.sessionStorage.removeItem(ACTIVE_CLIP_JOB_KEY);
+  };
 
   const resetClipSubmission = () => {
     setBoundaryNotice(null);
-    setSubmittedJob(null);
+    clearSubmittedJob();
     clipCreate.reset();
   };
 
@@ -125,17 +142,10 @@ export function MakeClipScreen() {
 
   useEffect(() => {
     if (!capabilities.data) return;
-    const nextAudio = selectedTrackIndex(
-      capabilities.data.audio_tracks,
-      capabilities.data.default_audio_stream_index,
-    );
-    const nextSubtitle = selectedTrackIndex(
-      capabilities.data.subtitle_tracks,
-      capabilities.data.default_subtitle_stream_index,
-    );
-    setAudioStreamIndex(nextAudio);
-    setSubtitleStreamIndex(nextSubtitle);
-    setSubtitlesEnabled(nextSubtitle !== "");
+    const selection = initialTrackSelection(capabilities.data);
+    setAudioStreamIndex(selection.audioStreamIndex);
+    setSubtitleStreamIndex(selection.subtitleStreamIndex);
+    setSubtitlesEnabled(selection.subtitlesEnabled);
   }, [capabilities.data]);
 
   const hasValidRange =
@@ -157,6 +167,19 @@ export function MakeClipScreen() {
       subtitles_enabled: subtitlesEnabled,
     };
     clipCreate.mutate(request);
+  };
+
+  const selectAlternativeTrack = (alternative: Record<string, unknown>) => {
+    const streamIndex = alternative.stream_index;
+    if (typeof streamIndex !== "number") return;
+    if (alternative.codec_type === "audio") {
+      setAudioStreamIndex(streamIndex);
+    } else if (alternative.codec_type === "subtitle") {
+      setSubtitleStreamIndex(streamIndex);
+      setSubtitlesEnabled(true);
+    }
+    clearSubmittedJob();
+    clipCreate.reset();
   };
 
   return (
@@ -194,7 +217,7 @@ export function MakeClipScreen() {
               setStartInput(formatTimestampMs(initialStartMs));
               setEndMs(null);
               setEndInput("");
-              setSubmittedJob(null);
+              clearSubmittedJob();
               clipCreate.reset();
               setBoundaryNotice(null);
               setAudioStreamIndex("");
@@ -225,7 +248,13 @@ export function MakeClipScreen() {
                       <Typography color="text.secondary">Loading media tracks…</Typography>
                     </Stack>
                   )}
-                  {capabilities.error && <Alert severity="error">{capabilities.error.message}</Alert>}
+                  {capabilities.error && (
+                    <MediaErrorAlert
+                      error={structuredErrorFrom(capabilities.error)}
+                      fallbackMessage={capabilities.error.message}
+                      onSelectAlternative={selectAlternativeTrack}
+                    />
+                  )}
                   <MediaTrackSelectors
                     capabilities={capabilities.data}
                     audioStreamIndex={audioStreamIndex}
@@ -233,19 +262,25 @@ export function MakeClipScreen() {
                     subtitlesEnabled={subtitlesEnabled}
                     onAudioChange={(value) => {
                       setAudioStreamIndex(value);
-                      setSubmittedJob(null);
+                      clearSubmittedJob();
                       clipCreate.reset();
                     }}
                     onSubtitleChange={(enabled, value) => {
                       setSubtitlesEnabled(enabled);
                       setSubtitleStreamIndex(value);
-                      setSubmittedJob(null);
+                      clearSubmittedJob();
                       clipCreate.reset();
                     }}
                   />
                 </ClipBoundaryEditor>
-                {clipCreate.error && <Alert severity="error">{clipCreate.error.message}</Alert>}
-                <JobStatus job={activeJob} />
+                {clipCreate.error && (
+                  <MediaErrorAlert
+                    error={structuredErrorFrom(clipCreate.error)}
+                    fallbackMessage={clipCreate.error.message}
+                    onSelectAlternative={selectAlternativeTrack}
+                  />
+                )}
+                <JobStatus job={activeJob} onSelectAlternative={selectAlternativeTrack} />
 
                 <Button
                   startIcon={<ContentCutRounded />}

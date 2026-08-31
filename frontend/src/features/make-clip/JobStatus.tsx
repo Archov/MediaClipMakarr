@@ -3,6 +3,7 @@ import { Alert, Box, Button, Chip, LinearProgress, Stack } from "@mui/material";
 
 import { formatTimestampMs } from "../../timestamps";
 import type { JobSnapshot, JobState } from "../../types";
+import { MediaErrorAlert } from "./MediaErrorAlert";
 
 function severity(state: JobState): "success" | "info" | "warning" | "error" {
   if (state === "SUCCEEDED") return "success";
@@ -11,10 +12,19 @@ function severity(state: JobState): "success" | "info" | "warning" | "error" {
   return "info";
 }
 
-export function JobStatus({ job }: { job: JobSnapshot | null }) {
+export function JobStatus({
+  job,
+  onSelectAlternative,
+}: {
+  job: JobSnapshot | null;
+  onSelectAlternative?: (alternative: Record<string, unknown>) => void;
+}) {
   if (!job) return null;
   return <Stack spacing={2}>
-    <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}{job.error ? ` ${job.error.message}` : ""}</Alert>
+    {!job.error && <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}</Alert>}
+    {job.error && (
+      <MediaErrorAlert error={job.error} onSelectAlternative={onSelectAlternative} />
+    )}
     {job.state !== "SUCCEEDED" && job.state !== "FAILED" && <LinearProgress variant="determinate" value={Math.round(job.progress * 100)} aria-label="Clip render progress" />}
     {job.state === "SUCCEEDED" && job.result && <Stack spacing={2}>
       <Box component="video" src={job.result.play_url} controls sx={{ width: "100%", borderRadius: 1, bgcolor: "black" }} />

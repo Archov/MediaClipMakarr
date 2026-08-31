@@ -15,6 +15,7 @@ import httpx
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
+from mediaclipmakarr.video_filters import build_video_base_filter, output_color_args
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class RenderedClipFile:
 class PreparedTextSubtitle:
     path: Path
     fonts_dir: Path
+    has_content: bool = True
 
 
 class SubtitlePreparationError(RuntimeError):
@@ -180,6 +182,7 @@ def build_ffmpeg_clip_args(
             plan.x264_preset,
             "-pix_fmt",
             "yuv420p",
+            *output_color_args(),
             "-c:a",
             "aac",
             "-b:a",
@@ -219,10 +222,7 @@ def _subtitle_video_filter(
     preroll_seconds: float,
     prepared_text_subtitle: PreparedTextSubtitle | None,
 ) -> VideoFilterPlan:
-    base = (
-        "scale=w='min(1920,iw)':h='min(1080,ih)':"
-        "force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
-    )
+    base = build_video_base_filter(plan.hdr, plan.hdr_strategy)
     trim = (
         f"trim=start={preroll_seconds:.3f}:"
         f"duration={_duration_seconds(plan):.3f},setpts=PTS-STARTPTS"
@@ -232,10 +232,14 @@ def _subtitle_video_filter(
     if strategy == "embedded_text" and stream is not None:
         if prepared_text_subtitle is None:
             raise ValueError("Embedded text subtitles must be prepared before rendering.")
+        if not prepared_text_subtitle.has_content:
+            return VideoFilterPlan(
+                f"{base},{trim}",
+                f"0:{plan.source_media.video_streams[0].stream_index}",
+            )
         source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
-        fonts_arg = (
-            f":fontsdir={_filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.fonts_dir))}"
-        )
+        fonts_dir = _prepared_filter_path(prepared_text_subtitle.fonts_dir)
+        fonts_arg = f":fontsdir={_filtergraph_quote(fonts_dir)}"
         return VideoFilterPlan(
             f"{base},subtitles=filename={source}{fonts_arg},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
@@ -243,10 +247,14 @@ def _subtitle_video_filter(
     if strategy == "external_text" and stream is not None:
         if prepared_text_subtitle is None:
             raise ValueError("External text subtitles must be prepared before rendering.")
+        if not prepared_text_subtitle.has_content:
+            return VideoFilterPlan(
+                f"{base},{trim}",
+                f"0:{plan.source_media.video_streams[0].stream_index}",
+            )
         source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
-        fonts_arg = (
-            f":fontsdir={_filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.fonts_dir))}"
-        )
+        fonts_dir = _prepared_filter_path(prepared_text_subtitle.fonts_dir)
+        fonts_arg = f":fontsdir={_filtergraph_quote(fonts_dir)}"
         return VideoFilterPlan(
             f"{base},subtitles=filename={source}{fonts_arg},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
@@ -268,10 +276,7 @@ def _subtitle_video_filter(
 
 
 def _audio_filter(preroll_seconds: float, duration_seconds: float) -> str:
-    return (
-        f"atrim=start={preroll_seconds:.3f}:duration={duration_seconds:.3f},"
-        "asetpts=PTS-STARTPTS"
-    )
+    return f"atrim=start={preroll_seconds:.3f}:duration={duration_seconds:.3f},asetpts=PTS-STARTPTS"
 
 
 def _duration_seconds(plan: ClipRenderPlan) -> float:
@@ -336,7 +341,19 @@ async def _prepare_text_subtitle_file(
         raise SubtitleFontPreparationError(
             "FFmpeg could not extract embedded subtitle fonts during preparation."
         ) from error
-    return PreparedTextSubtitle(path=prepared, fonts_dir=fonts_dir)
+    has_content = await asyncio.to_thread(_prepared_subtitle_has_content, prepared)
+    return PreparedTextSubtitle(
+        path=prepared,
+        fonts_dir=fonts_dir,
+        has_content=has_content,
+    )
+
+
+def _prepared_subtitle_has_content(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _prepared_subtitle_filename(codec_name: str | None) -> str:

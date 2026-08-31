@@ -59,17 +59,25 @@ export function useLivePlexSessions() {
   return sessions;
 }
 
-export function useJobSnapshot(initialJob: JobSnapshot | null) {
+export function useJobSnapshot(
+  initialJob: JobSnapshot | null,
+  rememberedJobId: string | null = null,
+) {
   const [job, setJob] = useState<JobSnapshot | null>(initialJob);
 
   useEffect(() => {
-    setJob(initialJob);
-    if (!initialJob || typeof EventSource === "undefined") return undefined;
+    const jobId = initialJob?.id ?? rememberedJobId;
+    if (!jobId) {
+      setJob(null);
+      return undefined;
+    }
+    if (initialJob?.id === jobId) setJob(initialJob);
+    if (typeof EventSource === "undefined") return undefined;
 
     let closed = false;
     let snapshotRevision = 0;
     let fallbackRequest = 0;
-    const eventSource = new EventSource(`/api/jobs/${encodeURIComponent(initialJob.id)}/events`);
+    const eventSource = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
     const handleSnapshot = (event: MessageEvent<string>) => {
       snapshotRevision += 1;
       setJob(JSON.parse(event.data) as JobSnapshot);
@@ -78,13 +86,13 @@ export function useJobSnapshot(initialJob: JobSnapshot | null) {
       if (!closed) {
         const request = ++fallbackRequest;
         const requestRevision = snapshotRevision;
-        void fetchJob(initialJob.id)
+        void fetchJob(jobId)
           .then((snapshot) => {
             if (
               !closed &&
               request === fallbackRequest &&
               requestRevision === snapshotRevision &&
-              snapshot.id === initialJob.id
+              snapshot.id === jobId
             ) {
               setJob(snapshot);
             }
@@ -95,13 +103,14 @@ export function useJobSnapshot(initialJob: JobSnapshot | null) {
 
     eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
     eventSource.addEventListener("error", handleError);
+    if (!initialJob || initialJob.id !== jobId) handleError();
     return () => {
       closed = true;
       eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
       eventSource.removeEventListener("error", handleError);
       eventSource.close();
     };
-  }, [initialJob]);
+  }, [initialJob, rememberedJobId]);
 
   return job;
 }
