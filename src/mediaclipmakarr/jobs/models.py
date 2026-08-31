@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from mediaclipmakarr.render_plan import ClipRenderPlan
 
@@ -19,6 +19,8 @@ class JobError(BaseModel):
     code: str
     message: str
     retryable: bool = False
+    alternatives: list[dict[str, Any]] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobSnapshot(BaseModel):

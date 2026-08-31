@@ -12,13 +12,6 @@ function trackLabel(track: TrackDescriptor): string {
   return parts.join(" · ") || "Unnamed track";
 }
 
-export function selectedTrackIndex(tracks: TrackDescriptor[], fallback: number | null): number | "" {
-  const available = tracks.filter((track) => track.available && track.stream_index !== null);
-  const selected = available.find((track) => track.selected);
-  const fallbackTrack = available.find((track) => track.stream_index === fallback);
-  return selected?.stream_index ?? fallbackTrack?.stream_index ?? available[0]?.stream_index ?? "";
-}
-
 export function MediaTrackSelectors({
   capabilities,
   audioStreamIndex,
@@ -86,11 +79,13 @@ export function MediaTrackSelectors({
       {capabilities.warnings.map((warning) => (
         <Alert key={warning} severity="warning">{warning}</Alert>
       ))}
-      {capabilities.hdr.dolby_vision && (
-        <Alert severity="warning">Dolby Vision rendering is unavailable.</Alert>
-      )}
-      {(capabilities.hdr.hdr10 || capabilities.hdr.hlg) && (
-        <Alert severity="info">HDR source detected. SDR tone mapping is handled in a later phase.</Alert>
+      {capabilities.hdr.dolby_vision &&
+        !capabilities.hdr.dolby_vision_base_layer_compatible &&
+        !capabilities.hdr.hdr10 &&
+        !capabilities.hdr.hlg && (
+        <Alert severity="warning">
+          This Dolby Vision source has no compatible HDR fallback and cannot be tone-mapped.
+        </Alert>
       )}
     </Stack>
   );

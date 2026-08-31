@@ -256,11 +256,7 @@ async def test_selected_audio_must_map_unambiguously(tmp_path) -> None:
         )
     with pytest.raises(SourceMediaError) as ambiguous:
         await resolve_and_probe_source_media(
-            session(
-                selected_audio_streams=[
-                    PlexPartStream(stream_type=2, selected=True)
-                ]
-            ),
+            session(selected_audio_streams=[PlexPartStream(stream_type=2, selected=True)]),
             effective_settings(source_root),
             Settings(_env_file=None, source_dirs=[source_root]),
             run_blocking=run_blocking,
@@ -273,7 +269,7 @@ async def test_selected_audio_must_map_unambiguously(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transfer", ["smpte2084", "arib-std-b67"])
-async def test_hdr_sources_are_rejected_until_tone_mapping_is_available(tmp_path, transfer) -> None:
+async def test_hdr_sources_are_classified_for_tone_mapping(tmp_path, transfer) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()
     (source_root / "Movie.mkv").write_bytes(b"fake media")
@@ -286,16 +282,17 @@ async def test_hdr_sources_are_rejected_until_tone_mapping_is_available(tmp_path
             "",
         )
 
-    with pytest.raises(SourceMediaError) as error:
-        await resolve_and_probe_source_media(
-            session(),
-            effective_settings(source_root),
-            Settings(_env_file=None, source_dirs=[source_root]),
-            run_blocking=run_blocking,
-            runner=runner,
-        )
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
 
-    assert error.value.code == "HDR_TONEMAPPING_UNSUPPORTED"
+    assert result.capabilities is not None
+    assert result.capabilities.hdr.hdr10 is (transfer == "smpte2084")
+    assert result.capabilities.hdr.hlg is (transfer == "arib-std-b67")
 
 
 @pytest.mark.asyncio
@@ -325,7 +322,7 @@ async def test_dolby_vision_detection_uses_authoritative_ffprobe_metadata_only(t
 
 
 @pytest.mark.asyncio
-async def test_dolby_vision_configuration_record_is_rejected(tmp_path) -> None:
+async def test_dolby_vision_configuration_record_is_classified_conservatively(tmp_path) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()
     (source_root / "Movie.mkv").write_bytes(b"fake media")
@@ -337,16 +334,18 @@ async def test_dolby_vision_configuration_record_is_rejected(tmp_path) -> None:
     async def runner(argv, **_kwargs):
         return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
 
-    with pytest.raises(SourceMediaError) as error:
-        await resolve_and_probe_source_media(
-            session(),
-            effective_settings(source_root),
-            Settings(_env_file=None, source_dirs=[source_root]),
-            run_blocking=run_blocking,
-            runner=runner,
-        )
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
 
-    assert error.value.code == "DOLBY_VISION_UNSUPPORTED"
+    assert result.capabilities is not None
+    assert result.capabilities.hdr.dolby_vision is True
+    assert result.capabilities.hdr.dolby_vision_profile == 8
+    assert result.capabilities.hdr.dolby_vision_base_layer_compatible is None
 
 
 @pytest.mark.asyncio
@@ -438,7 +437,9 @@ async def test_external_text_subtitle_uses_the_plex_stream_download_path(tmp_pat
     )
 
     assert result.selected_subtitle.strategy == "external_text"
-    assert result.selected_subtitle.external_url == "http://plex.example:32400/library/streams/501.srt"
+    assert (
+        result.selected_subtitle.external_url == "http://plex.example:32400/library/streams/501.srt"
+    )
     assert result.capabilities is not None
     assert result.capabilities.subtitle_tracks[-1].external is True
     assert result.capabilities.subtitle_tracks[-1].selected is True

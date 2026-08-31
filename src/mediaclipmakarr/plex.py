@@ -14,6 +14,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings, normalize_plex_url
+from mediaclipmakarr.hdr import PlexVideoMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class PlexSession(BaseModel):
     plex_part_id: str | None = None
     plex_part_key: str | None = None
     plex_part_file: str | None = Field(default=None, exclude=True)
+    video_metadata: PlexVideoMetadata = Field(default_factory=PlexVideoMetadata, exclude=True)
     selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
     selected_subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
     subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
@@ -171,6 +173,49 @@ def _parse_part_stream(stream: ElementTree.Element) -> PlexPartStream:
     )
 
 
+def _attribute(element: ElementTree.Element | None, *names: str) -> str | None:
+    if element is None:
+        return None
+    expected = {name.casefold() for name in names}
+    return next(
+        (value for key, value in element.attrib.items() if key.casefold() in expected and value),
+        None,
+    )
+
+
+def _int_value(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_video_metadata(
+    media: ElementTree.Element | None,
+    video_stream: ElementTree.Element | None,
+) -> PlexVideoMetadata:
+    return PlexVideoMetadata(
+        dynamic_range=_attribute(media, "videoDynamicRange", "dynamicRange"),
+        color_space=_attribute(video_stream, "colorSpace", "matrixCoefficients"),
+        color_transfer=_attribute(video_stream, "colorTrc", "colorTransfer", "transfer"),
+        color_primaries=_attribute(video_stream, "colorPrimaries", "primaries"),
+        color_range=_attribute(video_stream, "colorRange", "range"),
+        dolby_vision_profile=_int_value(
+            _attribute(video_stream, "DOVIProfile", "dolbyVisionProfile", "dvProfile")
+        ),
+        dolby_vision_bl_compatibility_id=_int_value(
+            _attribute(
+                video_stream,
+                "DOVIBLCompatID",
+                "dolbyVisionBLCompatibilityID",
+                "dvBLSignalCompatibilityID",
+            )
+        ),
+    )
+
+
 def parse_video_sessions(
     payload: bytes, *, sampled_at: datetime | None = None
 ) -> list[PlexSession]:
@@ -208,7 +253,16 @@ def parse_video_sessions(
         part_id = part.attrib.get("id") if part is not None else None
         part_key = part.attrib.get("key") if part is not None else None
         part_file = part.attrib.get("file") if part is not None else None
-        part_streams = [_parse_part_stream(stream) for stream in _children(part, "Stream")]
+        part_stream_elements = _children(part, "Stream")
+        part_streams = [_parse_part_stream(stream) for stream in part_stream_elements]
+        video_stream = next(
+            (
+                stream
+                for stream in part_stream_elements
+                if _int_attribute(stream, "streamType") == 1
+            ),
+            None,
+        )
         selected_audio_streams = [
             parsed for parsed in part_streams if parsed.stream_type == 2 and parsed.selected
         ]
@@ -238,6 +292,7 @@ def parse_video_sessions(
                 plex_part_id=part_id,
                 plex_part_key=part_key,
                 plex_part_file=part_file,
+                video_metadata=_parse_video_metadata(media, video_stream),
                 selected_audio_streams=selected_audio_streams,
                 selected_subtitle_streams=selected_subtitle_streams,
                 subtitle_streams=subtitle_streams,

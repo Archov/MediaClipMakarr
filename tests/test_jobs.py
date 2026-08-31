@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -17,6 +18,7 @@ import mediaclipmakarr.media_renderer as media_renderer_module
 from mediaclipmakarr.clips import ClipCreateRequest, get_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
+from mediaclipmakarr.hdr import AdvancedMediaError, HdrCapabilities
 from mediaclipmakarr.jobs import (
     JobEventBroker,
     JobRunner,
@@ -66,9 +68,7 @@ def source_media(source_file: Path) -> ResolvedSourceMedia:
                 color=VideoColorMetadata(color_transfer="bt709"),
             )
         ],
-        audio_streams=[
-            MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")
-        ],
+        audio_streams=[MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")],
         subtitle_streams=[],
         selected_audio_stream=MediaStreamIdentity(
             stream_index=1, codec_type="audio", codec_name="aac"
@@ -282,6 +282,56 @@ async def test_job_runner_supplies_current_plex_token_for_external_subtitle(tmp_
 
 
 @pytest.mark.asyncio
+async def test_advanced_media_failure_context_remains_in_durable_job_status(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def reject_dolby_vision(*_args, **_kwargs):
+        raise AdvancedMediaError(
+            "DOLBY_VISION_PROFILE_5_UNSUPPORTED",
+            "Profile 5 cannot be rendered safely.",
+            context={"stream_index": 0, "dolby_vision_profile": 5},
+        )
+
+    runner = JobRunner(
+        engine,
+        Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=tmp_path / "work",
+            clip_dir=tmp_path / "clips",
+            source_dirs=[tmp_path],
+        ),
+        run_blocking=run_blocking,
+        events=JobEventBroker(),
+        renderer=reject_dolby_vision,
+    )
+    try:
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        await runner.start()
+        runner.wake()
+        failed = await wait_for_job_state(engine, queued.id, "FAILED")
+        refreshed = await get_job_snapshot(engine, queued.id)
+    finally:
+        await runner.stop()
+        await engine.dispose()
+
+    assert failed.error is not None
+    assert failed.error.code == "DOLBY_VISION_PROFILE_5_UNSUPPORTED"
+    assert failed.error.context == {"stream_index": 0, "dolby_vision_profile": 5}
+    assert refreshed == failed
+
+
+@pytest.mark.asyncio
 async def test_preparation_failure_is_structured_and_cleans_its_workdir(tmp_path) -> None:
     database_path = tmp_path / "application.db"
     source_file = tmp_path / "Movie.mkv"
@@ -417,6 +467,57 @@ def test_ffmpeg_args_force_phase_one_output_contract(tmp_path) -> None:
         argv.index("-movflags") : argv.index("-movflags") + 2
     ]
     assert any(value.startswith("comment=MediaClipMakarr ") for value in argv)
+
+
+def test_mp4_recovery_metadata_contains_hdr_classification_and_strategy(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=source_media(source_file),
+        x264_preset="veryfast",
+    ).model_copy(
+        update={
+            "hdr": HdrCapabilities(
+                hdr10=True,
+                dolby_vision=True,
+                dolby_vision_profile=8,
+                dolby_vision_base_layer_compatible=True,
+                dolby_vision_bl_compatibility_id=1,
+                color=VideoColorMetadata(
+                    color_space="bt2020nc",
+                    color_transfer="smpte2084",
+                    color_primaries="bt2020",
+                    color_range="tv",
+                ),
+            ),
+            "hdr_strategy": "tone_map_hdr10",
+        }
+    )
+
+    metadata = json.loads(media_renderer_module._metadata_envelope(plan).removeprefix(
+        "MediaClipMakarr "
+    ))
+
+    assert metadata["schemaVersion"] == 2
+    assert metadata["videoProcessing"] == {
+        "hdrStrategy": "tone_map_hdr10",
+        "sourceHdr": {
+            "hdr10": True,
+            "hlg": False,
+            "dolbyVision": True,
+            "dolbyVisionProfile": 8,
+            "dolbyVisionBaseLayerCompatible": True,
+            "dolbyVisionBlCompatibilityId": 1,
+        },
+        "sourceColor": {
+            "color_space": "bt2020nc",
+            "color_transfer": "smpte2084",
+            "color_primaries": "bt2020",
+            "color_range": "tv",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -664,6 +765,11 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
 
     monkeypatch.setattr(media_renderer_module, "run_command", fake_run_command)
     monkeypatch.setattr(media_renderer_module, "_run_ffmpeg_with_progress", fake_render)
+    monkeypatch.setattr(
+        media_renderer_module,
+        "_prepared_subtitle_has_content",
+        lambda _path: True,
+    )
 
     rendered = await render_clip_file(
         plan,
@@ -693,6 +799,108 @@ async def test_embedded_text_subtitle_is_prepared_before_libass_render(
     assert "filename='subtitles/selected-subtitle.ass'" in subtitle_filter
     assert ":si=" not in subtitle_filter
     assert "fontsdir='fonts'" in subtitle_filter
+
+
+def test_missing_prepared_text_subtitle_renders_without_subtitle_filter(tmp_path) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "subtitle_streams": [
+                MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                )
+            ],
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "rendered.mp4",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "subtitles" / "selected-subtitle.srt",
+            fonts_dir=tmp_path / "fonts",
+            has_content=False,
+        ),
+    )
+
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "subtitles=" not in video_filter
+    assert "trim=start=0.000:duration=3.000" in video_filter
+
+
+@pytest.mark.asyncio
+async def test_text_subtitle_preparation_marks_no_packet_output_as_empty(
+    monkeypatch, tmp_path
+) -> None:
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "subtitle_streams": [
+                MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                )
+            ],
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    async def successful_extract_without_packets(argv, **_kwargs):
+        normalized = tuple(str(value) for value in argv)
+        return CommandResult(normalized, 0, "", "")
+
+    monkeypatch.setattr(media_renderer_module, "run_command", successful_extract_without_packets)
+
+    prepared = await media_renderer_module._prepare_text_subtitle_file(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "work",
+        subtitle_preroll_ms=0,
+    )
+
+    assert prepared is not None
+    assert prepared.path.name == "selected-subtitle.srt"
+    assert prepared.path.exists() is False
+    assert prepared.has_content is False
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1239,7 @@ async def test_render_progress_is_live_but_sqlite_persistence_is_throttled(
             renderer=renderer,
             progress_persist_interval_seconds=10.0,
         )
+
         def fake_monotonic():
             return monotonic_values.pop(0) if monotonic_values else 100.2
 

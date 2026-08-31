@@ -8,7 +8,38 @@ import type {
   PlexConnectionRequest,
   PlexConnectionResult,
   PlexSessionSnapshot,
+  StructuredError,
 } from "./types";
+
+export class ApiRequestError extends Error {
+  readonly detail: StructuredError | null;
+
+  constructor(message: string, detail: StructuredError | null = null) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.detail = detail;
+  }
+}
+
+function structuredError(value: unknown): StructuredError | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const detail = value as Record<string, unknown>;
+  if (typeof detail.code !== "string" || typeof detail.message !== "string") return null;
+  return {
+    code: detail.code,
+    message: detail.message,
+    retryable: detail.retryable === true,
+    alternatives: Array.isArray(detail.alternatives)
+      ? detail.alternatives.filter(
+          (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+        )
+      : [],
+    context:
+      detail.context && typeof detail.context === "object" && !Array.isArray(detail.context)
+        ? detail.context as Record<string, unknown>
+        : {},
+  };
+}
 
 async function parseResponse<T>(response: Response, action: string): Promise<T> {
   if (!response.ok) {
@@ -39,7 +70,10 @@ async function parseResponse<T>(response: Response, action: string): Promise<T> 
             ? `${detail.message} (${detail.code})`
             : detail.message
           : undefined;
-    throw new Error(message ?? `${action} failed with HTTP ${response.status}.`);
+    throw new ApiRequestError(
+      message ?? `${action} failed with HTTP ${response.status}.`,
+      structuredError(!Array.isArray(detail) && typeof detail === "object" ? detail : null),
+    );
   }
   return (await response.json()) as T;
 }

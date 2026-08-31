@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mediaclipmakarr.clips import ClipCreateRequest
+from mediaclipmakarr.hdr import HdrCapabilities, HdrRenderStrategy, planned_hdr_strategy
 from mediaclipmakarr.plex import PlexSession
 from mediaclipmakarr.source_media import (
     MediaStreamIdentity,
@@ -18,7 +19,7 @@ from mediaclipmakarr.source_media import (
     SubtitleSelection,
 )
 
-OutputProfileId = Literal["p1-h264-aac-sdr-v1"]
+OutputProfileId = Literal["p1-h264-aac-sdr-v1", "p2-h264-aac-sdr-v1"]
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = {
@@ -34,7 +35,7 @@ _RESERVED_NAMES = {
 class ClipRenderPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2
     job_id: str
     clip_id: str
     revision: int = 1
@@ -53,7 +54,9 @@ class ClipRenderPlan(BaseModel):
     source_end_ms: int
     selected_audio_stream: MediaStreamIdentity
     selected_subtitle: SubtitleSelection = Field(default_factory=SubtitleSelection)
-    output_profile: OutputProfileId = "p1-h264-aac-sdr-v1"
+    hdr: HdrCapabilities = Field(default_factory=HdrCapabilities)
+    hdr_strategy: HdrRenderStrategy = "sdr"
+    output_profile: OutputProfileId = "p2-h264-aac-sdr-v1"
     x264_preset: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
@@ -76,6 +79,11 @@ def build_clip_render_plan(
     source_media: ResolvedSourceMedia,
     x264_preset: str,
 ) -> ClipRenderPlan:
+    hdr = (
+        source_media.capabilities.hdr
+        if source_media.capabilities is not None
+        else HdrCapabilities()
+    )
     payload: dict[str, Any] = {
         "job_id": f"job-{uuid4()}",
         "clip_id": f"clip-{uuid4()}",
@@ -94,6 +102,8 @@ def build_clip_render_plan(
         "source_end_ms": request.end_ms,
         "selected_audio_stream": source_media.selected_audio_stream,
         "selected_subtitle": source_media.selected_subtitle,
+        "hdr": hdr,
+        "hdr_strategy": planned_hdr_strategy(hdr),
         "x264_preset": x264_preset,
         "render_plan_hash": "",
     }

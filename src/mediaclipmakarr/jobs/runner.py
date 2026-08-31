@@ -42,6 +42,7 @@ STALE_WORKDIR_AGE_SECONDS = 24 * 3_600
 ClipRenderer = Callable[..., Awaitable[RenderedClipFile]]
 PlexTokenLoader = Callable[[], Awaitable[str | None]]
 
+
 def _remove_job_workdir(workdir: Path) -> None:
     shutil.rmtree(workdir, ignore_errors=True)
 
@@ -161,6 +162,8 @@ class JobRunner:
                         code=getattr(error, "job_error_code", type(error).__name__.upper()),
                         message=str(error) or "Clip render failed unexpectedly.",
                         retryable=getattr(error, "job_retryable", True),
+                        alternatives=getattr(error, "alternatives", None),
+                        context=getattr(error, "context", None),
                     )
                 except Exception:
                     logger.exception(
@@ -187,10 +190,16 @@ class JobRunner:
             return
         async with self.engine.connect() as connection:
             rows = (
-                await connection.execute(
-                    text("SELECT id FROM jobs WHERE state IN ('QUEUED', 'RUNNING', 'FINALIZING')")
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id FROM jobs WHERE state IN ('QUEUED', 'RUNNING', 'FINALIZING')"
+                        )
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         active_job_ids = {str(row["id"]) for row in rows}
         removed = await self.run_blocking(
             _remove_stale_job_workdirs,
@@ -202,9 +211,7 @@ class JobRunner:
             noun = "directory" if len(removed) == 1 else "directories"
             logger.info("Removed %s stale media job work %s.", len(removed), noun)
 
-    async def _publish_job_update(
-        self, job_id: str, snapshot: JobSnapshot | None = None
-    ) -> None:
+    async def _publish_job_update(self, job_id: str, snapshot: JobSnapshot | None = None) -> None:
         try:
             await self.events.publish(job_id, snapshot)
         except Exception:
@@ -234,8 +241,7 @@ class JobRunner:
             should_persist = (
                 not rendering_transition_persisted
                 or stage_progress >= 1.0
-                or now - last_render_progress_persisted_at
-                >= self.progress_persist_interval_seconds
+                or now - last_render_progress_persisted_at >= self.progress_persist_interval_seconds
             )
             if should_persist:
                 await update_running_job(
@@ -304,6 +310,7 @@ class JobRunner:
         await insert_clip(self.engine, clip)
         await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
         await self._publish_durable_job_update(claimed.id)
+
 
 def _clip_payload(
     plan: ClipRenderPlan, rendered_duration_ms: int, destination: Path
