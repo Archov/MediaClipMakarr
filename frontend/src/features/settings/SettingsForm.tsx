@@ -102,6 +102,17 @@ export function SettingsForm({ settings }: { settings: ApplicationSettings }) {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const submittedToken = enteredToken(plexToken);
+    if (!submittedToken && plexUrl !== settings.plex_url) {
+      save.reset();
+      setConnection({
+        connected: false,
+        code: "PLEX_CREDENTIALS_REQUIRED",
+        message: "Enter the Plex token when saving a different server URL.",
+        server_name: null,
+        server_version: null,
+      });
+      return;
+    }
     const baseUpdate: ApplicationSettingsUpdate = {
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
       ...(!managed("timezone") && { timezone }),
@@ -360,4 +371,3 @@ export function SettingsForm({ settings }: { settings: ApplicationSettings }) {
     </Card>
   );
 }
-

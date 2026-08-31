@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.render_plan import ClipRenderPlan
 
-from .models import ClaimedJob, JobError, JobSnapshot, JobState, JobUpdateConflict
+from .models import ClaimedJob, JobError, JobSnapshot, JobStage, JobState, JobUpdateConflict
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
@@ -406,4 +408,3 @@ def _datetime_or_none(value: Any) -> datetime | None:
 
 def _clamp(value: float) -> float:
     return min(1.0, max(0.0, value))
-

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -11,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from mediaclipmakarr.clips import insert_clip_if_missing
 
 from .finalization import recover_pending_installation
-from .models import JobError
+from .models import BlockingRunner, JobError
 from .repository import _dump_json, _load_json, fail_job, finish_job_success_without_token, utc_now
+
 
 async def fail_abandoned_jobs(engine: AsyncEngine) -> list[str]:
     finished_at = utc_now()

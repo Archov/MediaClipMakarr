@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { fetchJob, fetchPlexSessions } from "../../api";
 import type { JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
@@ -24,9 +24,15 @@ export function displayedPosition(session: PlexSession, now: number): number {
 
 export function useLivePlexSessions() {
   const queryClient = useQueryClient();
+  const snapshotRevision = useRef(0);
   const sessions = useQuery({
     queryKey: ["plex-sessions"],
-    queryFn: fetchPlexSessions,
+    queryFn: async () => {
+      const requestRevision = snapshotRevision.current;
+      const snapshot = await fetchPlexSessions();
+      if (requestRevision === snapshotRevision.current) return snapshot;
+      return queryClient.getQueryData<PlexSessionSnapshot>(["plex-sessions"]) ?? snapshot;
+    },
     refetchInterval: 15_000,
   });
 
@@ -35,6 +41,7 @@ export function useLivePlexSessions() {
     const eventSource = new EventSource("/api/sessions/events");
     const handleSnapshot = (event: MessageEvent<string>) => {
       const snapshot = JSON.parse(event.data) as PlexSessionSnapshot;
+      snapshotRevision.current += 1;
       queryClient.setQueryData(["plex-sessions"], snapshot);
     };
     const handleError = () => {
@@ -60,15 +67,27 @@ export function useJobSnapshot(initialJob: JobSnapshot | null) {
     if (!initialJob || typeof EventSource === "undefined") return undefined;
 
     let closed = false;
+    let snapshotRevision = 0;
+    let fallbackRequest = 0;
     const eventSource = new EventSource(`/api/jobs/${encodeURIComponent(initialJob.id)}/events`);
     const handleSnapshot = (event: MessageEvent<string>) => {
+      snapshotRevision += 1;
       setJob(JSON.parse(event.data) as JobSnapshot);
     };
     const handleError = () => {
       if (!closed) {
+        const request = ++fallbackRequest;
+        const requestRevision = snapshotRevision;
         void fetchJob(initialJob.id)
           .then((snapshot) => {
-            if (!closed && snapshot.id === initialJob.id) setJob(snapshot);
+            if (
+              !closed &&
+              request === fallbackRequest &&
+              requestRevision === snapshotRevision &&
+              snapshot.id === initialJob.id
+            ) {
+              setJob(snapshot);
+            }
           })
           .catch(() => undefined);
       }
@@ -86,5 +105,4 @@ export function useJobSnapshot(initialJob: JobSnapshot | null) {
 
   return job;
 }
-
 

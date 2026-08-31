@@ -1,5 +1,6 @@
 """Pure job-domain models and transition errors."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -11,6 +12,7 @@ from mediaclipmakarr.render_plan import ClipRenderPlan
 JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "FAILED"]
 JobType = Literal["clip_create"]
 JobStage = Literal["queued", "validating", "rendering", "finalizing", "complete", "failed"]
+BlockingRunner = Callable[..., Awaitable[Any]]
 
 
 class JobError(BaseModel):
@@ -48,4 +50,11 @@ class JobUpdateConflict(RuntimeError):
     pass
 
 
-__all__ = ["ClaimedJob", "JobError", "JobSnapshot", "JobUpdateConflict"]
+__all__ = [
+    "BlockingRunner",
+    "ClaimedJob",
+    "JobError",
+    "JobSnapshot",
+    "JobStage",
+    "JobUpdateConflict",
+]

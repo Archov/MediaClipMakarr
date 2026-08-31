@@ -22,14 +22,23 @@ from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
 
 from .events import JobEventBroker
 from .finalization import install_rendered_clip
-from .models import ClaimedJob, JobError, JobSnapshot
+from .models import BlockingRunner, ClaimedJob, JobSnapshot
 from .recovery import fail_abandoned_jobs, recover_finalizing_jobs
-from .repository import _live_progress_snapshot, claim_next_job, create_pending_operation, fail_job, finish_job_success, get_job_snapshot, transition_to_finalizing, update_running_job, utc_now
+from .repository import (
+    _live_progress_snapshot,
+    claim_next_job,
+    create_pending_operation,
+    fail_job,
+    finish_job_success,
+    get_job_snapshot,
+    transition_to_finalizing,
+    update_running_job,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 STALE_WORKDIR_REAP_INTERVAL_SECONDS = 3_600
 STALE_WORKDIR_AGE_SECONDS = 24 * 3_600
-BlockingRunner = Callable[..., Awaitable[Any]]
 ClipRenderer = Callable[..., Awaitable[RenderedClipFile]]
 PlexTokenLoader = Callable[[], Awaitable[str | None]]
 
