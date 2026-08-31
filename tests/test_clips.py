@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
+import mediaclipmakarr.api.clips as clips_api
 import mediaclipmakarr.main as main_module
 from mediaclipmakarr.clips import (
     ClipCreateRequest,
@@ -164,7 +165,7 @@ def test_clip_api_returns_structured_validation_errors(tmp_path, monkeypatch) ->
         return make_source_media(tmp_path)
 
     monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
-    monkeypatch.setattr(main_module, "resolve_and_probe_source_media", source_media)
+    monkeypatch.setattr(clips_api, "resolve_and_probe_source_media", source_media)
     with TestClient(main_module.create_app(settings)) as client:
         client.app.state.plex_session_poller._snapshot = make_snapshot(make_session())
 

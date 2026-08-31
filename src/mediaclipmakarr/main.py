@@ -3,64 +3,33 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
-from mediaclipmakarr.application_settings import (
-    ApplicationSettingsResponse,
-    ApplicationSettingsUpdate,
-    get_effective_application_settings,
-    managed_update_fields,
-    save_persisted_application_settings,
-    serialize_update,
-)
-from mediaclipmakarr.clips import (
-    ClipCreateRequest,
-    ClipCreateValidationError,
-    get_clip,
-    validate_clip_create_request,
-)
+from mediaclipmakarr.api.clips import build_router as build_clips_router
 from mediaclipmakarr.api.health import build_router as build_health_router
+from mediaclipmakarr.api.jobs import build_router as build_jobs_router
+from mediaclipmakarr.api.plex import build_router as build_plex_router
+from mediaclipmakarr.api.settings import build_router as build_settings_router
+from mediaclipmakarr.application_settings import get_effective_application_settings
 from mediaclipmakarr.concurrency import BlockingIOExecutor
 from mediaclipmakarr.config import Settings, validate_path_layout
-from mediaclipmakarr.database import check_database, create_database_engine, upgrade_database
-from mediaclipmakarr.health import (
-    ComponentHealth,
-    HealthResponse,
-    initialize_writable_directories,
-    inspect_directories,
-    inspect_media_tools,
-)
+from mediaclipmakarr.database import create_database_engine, upgrade_database
+from mediaclipmakarr.health import initialize_writable_directories, inspect_media_tools
 from mediaclipmakarr.jobs import (
     JobEventBroker,
     JobRunner,
-    JobSnapshot,
-    enqueue_clip_create_job,
-    get_job_snapshot,
-    job_sse_payload,
 )
 from mediaclipmakarr.plex import (
-    PlexConnectionRequest,
-    PlexConnectionResult,
     PlexSessionPoller,
-    PlexSessionSnapshot,
-    snapshot_sse_payload,
-    test_plex_connection,
 )
 from mediaclipmakarr.process_lock import ProcessLock
-from mediaclipmakarr.render_plan import build_clip_render_plan
-from mediaclipmakarr.source_media import (
-    MediaCapabilities,
-    SourceMediaError,
-    resolve_and_probe_source_media,
-    resolve_media_capabilities,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +133,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = application_settings
     app.include_router(build_health_router(application_settings))
+    app.include_router(build_settings_router(application_settings))
+    app.include_router(build_plex_router(application_settings))
+    app.include_router(build_clips_router(application_settings))
+    app.include_router(build_jobs_router())
 
     @app.exception_handler(RequestValidationError)
     async def redacted_validation_error(
@@ -177,270 +150,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(
             status_code=422,
             content=jsonable_encoder({"detail": errors}),
-        )
-
-
-    @app.get("/api/settings", response_model=ApplicationSettingsResponse)
-    async def get_application_settings(request: Request) -> ApplicationSettingsResponse:
-        return request.app.state.effective_application_settings.to_response()
-
-    @app.put("/api/settings", response_model=ApplicationSettingsResponse)
-    async def update_application_settings(
-        update: ApplicationSettingsUpdate, request: Request
-    ) -> ApplicationSettingsResponse:
-        effective = request.app.state.effective_application_settings
-        managed_fields = managed_update_fields(update, effective.environment_managed)
-        if managed_fields:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "ENVIRONMENT_MANAGED_SETTING",
-                    "message": "Environment-managed settings cannot be changed through the API.",
-                    "fields": managed_fields,
-                },
-            )
-
-        changes_plex_url = update.plex_url is not None and update.plex_url != effective.plex_url
-        supplies_plex_token = bool(update.plex_token and update.plex_token.strip())
-        if (
-            changes_plex_url
-            and effective.plex_token
-            and not supplies_plex_token
-            and not update.clear_plex_token
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PLEX_CREDENTIALS_REQUIRED",
-                    "message": "Enter the Plex token again when changing the Plex server URL.",
-                },
-            )
-
-        values = serialize_update(update)
-        if values:
-            await save_persisted_application_settings(
-                request.app.state.database_engine, values
-            )
-        updated = await get_effective_application_settings(
-            request.app.state.database_engine, application_settings
-        )
-        request.app.state.effective_application_settings = updated
-        return updated.to_response()
-
-    @app.post("/api/settings/plex/test", response_model=PlexConnectionResult)
-    async def test_current_plex_connection(
-        request: Request, connection: PlexConnectionRequest | None = None
-    ) -> PlexConnectionResult:
-        effective = request.app.state.effective_application_settings
-        if connection is None or connection.plex_url is None or connection.plex_token is None:
-            candidate_url = effective.plex_url
-            candidate_token = effective.plex_token
-        else:
-            candidate_url = connection.plex_url
-            candidate_token = connection.plex_token.get_secret_value().strip()
-        return await test_plex_connection(candidate_url, candidate_token)
-
-    @app.get("/api/sessions", response_model=PlexSessionSnapshot)
-    async def get_current_plex_sessions(request: Request) -> PlexSessionSnapshot:
-        return request.app.state.plex_session_poller.snapshot
-
-    @app.get(
-        "/api/sessions/{session_identity}/media-capabilities",
-        response_model=MediaCapabilities,
-    )
-    async def get_media_capabilities(
-        session_identity: str, request: Request
-    ) -> MediaCapabilities:
-        snapshot = request.app.state.plex_session_poller.snapshot
-        session = next(
-            (
-                candidate
-                for candidate in snapshot.sessions
-                if candidate.session_identity == session_identity
-            ),
-            None,
-        )
-        if session is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "PLEX_SESSION_NOT_FOUND",
-                    "message": "The selected Plex session is no longer active.",
-                    "retryable": True,
-                },
-            )
-        try:
-            source_media = await resolve_media_capabilities(
-                session,
-                request.app.state.effective_application_settings,
-                application_settings,
-                run_blocking=request.app.state.blocking_io.run,
-            )
-            if source_media.capabilities is None:
-                raise RuntimeError("Source media capabilities were not produced.")
-            return source_media.capabilities
-        except SourceMediaError as error:
-            raise HTTPException(
-                status_code=error.status_code,
-                detail={
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable,
-                    "alternatives": error.alternatives,
-                },
-            ) from error
-
-    @app.get("/api/sessions/events")
-    async def stream_plex_sessions(request: Request) -> StreamingResponse:
-        async def events():
-            poller: PlexSessionPoller = request.app.state.plex_session_poller
-            version = poller.version
-            yield snapshot_sse_payload(poller.snapshot)
-            while not await request.is_disconnected():
-                snapshot, version, changed = await poller.wait_for_change(
-                    version, timeout_seconds=15.0
-                )
-                if changed:
-                    yield snapshot_sse_payload(snapshot)
-                else:
-                    yield ": keep-alive\n\n"
-
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    @app.post("/api/clips", response_model=JobSnapshot)
-    async def create_clip(
-        clip_request: ClipCreateRequest, request: Request
-    ) -> JobSnapshot:
-        try:
-            snapshot = request.app.state.plex_session_poller.snapshot
-            result = validate_clip_create_request(clip_request, snapshot)
-            session = next(
-                session
-                for session in snapshot.sessions
-                if session.session_identity == result.session_identity
-            )
-            result.source_media = await resolve_and_probe_source_media(
-                session,
-                request.app.state.effective_application_settings,
-                application_settings,
-                run_blocking=request.app.state.blocking_io.run,
-                requested_audio_stream_index=clip_request.audio_stream_index,
-                requested_subtitle_stream_index=clip_request.subtitle_stream_index,
-                subtitles_enabled=clip_request.subtitles_enabled,
-            )
-            render_plan = build_clip_render_plan(
-                session=session,
-                request=clip_request,
-                source_media=result.source_media,
-                x264_preset=request.app.state.effective_application_settings.x264_preset,
-            )
-            job = await enqueue_clip_create_job(
-                request.app.state.database_engine,
-                render_plan,
-            )
-            await request.app.state.job_events.publish(job.id, job)
-            request.app.state.job_runner.wake()
-            return job
-        except ClipCreateValidationError as error:
-            raise HTTPException(
-                status_code=error.status_code,
-                detail=error.error.model_dump(mode="json"),
-            ) from error
-        except SourceMediaError as error:
-            raise HTTPException(
-                status_code=error.status_code,
-                detail={
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable,
-                    "alternatives": error.alternatives,
-                },
-            ) from error
-
-    @app.get("/api/jobs/{job_id}", response_model=JobSnapshot)
-    async def get_job(job_id: str, request: Request) -> JobSnapshot:
-        snapshot = await get_job_snapshot(request.app.state.database_engine, job_id)
-        if snapshot is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "JOB_NOT_FOUND",
-                    "message": "The requested job does not exist.",
-                    "retryable": False,
-                },
-            )
-        return snapshot
-
-    @app.get("/api/jobs/{job_id}/events")
-    async def stream_job(job_id: str, request: Request) -> StreamingResponse:
-        if await get_job_snapshot(request.app.state.database_engine, job_id) is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "JOB_NOT_FOUND",
-                    "message": "The requested job does not exist.",
-                    "retryable": False,
-                },
-            )
-
-        async def events():
-            broker: JobEventBroker = request.app.state.job_events
-            version = broker.version(job_id)
-            snapshot = await get_job_snapshot(request.app.state.database_engine, job_id)
-            if snapshot is not None:
-                yield job_sse_payload(snapshot)
-            while not await request.is_disconnected():
-                version, changed = await broker.wait_for_change(
-                    job_id, version, timeout_seconds=15.0
-                )
-                if changed:
-                    snapshot = broker.snapshot(job_id) or await get_job_snapshot(
-                        request.app.state.database_engine, job_id
-                    )
-                    if snapshot is not None:
-                        yield job_sse_payload(snapshot)
-                else:
-                    yield ": keep-alive\n\n"
-
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    @app.get("/api/clips/{clip_id}/media")
-    async def play_clip(clip_id: str, request: Request) -> FileResponse:
-        clip = await get_clip(
-            request.app.state.database_engine,
-            clip_id,
-            application_settings.resolved_clip_dir,
-        )
-        if clip is None:
-            raise HTTPException(status_code=404, detail="Clip not found.")
-        return FileResponse(
-            clip["file_path"],
-            media_type="video/mp4",
-            filename=f"{clip['title']}.mp4",
-        )
-
-    @app.get("/api/clips/{clip_id}/download")
-    async def download_clip(clip_id: str, request: Request) -> FileResponse:
-        clip = await get_clip(
-            request.app.state.database_engine,
-            clip_id,
-            application_settings.resolved_clip_dir,
-        )
-        if clip is None:
-            raise HTTPException(status_code=404, detail="Clip not found.")
-        return FileResponse(
-            clip["file_path"],
-            media_type="video/mp4",
-            filename=f"{clip['title']}.mp4",
-            content_disposition_type="attachment",
         )
 
     frontend_dist = application_settings.resolved_frontend_dist_dir
