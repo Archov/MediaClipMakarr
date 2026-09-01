@@ -221,7 +221,15 @@ export interface ResolvedSourceMedia {
 
 export type JobState = "QUEUED" | "RUNNING" | "FINALIZING" | "SUCCEEDED" | "PARTIAL" | "FAILED";
 
-export type JobStage = "queued" | "validating" | "rendering" | "finalizing" | "complete" | "failed";
+export type JobStage =
+  | "queued"
+  | "validating"
+  | "rendering"
+  | "generating_thumbnail"
+  | "updating_metadata"
+  | "finalizing"
+  | "complete"
+  | "failed";
 
 export interface ClipJobResult {
   clip_id: string;
@@ -234,7 +242,7 @@ export interface ClipJobResult {
 
 export interface JobSnapshot {
   id: string;
-  type: "clip_create";
+  type: "clip_create" | "thumbnail_generate" | "clip_metadata_edit";
   state: JobState;
   stage: JobStage;
   progress: number;
@@ -247,4 +255,69 @@ export interface JobSnapshot {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface ClipRecord {
+  id: string;
+  title: string;
+  custom_title: string | null;
+  library: string;
+  media_type: string;
+  duration_ms: number;
+  revision: number;
+  movie_title: string | null;
+  movie_year: number | null;
+  show_name: string | null;
+  episode_title: string | null;
+  season_number: number | null;
+  episode_number: number | null;
+  clip_number: number;
+  plex_username: string | null;
+  source_start_ms: number;
+  source_end_ms: number;
+  created_at: string;
+  updated_at: string;
+  thumbnail_url: string;
+  play_url: string;
+  download_url: string;
+}
+
+export interface ClipPage {
+  items: ClipRecord[];
+  page: number;
+  page_size: number;
+  total: number;
+  pages: number;
+}
+
+export interface ClipFilterOptions {
+  libraries: string[];
+  movies: string[];
+  shows: string[];
+  episodes: Array<{
+    show_name: string;
+    title: string;
+    season_number: number | null;
+    episode_number: number | null;
+  }>;
+}
+
+export interface ClipMetadataUpdate {
+  expected_revision: number;
+  custom_title?: string | null;
+  library?: string | null;
+  media_type?: "movie" | "episode" | "video" | null;
+  movie_title?: string | null;
+  movie_year?: number | null;
+  show_name?: string | null;
+  episode_title?: string | null;
+  season_number?: number | null;
+  episode_number?: number | null;
+}
+
+export interface ClipDeleteResult {
+  id: string;
+  title: string;
+  deleted: boolean;
+  cleanup_warnings: string[];
 }

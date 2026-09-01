@@ -8,7 +8,7 @@ import pytest
 
 import mediaclipmakarr.plex as plex_module
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
-from mediaclipmakarr.plex import PlexSessionPoller, parse_video_sessions
+from mediaclipmakarr.plex import PlexSessionPoller, parse_library_names, parse_video_sessions
 from mediaclipmakarr.plex import test_plex_connection as check_plex_connection
 
 
@@ -28,6 +28,15 @@ def effective_settings() -> EffectiveApplicationSettings:
             "x264_preset": False,
         },
     )
+
+
+def test_library_names_preserve_plex_display_case() -> None:
+    names = parse_library_names(
+        b'<MediaContainer><Directory title="Movies" /><Directory title="Anime" />'
+        b'<Directory title="anime" /><Directory title="" /></MediaContainer>'
+    )
+
+    assert names == ["Movies", "Anime"]
 
 
 @pytest.mark.asyncio

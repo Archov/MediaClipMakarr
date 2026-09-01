@@ -18,6 +18,7 @@ from mediaclipmakarr.source_media import (
     ResolvedSourceMedia,
     SubtitleSelection,
 )
+from mediaclipmakarr.source_metadata import infer_source_organizing_metadata
 
 OutputProfileId = Literal["p1-h264-aac-sdr-v1", "p2-h264-aac-sdr-v1"]
 
@@ -42,6 +43,15 @@ class ClipRenderPlan(BaseModel):
     title: str
     library: str
     media_type: str
+    custom_title: str | None = None
+    automatic_title: str | None = None
+    movie_title: str | None = None
+    movie_year: int | None = None
+    show_name: str | None = None
+    episode_title: str | None = None
+    season_number: int | None = None
+    episode_number: int | None = None
+    clip_number: int = 1
     session_identity: str
     media_identity: str
     plex_rating_key: str | None = None
@@ -84,12 +94,49 @@ def build_clip_render_plan(
         if source_media.capabilities is not None
         else HdrCapabilities()
     )
+    inferred = infer_source_organizing_metadata(
+        source_media.local_path, session.media_type
+    )
+    movie_title = session.movie_title or inferred.movie_title
+    movie_year = session.movie_year or inferred.movie_year
+    show_name = session.show_name or inferred.show_name
+    episode_title = session.episode_title or inferred.episode_title
+    season_number = (
+        session.season_number
+        if session.season_number is not None
+        else inferred.season_number
+    )
+    episode_number = (
+        session.episode_number
+        if session.episode_number is not None
+        else inferred.episode_number
+    )
+    title = automatic_title(
+        session,
+        movie_title=movie_title,
+        movie_year=movie_year,
+        show_name=show_name,
+        episode_title=episode_title,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
     payload: dict[str, Any] = {
         "job_id": f"job-{uuid4()}",
         "clip_id": f"clip-{uuid4()}",
-        "title": sanitize_display_name(session.title),
-        "library": default_library_for_media_type(session.media_type),
+        "title": title,
+        "automatic_title": title,
+        "library": sanitize_display_name(
+            session.library
+            or inferred.library
+            or default_library_for_media_type(session.media_type)
+        ),
         "media_type": session.media_type,
+        "movie_title": movie_title,
+        "movie_year": movie_year,
+        "show_name": show_name,
+        "episode_title": episode_title,
+        "season_number": season_number,
+        "episode_number": episode_number,
         "session_identity": session.session_identity,
         "media_identity": session.media_identity,
         "plex_rating_key": session.plex_rating_key,
@@ -123,6 +170,40 @@ def default_library_for_media_type(media_type: str) -> str:
     return "TV Shows" if media_type == "episode" else "Movies"
 
 
+def automatic_title(
+    session: PlexSession,
+    *,
+    movie_title: str | None = None,
+    movie_year: int | None = None,
+    show_name: str | None = None,
+    episode_title: str | None = None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> str:
+    movie_title = movie_title or session.movie_title
+    movie_year = movie_year if movie_year is not None else session.movie_year
+    show_name = show_name or session.show_name
+    episode_title = episode_title or session.episode_title
+    season_number = (
+        season_number if season_number is not None else session.season_number
+    )
+    episode_number = (
+        episode_number if episode_number is not None else session.episode_number
+    )
+    if session.media_type == "episode" and show_name:
+        code = (
+            f"S{season_number:02d}E{episode_number:02d}"
+            if season_number is not None and episode_number is not None
+            else None
+        )
+        parts = [part for part in (show_name, code, episode_title) if part]
+        return sanitize_display_name(" - ".join(parts))
+    if session.media_type == "movie" and movie_title:
+        title = f"{movie_title} ({movie_year})" if movie_year else movie_title
+        return sanitize_display_name(title)
+    return sanitize_display_name(session.title)
+
+
 def sanitize_display_name(value: str) -> str:
     cleaned = _INVALID_FILENAME_CHARS.sub(" ", value).strip(" .")
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -133,12 +214,15 @@ def sanitize_display_name(value: str) -> str:
     return cleaned[:160].rstrip(" .") or "Untitled Clip"
 
 
-def resolve_unique_clip_path(clip_root: Path, library: str, title: str) -> Path:
+def resolve_unique_clip_path(
+    clip_root: Path, library: str, title: str, *, exclude: Path | None = None
+) -> Path:
     directory = (clip_root / sanitize_display_name(library)).resolve(strict=False)
     base_name = sanitize_display_name(title)
     candidate = directory / f"{base_name}.mp4"
     suffix = 2
-    while candidate.exists():
+    excluded = exclude.resolve(strict=False) if exclude is not None else None
+    while candidate.exists() and candidate.resolve(strict=False) != excluded:
         candidate = directory / f"{base_name} - {suffix}.mp4"
         suffix += 1
     if not candidate.resolve(strict=False).is_relative_to(clip_root.resolve(strict=False)):

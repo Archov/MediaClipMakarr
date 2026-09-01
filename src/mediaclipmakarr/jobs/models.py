@@ -7,11 +7,21 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mediaclipmakarr.clip_library import MetadataEditJobPlan, ThumbnailJobPlan
 from mediaclipmakarr.render_plan import ClipRenderPlan
 
 JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "FAILED"]
-JobType = Literal["clip_create"]
-JobStage = Literal["queued", "validating", "rendering", "finalizing", "complete", "failed"]
+JobType = Literal["clip_create", "thumbnail_generate", "clip_metadata_edit"]
+JobStage = Literal[
+    "queued",
+    "validating",
+    "rendering",
+    "generating_thumbnail",
+    "updating_metadata",
+    "finalizing",
+    "complete",
+    "failed",
+]
 BlockingRunner = Callable[..., Awaitable[Any]]
 
 
@@ -45,7 +55,8 @@ class JobSnapshot(BaseModel):
 class ClaimedJob:
     id: str
     run_token: str
-    render_plan: ClipRenderPlan
+    type: JobType
+    render_plan: ClipRenderPlan | ThumbnailJobPlan | MetadataEditJobPlan
 
 
 class JobUpdateConflict(RuntimeError):

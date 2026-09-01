@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -654,6 +655,21 @@ def _metadata_envelope(plan: ClipRenderPlan) -> str:
         "revision": plan.revision,
         "title": plan.title,
         "library": plan.library,
+        "metadata": {
+            "title": plan.title,
+            "custom_title": plan.custom_title,
+            "automatic_title": plan.automatic_title or plan.title,
+            "library": plan.library,
+            "media_type": plan.media_type,
+            "movie_title": plan.movie_title,
+            "movie_year": plan.movie_year,
+            "show_name": plan.show_name,
+            "episode_title": plan.episode_title,
+            "season_number": plan.season_number,
+            "episode_number": plan.episode_number,
+            "clip_number": plan.clip_number,
+            "plex_username": plan.plex_user,
+        },
         "source": {
             "path": plan.source_media.local_path,
             "startMs": plan.source_start_ms,
@@ -681,6 +697,8 @@ def _metadata_envelope(plan: ClipRenderPlan) -> str:
             "sourceColor": plan.hdr.color.model_dump(mode="json"),
         },
     }
+    checksum_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload["checksum"] = hashlib.sha256(checksum_payload.encode()).hexdigest()
     return "MediaClipMakarr " + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
