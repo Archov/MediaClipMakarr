@@ -81,6 +81,7 @@ def build_router(application_settings: Settings) -> APIRouter:
             clip["file_path"],
             media_type="video/mp4",
             filename=f"{clip['title']}.mp4",
+            content_disposition_type="inline",
         )
 
     @router.get("/api/clips/{clip_id}/download")

@@ -599,13 +599,28 @@ def _external_text_subtitle_streams(
     probe: FFProbePayload, plex_subtitle_streams: Sequence[PlexPartStream]
 ) -> list[PlexPartStream]:
     embedded_indexes = {stream.index for stream in probe.streams if stream.codec_type == "subtitle"}
-    return [
+    candidates = [
         stream
         for stream in plex_subtitle_streams
         if stream.key
-        and stream.stream_index not in embedded_indexes
+        and (stream.stream_index is None or stream.stream_index not in embedded_indexes)
         and _subtitle_kind(stream.codec) == "text"
     ]
+    normalized: list[PlexPartStream] = []
+    used_indexes = set(embedded_indexes)
+    next_virtual_index = -1
+    for stream in candidates:
+        stream_index = stream.stream_index
+        # Plex-managed sidecars can have a download key without an FFmpeg stream index.
+        # Give those tracks a request-only identity; rendering still uses the Plex key.
+        if stream_index is None or stream_index in used_indexes:
+            while next_virtual_index in used_indexes:
+                next_virtual_index -= 1
+            stream_index = next_virtual_index
+            next_virtual_index -= 1
+        used_indexes.add(stream_index)
+        normalized.append(stream.model_copy(update={"stream_index": stream_index}))
+    return normalized
 
 
 def _external_subtitle_selection(stream: PlexPartStream, plex_url: str) -> SubtitleSelection:
@@ -674,7 +689,7 @@ def _media_capabilities(
     selected_subtitle_index = (
         selected_subtitle.stream.stream_index
         if selected_subtitle.stream is not None
-        else _default_plex_stream_index(session.selected_subtitle_streams)
+        else _default_plex_stream_index(session.selected_subtitle_streams, external_subtitles)
     )
     first_video = video[0] if video else None
     subtitle_tracks = [
@@ -757,10 +772,18 @@ def _external_subtitle_track_descriptor(
     )
 
 
-def _default_plex_stream_index(plex_streams: Sequence[PlexPartStream]) -> int | None:
+def _default_plex_stream_index(
+    plex_streams: Sequence[PlexPartStream],
+    external_streams: Sequence[PlexPartStream],
+) -> int | None:
     if len(plex_streams) != 1:
         return None
-    return plex_streams[0].stream_index
+    selected = plex_streams[0]
+    external = next(
+        (stream for stream in external_streams if _same_plex_stream(stream, selected)),
+        None,
+    )
+    return external.stream_index if external is not None else selected.stream_index
 
 
 def _alternative_tracks(streams: Sequence[FFProbeStream]) -> list[dict[str, Any]]:
