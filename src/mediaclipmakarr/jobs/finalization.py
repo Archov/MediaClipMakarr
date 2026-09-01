@@ -7,7 +7,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def install_rendered_clip(temp_path: Path, destination: Path, preserve_workdir: bool = False) -> None:
+def install_rendered_clip(
+    temp_path: Path, destination: Path, preserve_workdir: bool = False
+) -> None:
     destination = destination.resolve(strict=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -34,4 +36,25 @@ def recover_pending_installation(
     install_rendered_clip(temp_path, destination, preserve_workdir)
     return True
 
-__all__ = ["install_rendered_clip", "recover_pending_installation"]
+
+def install_metadata_revision(temp_path: Path, source_path: Path, destination: Path) -> None:
+    source = source_path.resolve(strict=False)
+    target = destination.resolve(strict=False)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target != source:
+        raise FileExistsError("The resolved clip destination already exists.")
+    temp_path.replace(target)
+
+
+def remove_superseded_clip(source_path: Path, destination: Path) -> None:
+    source = source_path.resolve(strict=False)
+    target = destination.resolve(strict=False)
+    if source != target and source.exists():
+        source.unlink()
+
+__all__ = [
+    "install_metadata_revision",
+    "install_rendered_clip",
+    "recover_pending_installation",
+    "remove_superseded_clip",
+]

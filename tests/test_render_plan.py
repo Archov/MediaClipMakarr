@@ -74,3 +74,69 @@ def test_legacy_render_plan_subtitle_keys_are_ignored_without_rehashing(tmp_path
 
     assert restored.selected_subtitle.enabled is False
     assert restored.render_plan_hash == "persisted-legacy-hash"
+
+
+def test_render_plan_uses_source_filename_when_plex_organizing_fields_are_missing(
+    tmp_path,
+) -> None:
+    source_file = (
+        tmp_path
+        / "anime"
+        / "KonoSuba - An Explosion on This Wonderful World!"
+        / "Season 1"
+        / (
+            "KonoSuba - An Explosion on This Wonderful World! - S01E07 - "
+            "Troublemakers of the City of Water.mkv"
+        )
+    )
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"media")
+    source_media = ResolvedSourceMedia(
+        plex_path=str(source_file),
+        local_path=str(source_file),
+        fingerprint=SourceFingerprint(size_bytes=5, modified_at=datetime.now(UTC)),
+        duration_ms=10_000,
+        video_streams=[],
+        audio_streams=[
+            MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")
+        ],
+        subtitle_streams=[],
+        selected_audio_stream=MediaStreamIdentity(
+            stream_index=1, codec_type="audio", codec_name="aac"
+        ),
+    )
+    session = PlexSession(
+        session_identity="plex-session:living-room",
+        media_identity="plex-media:episode",
+        title="KonoSuba - Troublemakers of the City of Water",
+        media_type="episode",
+        plex_user="Alice",
+        player="Living Room",
+        state="playing",
+        position_ms=1_000,
+        duration_ms=10_000,
+        sampled_at=datetime.now(UTC),
+        library="Anime",
+    )
+
+    plan = build_clip_render_plan(
+        session=session,
+        request=ClipCreateRequest(
+            session_identity=session.session_identity,
+            media_identity=session.media_identity,
+            start_ms=1_000,
+            end_ms=4_000,
+        ),
+        source_media=source_media,
+        x264_preset="veryfast",
+    )
+
+    assert plan.library == "Anime"
+    assert plan.show_name == "KonoSuba - An Explosion on This Wonderful World!"
+    assert plan.season_number == 1
+    assert plan.episode_number == 7
+    assert plan.episode_title == "Troublemakers of the City of Water"
+    assert plan.title == (
+        "KonoSuba - An Explosion on This Wonderful World! - S01E07 - "
+        "Troublemakers of the City of Water"
+    )

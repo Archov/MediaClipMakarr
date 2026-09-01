@@ -301,7 +301,101 @@ Users can choose valid audio/subtitle tracks and create compatible SDR clips fro
 
 Users can browse, search, play, organize, import, rename, download, and safely delete managed clips. The library remains recoverable from MP4 metadata and resilient to deliberate filesystem manipulation.
 
-## P3-01 — Reconcile the filesystem library and recover clip records
+## P3-01 — Add thumbnails, streaming, and clip detail APIs
+
+**User outcome:** Library items have useful thumbnails and can be played or downloaded in the browser.
+
+**Implementation:**
+
+- Generate thumbnails as sequential jobs or low-priority post-create work, storing them outside the MP4 tree.
+- Add paginated clip queries, detail records, thumbnail delivery, byte-range playback, and content-disposition download by clip ID.
+- Never accept client-supplied paths; resolve all assets from managed database records and containment checks.
+- Regenerate missing/stale thumbnails from the clip fingerprint.
+
+**Acceptance criteria:**
+
+- Browser seeking works through byte-range requests.
+- Missing thumbnails regenerate without breaking clip playback.
+- Arbitrary path and traversal requests cannot access private/source files.
+
+## P3-02 — Build searchable grid and list library views
+
+**User outcome:** Users can efficiently find clips and retain their preferred presentation.
+
+**Implementation:**
+
+- Add grid/list modes, small/medium/large thumbnails, library grouping, and collapsible groups.
+- Add newest, oldest, title, and duration sorts.
+- Search current clip metadata and filter by library, media type, movie/series, and episode.
+- Persist view-only preferences in browser storage, not application settings.
+- Keep query/filter state in the URL where practical for refresh/share continuity.
+
+**Acceptance criteria:**
+
+- Sorting/filtering/searching operate against paginated server results.
+- View size, mode, and collapsed groups survive browser refresh.
+- Frontend type checking and a manual library checklist replace broad UI automation.
+
+**Depends on:** P3-01.
+
+## P3-03 — Edit organizing metadata and human-readable file paths
+
+**User outcome:** Editing a title or library deliberately renames or moves the underlying MP4 while keeping it recoverable.
+
+**Implementation:**
+
+- Add metadata editing for the fields defined in `BASE_DESIGN.md`, with automatic-title restoration when a custom title is cleared.
+- Submit edits as jobs with `expectedRevision` rather than performing MP4 work in the request.
+- Coalesce database and MP4 metadata changes into one next-revision envelope.
+- Apply readable naming, collision handling, and the pending file-operation protocol.
+- Record bounded revision history in SQLite while embedding only current recovery state.
+
+**Acceptance criteria:**
+
+- Title/library changes produce the expected physical filename/directory.
+- A revision conflict cannot overwrite newer metadata.
+- A crash at each pending-operation boundary recovers to a valid old or new file.
+- Focused tests cover naming, collision, revision, and pending-operation recovery.
+
+## P3-04 — Resolve metadata conflicts and support database recovery
+
+**User outcome:** Users can deliberately choose database or file metadata when external changes conflict.
+
+**Implementation:**
+
+- Show metadata conflicts with database/file values and revisions.
+- Implement Use Database Metadata as a new managed MP4 revision.
+- Implement Use File Metadata as validated values imported into a new local revision, followed by normal naming rules.
+- Add an explicit database-rebuild operation that imports valid envelopes while preserving ambiguous duplicates as conflicts.
+
+**Acceptance criteria:**
+
+- Neither conflict action silently trusts an invalid checksum or unsupported schema.
+- Resolution increments revision and leaves database and MP4 metadata synchronized.
+- Rebuild never deletes or overwrites a source MP4.
+
+**Depends on:** P3-03.
+
+## P3-05 — Delete clips and derived assets safely
+
+**User outcome:** A user can delete a generated clip and its local derived assets without risking Plex source media.
+
+**Implementation:**
+
+- Add a confirmed delete operation addressed only by clip ID.
+- Re-resolve every target inside the managed clip/thumbnail/GIF/preview roots at execution time.
+- Remove the MP4 and derived assets, then delete the database record; report partial cleanup without touching unrelated files.
+- Preserve original source provenance only in revision/audit information as appropriate; never include the source path in deletion targets.
+
+**Acceptance criteria:**
+
+- Traversal, symlink, stale-path, and source-path deletion attempts fail closed.
+- Missing derived assets do not prevent deletion of the managed MP4.
+- A focused destructive-safety suite proves source roots cannot be deleted.
+
+**Depends on:** P3-01
+
+## P3-06 — Reconcile the filesystem library and recover clip records
 
 **User outcome:** Existing and externally moved clips appear correctly without risking silent data loss.
 
@@ -321,104 +415,6 @@ Users can browse, search, play, organize, import, rename, download, and safely d
 - Focused tests cover rebuild, external move, invalid metadata, and duplicate UUID rules.
 
 **Depends on:** Phase 1 metadata/finalization contract.
-
-## P3-02 — Add thumbnails, streaming, and clip detail APIs
-
-**User outcome:** Library items have useful thumbnails and can be played or downloaded in the browser.
-
-**Implementation:**
-
-- Generate thumbnails as sequential jobs or low-priority post-create work, storing them outside the MP4 tree.
-- Add paginated clip queries, detail records, thumbnail delivery, byte-range playback, and content-disposition download by clip ID.
-- Never accept client-supplied paths; resolve all assets from managed database records and containment checks.
-- Regenerate missing/stale thumbnails from the clip fingerprint.
-
-**Acceptance criteria:**
-
-- Browser seeking works through byte-range requests.
-- Missing thumbnails regenerate without breaking clip playback.
-- Arbitrary path and traversal requests cannot access private/source files.
-
-**Depends on:** P3-01.
-
-## P3-03 — Build searchable grid and list library views
-
-**User outcome:** Users can efficiently find clips and retain their preferred presentation.
-
-**Implementation:**
-
-- Add grid/list modes, small/medium/large thumbnails, library grouping, and collapsible groups.
-- Add newest, oldest, title, and duration sorts.
-- Search current clip metadata and filter by library, media type, movie/series, and episode.
-- Persist view-only preferences in browser storage, not application settings.
-- Keep query/filter state in the URL where practical for refresh/share continuity.
-
-**Acceptance criteria:**
-
-- Sorting/filtering/searching operate against paginated server results.
-- View size, mode, and collapsed groups survive browser refresh.
-- Frontend type checking and a manual library checklist replace broad UI automation.
-
-**Depends on:** P3-02.
-
-## P3-04 — Edit organizing metadata and human-readable file paths
-
-**User outcome:** Editing a title or library deliberately renames or moves the underlying MP4 while keeping it recoverable.
-
-**Implementation:**
-
-- Add metadata editing for the fields defined in `BASE_DESIGN.md`, with automatic-title restoration when a custom title is cleared.
-- Submit edits as jobs with `expectedRevision` rather than performing MP4 work in the request.
-- Coalesce database and MP4 metadata changes into one next-revision envelope.
-- Apply readable naming, collision handling, and the pending file-operation protocol.
-- Record bounded revision history in SQLite while embedding only current recovery state.
-
-**Acceptance criteria:**
-
-- Title/library changes produce the expected physical filename/directory.
-- A revision conflict cannot overwrite newer metadata.
-- A crash at each pending-operation boundary recovers to a valid old or new file.
-- Focused tests cover naming, collision, revision, and pending-operation recovery.
-
-**Depends on:** P3-01.
-
-## P3-05 — Resolve metadata conflicts and support database recovery
-
-**User outcome:** Users can deliberately choose database or file metadata when external changes conflict.
-
-**Implementation:**
-
-- Show metadata conflicts with database/file values and revisions.
-- Implement Use Database Metadata as a new managed MP4 revision.
-- Implement Use File Metadata as validated values imported into a new local revision, followed by normal naming rules.
-- Add an explicit database-rebuild operation that imports valid envelopes while preserving ambiguous duplicates as conflicts.
-
-**Acceptance criteria:**
-
-- Neither conflict action silently trusts an invalid checksum or unsupported schema.
-- Resolution increments revision and leaves database and MP4 metadata synchronized.
-- Rebuild never deletes or overwrites a source MP4.
-
-**Depends on:** P3-01, P3-04.
-
-## P3-06 — Delete clips and derived assets safely
-
-**User outcome:** A user can delete a generated clip and its local derived assets without risking Plex source media.
-
-**Implementation:**
-
-- Add a confirmed delete operation addressed only by clip ID.
-- Re-resolve every target inside the managed clip/thumbnail/GIF/preview roots at execution time.
-- Remove the MP4 and derived assets, then delete the database record; report partial cleanup without touching unrelated files.
-- Preserve original source provenance only in revision/audit information as appropriate; never include the source path in deletion targets.
-
-**Acceptance criteria:**
-
-- Traversal, symlink, stale-path, and source-path deletion attempts fail closed.
-- Missing derived assets do not prevent deletion of the managed MP4.
-- A focused destructive-safety suite proves source roots cannot be deleted.
-
-**Depends on:** P3-01, P3-02.
 
 ## Phase 3 exit criteria
 

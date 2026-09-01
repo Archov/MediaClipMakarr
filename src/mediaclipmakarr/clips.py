@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -94,8 +95,11 @@ async def get_clip(
     if row is None:
         return None
     clip = dict(row)
-    path = Path(str(clip["file_path"])).resolve(strict=False)
-    if not path.is_relative_to(clip_root.resolve(strict=False)):
+    path, resolved_root = await asyncio.gather(
+        asyncio.to_thread(Path(str(clip["file_path"])).resolve, strict=False),
+        asyncio.to_thread(clip_root.resolve, strict=False),
+    )
+    if not path.is_relative_to(resolved_root) or not await asyncio.to_thread(path.is_file):
         return None
     clip["file_path"] = str(path)
     return clip
@@ -110,13 +114,19 @@ async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
                 "(id, title, library, media_type, file_path, duration_ms, revision, "
                 "source_start_ms, source_end_ms, source_path, source_size_bytes, "
                 "source_modified_at, selected_audio_stream_index, render_plan_hash, "
-                "created_at, updated_at) "
+                "created_at, updated_at, custom_title, automatic_title, movie_title, "
+                "movie_year, show_name, "
+                "episode_title, season_number, episode_number, clip_number, plex_username, "
+                "file_size_bytes, file_modified_ns) "
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
-                ":render_plan_hash, :created_at, :updated_at)"
+                ":render_plan_hash, :created_at, :updated_at, :custom_title, "
+                ":automatic_title, :movie_title, "
+                ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
+                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
             ),
-            clip,
+            _insert_values(clip),
         )
 
 
@@ -129,14 +139,38 @@ async def insert_clip_if_missing(engine: AsyncEngine, clip: dict[str, object]) -
                 "(id, title, library, media_type, file_path, duration_ms, revision, "
                 "source_start_ms, source_end_ms, source_path, source_size_bytes, "
                 "source_modified_at, selected_audio_stream_index, render_plan_hash, "
-                "created_at, updated_at) "
+                "created_at, updated_at, custom_title, automatic_title, movie_title, "
+                "movie_year, show_name, "
+                "episode_title, season_number, episode_number, clip_number, plex_username, "
+                "file_size_bytes, file_modified_ns) "
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
-                ":render_plan_hash, :created_at, :updated_at)"
+                ":render_plan_hash, :created_at, :updated_at, :custom_title, "
+                ":automatic_title, :movie_title, "
+                ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
+                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
             ),
-            clip,
+            _insert_values(clip),
         )
+
+
+def _insert_values(clip: dict[str, object]) -> dict[str, object]:
+    return {
+        "custom_title": None,
+        "automatic_title": clip.get("title"),
+        "movie_title": None,
+        "movie_year": None,
+        "show_name": None,
+        "episode_title": None,
+        "season_number": None,
+        "episode_number": None,
+        "clip_number": 1,
+        "plex_username": None,
+        "file_size_bytes": None,
+        "file_modified_ns": None,
+        **clip,
+    }
 
 
 def validate_clip_create_request(

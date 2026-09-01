@@ -947,6 +947,74 @@ async def test_external_text_subtitle_download_uses_plex_authentication(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_external_srt_is_trimmed_and_rebased_to_the_clip_timeline(
+    monkeypatch, tmp_path
+) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is required for the external subtitle timing test")
+
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "duration_ms": 120_000,
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=-1,
+                    codec_type="subtitle",
+                    codec_name="srt",
+                ),
+                strategy="external_text",
+                external_url="http://plex.example:32400/library/streams/501.srt",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=ClipCreateRequest(
+            session_identity="plex-session:living-room",
+            media_identity="plex-media:movie",
+            start_ms=60_000,
+            end_ms=65_000,
+        ),
+        source_media=media,
+        x264_preset="veryfast",
+    )
+
+    async def download_subtitle(_plan, _settings, output_path, **_kwargs):
+        output_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\nWrong opening cue\n\n"
+            "2\n00:01:00,000 --> 00:01:04,000\nCorrect clip cue\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        media_renderer_module,
+        "_download_external_text_subtitle",
+        download_subtitle,
+    )
+    settings = Settings(_env_file=None, ffmpeg_path=Path(ffmpeg))
+    subtitle_preroll_ms = await media_renderer_module._subtitle_preroll_ms(plan, settings)
+    prepared = await media_renderer_module._prepare_text_subtitle_file(
+        plan,
+        settings,
+        tmp_path / "work",
+        subtitle_preroll_ms=subtitle_preroll_ms,
+    )
+
+    assert subtitle_preroll_ms == 30_000
+    assert prepared is not None
+    content = prepared.path.read_text(encoding="utf-8-sig")
+    assert "Wrong opening cue" not in content
+    assert "Correct clip cue" in content
+    assert "00:00:30,000 --> 00:00:34,000" in content
+    assert not (prepared.path.parent / "downloaded-selected-subtitle.srt").exists()
+
+
+@pytest.mark.asyncio
 async def test_external_subtitle_authentication_failure_leaves_no_prepared_file(tmp_path) -> None:
     source_file = tmp_path / "Movie.mkv"
     source_file.write_bytes(b"media")

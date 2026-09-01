@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     private_data_dir: Path = Path("data/private")
     work_dir: Path = Path("data/work")
     clip_dir: Path = Path("data/clips")
+    thumbnail_dir: Path | None = None
     source_dirs: list[Path] = Field(default_factory=lambda: [Path("data/sources")])
     database_filename: str = "mediaclipmakarr.db"
     process_lock_filename: str = "mediaclipmakarr.lock"
@@ -87,6 +88,12 @@ class Settings(BaseSettings):
         return self.resolve_path(self.clip_dir)
 
     @property
+    def resolved_thumbnail_dir(self) -> Path:
+        if self.thumbnail_dir is None:
+            return self.resolved_private_data_dir / "thumbnails"
+        return self.resolve_path(self.thumbnail_dir)
+
+    @property
     def resolved_source_dirs(self) -> list[Path]:
         return [self.resolve_path(path) for path in self.source_dirs]
 
@@ -141,3 +148,12 @@ def validate_path_layout(settings: Settings) -> None:
                 raise ValueError(
                     f"The {writable_name} directory must not overlap a source directory."
                 )
+
+    thumbnail_path = settings.resolved_thumbnail_dir
+    if thumbnail_path == settings.resolved_clip_dir or thumbnail_path.is_relative_to(
+        settings.resolved_clip_dir
+    ):
+        raise ValueError("The thumbnail directory must remain outside the clip directory.")
+    for source_path in settings.resolved_source_dirs:
+        if thumbnail_path == source_path or thumbnail_path.is_relative_to(source_path):
+            raise ValueError("The thumbnail directory must not be inside a source directory.")

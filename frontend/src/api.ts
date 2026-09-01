@@ -2,6 +2,11 @@ import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
   ClipCreateRequest,
+  ClipMetadataUpdate,
+  ClipPage,
+  ClipRecord,
+  ClipDeleteResult,
+  ClipFilterOptions,
   HealthResponse,
   JobSnapshot,
   MediaCapabilities,
@@ -145,4 +150,75 @@ export async function fetchJob(jobId: string): Promise<JobSnapshot> {
     headers: { Accept: "application/json" },
   });
   return parseResponse<JobSnapshot>(response, "Job request");
+}
+
+export interface ClipQuery {
+  page?: number;
+  pageSize?: number | "all";
+  search?: string;
+  library?: string;
+  mediaType?: string;
+  media?: string[];
+  episode?: string[];
+  sort?: string;
+}
+
+export async function fetchClips(query: ClipQuery): Promise<ClipPage> {
+  const params = new URLSearchParams();
+  params.set("page", String(query.page ?? 1));
+  if (query.pageSize === "all") params.set("all", "true");
+  else params.set("page_size", String(query.pageSize ?? 25));
+  if (query.search) params.set("search", query.search);
+  if (query.library) params.set("library", query.library);
+  if (query.mediaType) params.set("media_type", query.mediaType);
+  query.media?.forEach((value) => params.append("media", value));
+  query.episode?.forEach((value) => params.append("episode", value));
+  if (query.sort) params.set("sort", query.sort);
+  const response = await fetch(`/api/clips?${params}`, { headers: { Accept: "application/json" } });
+  return parseResponse<ClipPage>(response, "Clip library request");
+}
+
+export async function fetchClip(clipId: string): Promise<ClipRecord> {
+  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<ClipRecord>(response, "Clip detail request");
+}
+
+export async function fetchClipLibraries(): Promise<string[]> {
+  const response = await fetch("/api/clips/libraries", {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<string[]>(response, "Clip libraries request");
+}
+
+export async function fetchClipFilterOptions(): Promise<ClipFilterOptions> {
+  const response = await fetch("/api/clips/filter-options", {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<ClipFilterOptions>(response, "Clip filter options request");
+}
+
+export async function updateClipMetadata(
+  clipId: string,
+  update: ClipMetadataUpdate,
+): Promise<JobSnapshot> {
+  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  return parseResponse<JobSnapshot>(response, "Clip metadata update");
+}
+
+export async function deleteClip(
+  clipId: string,
+  expectedRevision: number,
+): Promise<ClipDeleteResult> {
+  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_revision: expectedRevision }),
+  });
+  return parseResponse<ClipDeleteResult>(response, "Clip deletion");
 }

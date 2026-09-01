@@ -82,6 +82,13 @@ class PlexSession(BaseModel):
     selected_audio_streams: list[PlexPartStream] = Field(default_factory=list)
     selected_subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
     subtitle_streams: list[PlexPartStream] = Field(default_factory=list)
+    library: str | None = Field(default=None, exclude=True)
+    movie_title: str | None = Field(default=None, exclude=True)
+    movie_year: int | None = Field(default=None, exclude=True)
+    show_name: str | None = Field(default=None, exclude=True)
+    episode_title: str | None = Field(default=None, exclude=True)
+    season_number: int | None = Field(default=None, exclude=True)
+    episode_number: int | None = Field(default=None, exclude=True)
 
 
 class PlexSessionSnapshot(BaseModel):
@@ -296,6 +303,19 @@ def parse_video_sessions(
                 selected_audio_streams=selected_audio_streams,
                 selected_subtitle_streams=selected_subtitle_streams,
                 subtitle_streams=subtitle_streams,
+                library=video.attrib.get("librarySectionTitle"),
+                movie_title=(
+                    video.attrib.get("title")
+                    if video.attrib.get("type") == "movie"
+                    else None
+                ),
+                movie_year=_int_attribute(video, "year"),
+                show_name=video.attrib.get("grandparentTitle"),
+                episode_title=(
+                    video.attrib.get("title") if video.attrib.get("type") == "episode" else None
+                ),
+                season_number=_int_attribute(video, "parentIndex"),
+                episode_number=_int_attribute(video, "index"),
             )
         )
     return sessions
@@ -331,6 +351,53 @@ class PlexClient:
                 f"Plex returned HTTP {response.status_code} while loading active sessions.",
             )
         return parse_video_sessions(response.content, sampled_at=sampled_at)
+
+    async def fetch_library_names(self) -> list[str]:
+        try:
+            response = await self.client.get(
+                f"{self.plex_url}/library/sections",
+                headers={"Accept": "application/xml", "X-Plex-Token": self.plex_token},
+            )
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as error:
+            raise PlexSessionError(
+                "invalid_url", "The configured Plex URL could not be used for a request."
+            ) from error
+        except httpx.RequestError as error:
+            raise PlexSessionError(
+                "unreachable", "The Plex server could not be reached at the configured URL."
+            ) from error
+        if response.status_code in {401, 403}:
+            raise PlexSessionError("invalid_token", "Plex rejected the configured token.")
+        if response.status_code != 200:
+            raise PlexSessionError(
+                "http_error",
+                f"Plex returned HTTP {response.status_code} while loading libraries.",
+            )
+        return parse_library_names(response.content)
+
+
+def parse_library_names(payload: bytes) -> list[str]:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return valid library XML."
+        ) from error
+    if _local_name(root) != "MediaContainer":
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return a library container."
+        )
+    names: list[str] = []
+    seen: set[str] = set()
+    for section in root:
+        if _local_name(section) != "Directory":
+            continue
+        name = " ".join(section.attrib.get("title", "").split())
+        key = name.casefold()
+        if name and key not in seen:
+            names.append(name)
+            seen.add(key)
+    return names
 
 
 class PlexSessionPoller:

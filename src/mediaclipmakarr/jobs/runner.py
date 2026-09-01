@@ -15,21 +15,34 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from mediaclipmakarr.clips import insert_clip
+from mediaclipmakarr.clip_library import (
+    ClipRevisionConflict,
+    MetadataEditJobPlan,
+    ThumbnailJobPlan,
+    build_thumbnail_job_plan,
+    generate_thumbnail,
+    rewrite_clip_metadata,
+    thumbnail_path,
+)
+from mediaclipmakarr.clips import get_clip, insert_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
 
 from .events import JobEventBroker
-from .finalization import install_rendered_clip
+from .finalization import install_metadata_revision, install_rendered_clip, remove_superseded_clip
 from .models import BlockingRunner, ClaimedJob, JobSnapshot
 from .recovery import fail_abandoned_jobs, recover_finalizing_jobs
 from .repository import (
     _live_progress_snapshot,
     claim_next_job,
+    commit_metadata_edit,
+    create_pending_metadata_operation,
     create_pending_operation,
+    enqueue_thumbnail_job,
     fail_job,
     finish_job_success,
+    finish_running_job_success,
     get_job_snapshot,
     transition_to_finalizing,
     update_running_job,
@@ -99,6 +112,8 @@ class JobRunner:
             self.engine,
             self.run_blocking,
             preserve_workdirs=self.settings.preserve_job_workdirs,
+            clip_root=self.settings.resolved_clip_dir,
+            work_root=self.settings.resolved_work_dir,
         )
         abandoned = await fail_abandoned_jobs(self.engine)
         for job_id in [*recovered, *abandoned]:
@@ -218,7 +233,15 @@ class JobRunner:
             logger.exception("The job runner could not publish an update for job %s.", job_id)
 
     async def _execute_claimed_job(self, claimed: ClaimedJob) -> None:
+        if claimed.type == "thumbnail_generate":
+            await self._execute_thumbnail_job(claimed)
+            return
+        if claimed.type == "clip_metadata_edit":
+            await self._execute_metadata_edit_job(claimed)
+            return
         plan = claimed.render_plan
+        if not isinstance(plan, ClipRenderPlan):
+            raise TypeError("Clip creation job has an invalid durable plan.")
         await update_running_job(
             self.engine,
             claimed.id,
@@ -280,7 +303,8 @@ class JobRunner:
             plan.library,
             plan.title,
         )
-        clip = _clip_payload(plan, rendered.duration_ms, destination)
+        rendered_stat = await self.run_blocking(rendered.path.stat)
+        clip = _clip_payload(plan, rendered.duration_ms, destination, rendered_stat)
 
         await transition_to_finalizing(
             self.engine,
@@ -310,10 +334,210 @@ class JobRunner:
         await insert_clip(self.engine, clip)
         await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
         await self._publish_durable_job_update(claimed.id)
+        installed_stat = await self.run_blocking(destination.stat)
+        thumbnail_job = await enqueue_thumbnail_job(
+            self.engine,
+            build_thumbnail_job_plan(clip, installed_stat),
+        )
+        await self._publish_durable_job_update(thumbnail_job.id)
+        self.wake()
+
+    async def _execute_thumbnail_job(self, claimed: ClaimedJob) -> None:
+        plan = claimed.render_plan
+        if not isinstance(plan, ThumbnailJobPlan):
+            raise TypeError("Thumbnail job has an invalid durable plan.")
+        clip = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if clip is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        source = Path(str(clip["file_path"]))
+        source_stat = await self.run_blocking(source.stat)
+        if (
+            int(clip["revision"]) != plan.clip_revision
+            or source_stat.st_size != plan.source_size
+            or source_stat.st_mtime_ns != plan.source_modified_ns
+        ):
+            raise ClipRevisionConflict("The clip changed before thumbnail generation began.")
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="generating_thumbnail",
+            progress=0.25,
+            current_stage_progress=0.25,
+            message="Generating clip thumbnail.",
+        )
+        destination = thumbnail_path(self.settings.resolved_thumbnail_dir, plan.clip_id)
+        temp = self.settings.resolved_work_dir / "jobs" / claimed.id / "thumbnail.jpg"
+        await generate_thumbnail(
+            source,
+            temp,
+            duration_ms=int(clip["duration_ms"]),
+            ffmpeg_path=self.settings.ffmpeg_path,
+            timeout_seconds=self.settings.media_preparation_timeout_seconds,
+        )
+        current_stat = await self.run_blocking(source.stat)
+        if (
+            current_stat.st_size != plan.source_size
+            or current_stat.st_mtime_ns != plan.source_modified_ns
+        ):
+            raise ClipRevisionConflict("The clip changed while its thumbnail was generated.")
+        await self.run_blocking(destination.parent.mkdir, parents=True, exist_ok=True)
+        await self.run_blocking(temp.replace, destination)
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    "UPDATE clips SET thumbnail_path = :path, thumbnail_source_size = :size, "
+                    "thumbnail_source_modified_ns = :modified "
+                    "WHERE id = :id AND revision = :revision"
+                ),
+                {
+                    "path": str(destination),
+                    "size": plan.source_size,
+                    "modified": plan.source_modified_ns,
+                    "id": plan.clip_id,
+                    "revision": plan.clip_revision,
+                },
+            )
+            if result.rowcount != 1:
+                raise ClipRevisionConflict("The clip changed before its thumbnail was saved.")
+        await finish_running_job_success(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            result_payload={
+                "clip_id": plan.clip_id,
+                "thumbnail_url": f"/api/clips/{plan.clip_id}/thumbnail",
+            },
+            message="Thumbnail generation completed.",
+        )
+        await self._cleanup_job_workdir(claimed.id, "thumbnail completion")
+        await self._publish_durable_job_update(claimed.id)
+
+    async def _execute_metadata_edit_job(self, claimed: ClaimedJob) -> None:
+        plan = claimed.render_plan
+        if not isinstance(plan, MetadataEditJobPlan):
+            raise TypeError("Metadata edit job has an invalid durable plan.")
+        clip = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if clip is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        if int(clip["revision"]) != plan.expected_revision:
+            raise ClipRevisionConflict(
+                f"Clip revision {plan.expected_revision} is stale; current revision is "
+                f"{clip['revision']}."
+            )
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="updating_metadata",
+            progress=0.2,
+            current_stage_progress=0.2,
+            message="Writing the next clip metadata revision.",
+        )
+        source = Path(str(clip["file_path"]))
+        temp = self.settings.resolved_work_dir / "jobs" / claimed.id / "metadata.mp4"
+        proposed = {**clip, **plan.proposed}
+        destination = await self.run_blocking(
+            resolve_unique_clip_path,
+            self.settings.resolved_clip_dir,
+            str(proposed["library"]),
+            str(proposed["title"]),
+            exclude=source,
+        )
+        paths_are_safe = await self.run_blocking(
+            _metadata_paths_are_safe,
+            source,
+            destination,
+            temp,
+            self.settings.resolved_clip_dir,
+            self.settings.resolved_work_dir,
+        )
+        if not paths_are_safe:
+            raise ValueError("Metadata file operation escaped a managed directory.")
+        proposed["updated_at"] = utc_now()
+        proposed["file_path"] = str(destination)
+        proposed["thumbnail_path"] = None
+        proposed["thumbnail_source_size"] = None
+        proposed["thumbnail_source_modified_ns"] = None
+        await rewrite_clip_metadata(
+            source,
+            temp,
+            proposed,
+            ffmpeg_path=self.settings.ffmpeg_path,
+            timeout_seconds=self.settings.media_preparation_timeout_seconds,
+        )
+        temp_stat = await self.run_blocking(temp.stat)
+        proposed["file_size_bytes"] = temp_stat.st_size
+        proposed["file_modified_ns"] = temp_stat.st_mtime_ns
+        latest = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if latest is None or int(latest["revision"]) != plan.expected_revision:
+            raise ClipRevisionConflict("The clip changed while metadata was being written.")
+        await transition_to_finalizing(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            clip_id=plan.clip_id,
+            revision=int(proposed["revision"]),
+            destination=destination,
+            render_plan_hash=plan.operation_hash,
+        )
+        await create_pending_metadata_operation(
+            self.engine,
+            job_id=claimed.id,
+            clip_id=plan.clip_id,
+            temp_path=temp,
+            source_path=source,
+            destination=destination,
+            expected_revision=plan.expected_revision,
+            operation_hash=plan.operation_hash,
+            clip=proposed,
+        )
+        await self._publish_durable_job_update(claimed.id)
+        await self.run_blocking(install_metadata_revision, temp, source, destination)
+        installed_stat = await self.run_blocking(destination.stat)
+        proposed["file_size_bytes"] = installed_stat.st_size
+        proposed["file_modified_ns"] = installed_stat.st_mtime_ns
+        await commit_metadata_edit(
+            self.engine, proposed, expected_revision=plan.expected_revision
+        )
+        await self.run_blocking(remove_superseded_clip, source, destination)
+        await finish_job_success(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            clip=proposed,
+            message="Clip metadata update completed.",
+        )
+        await self._cleanup_job_workdir(claimed.id, "metadata update completion")
+        await self._publish_durable_job_update(claimed.id)
+        thumbnail_job = await enqueue_thumbnail_job(
+            self.engine,
+            build_thumbnail_job_plan(proposed, installed_stat),
+        )
+        await self._publish_durable_job_update(thumbnail_job.id)
+        self.wake()
+
+
+def _metadata_paths_are_safe(
+    source: Path,
+    destination: Path,
+    temp: Path,
+    clip_root: Path,
+    work_root: Path,
+) -> bool:
+    resolved_clips = clip_root.resolve(strict=False)
+    return (
+        source.resolve(strict=False).is_relative_to(resolved_clips)
+        and destination.resolve(strict=False).is_relative_to(resolved_clips)
+        and temp.resolve(strict=False).is_relative_to(work_root.resolve(strict=False))
+    )
 
 
 def _clip_payload(
-    plan: ClipRenderPlan, rendered_duration_ms: int, destination: Path
+    plan: ClipRenderPlan,
+    rendered_duration_ms: int,
+    destination: Path,
+    rendered_stat: Any | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     return {
@@ -321,6 +545,16 @@ def _clip_payload(
         "title": plan.title,
         "library": plan.library,
         "media_type": plan.media_type,
+        "custom_title": plan.custom_title,
+        "automatic_title": plan.automatic_title or plan.title,
+        "movie_title": plan.movie_title,
+        "movie_year": plan.movie_year,
+        "show_name": plan.show_name,
+        "episode_title": plan.episode_title,
+        "season_number": plan.season_number,
+        "episode_number": plan.episode_number,
+        "clip_number": plan.clip_number,
+        "plex_username": plan.plex_user,
         "file_path": str(destination),
         "duration_ms": rendered_duration_ms,
         "revision": plan.revision,
@@ -331,6 +565,8 @@ def _clip_payload(
         "source_modified_at": plan.source_media.fingerprint.modified_at.replace(tzinfo=None),
         "selected_audio_stream_index": plan.selected_audio_stream.stream_index,
         "render_plan_hash": plan.render_plan_hash,
+        "file_size_bytes": rendered_stat.st_size if rendered_stat is not None else None,
+        "file_modified_ns": rendered_stat.st_mtime_ns if rendered_stat is not None else None,
         "created_at": now,
         "updated_at": now,
     }

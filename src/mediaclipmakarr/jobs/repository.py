@@ -11,6 +11,11 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mediaclipmakarr.clip_library import (
+    ClipRevisionConflict,
+    MetadataEditJobPlan,
+    ThumbnailJobPlan,
+)
 from mediaclipmakarr.render_plan import ClipRenderPlan
 
 from .models import ClaimedJob, JobError, JobSnapshot, JobStage, JobState, JobUpdateConflict
@@ -21,21 +26,51 @@ def utc_now() -> datetime:
 
 
 async def enqueue_clip_create_job(engine: AsyncEngine, plan: ClipRenderPlan) -> JobSnapshot:
+    return await _enqueue_job(engine, "clip_create", plan, "Clip render is queued.")
+
+
+async def enqueue_thumbnail_job(
+    engine: AsyncEngine, plan: ThumbnailJobPlan
+) -> JobSnapshot:
+    existing = await _find_active_job(engine, "thumbnail_generate", plan.operation_hash)
+    if existing is not None:
+        return existing
+    return await _enqueue_job(
+        engine, "thumbnail_generate", plan, "Thumbnail generation is queued."
+    )
+
+
+async def enqueue_metadata_edit_job(
+    engine: AsyncEngine, plan: MetadataEditJobPlan
+) -> JobSnapshot:
+    return await _enqueue_job(
+        engine, "clip_metadata_edit", plan, "Clip metadata update is queued."
+    )
+
+
+async def _enqueue_job(
+    engine: AsyncEngine,
+    job_type: str,
+    plan: ClipRenderPlan | ThumbnailJobPlan | MetadataEditJobPlan,
+    message: str,
+) -> JobSnapshot:
     created_at = utc_now()
+    operation_hash = getattr(plan, "render_plan_hash", None) or plan.operation_hash
     async with engine.begin() as connection:
         await connection.execute(
             text(
                 "INSERT INTO jobs "
                 "(id, type, state, stage, progress, current_stage_progress, message, attempt, "
                 "render_plan_json, render_plan_hash, created_at) "
-                "VALUES (:id, 'clip_create', 'QUEUED', 'queued', 0, 0, :message, 0, "
+                "VALUES (:id, :type, 'QUEUED', 'queued', 0, 0, :message, 0, "
                 ":render_plan_json, :render_plan_hash, :created_at)"
             ),
             {
                 "id": plan.job_id,
-                "message": "Clip render is queued.",
+                "type": job_type,
+                "message": message,
                 "render_plan_json": _dump_json(plan.model_dump(mode="json")),
-                "render_plan_hash": plan.render_plan_hash,
+                "render_plan_hash": operation_hash,
                 "created_at": created_at,
             },
         )
@@ -43,6 +78,20 @@ async def enqueue_clip_create_job(engine: AsyncEngine, plan: ClipRenderPlan) -> 
     if snapshot is None:
         raise RuntimeError("The queued job could not be read back from SQLite.")
     return snapshot
+
+
+async def _find_active_job(
+    engine: AsyncEngine, job_type: str, operation_hash: str
+) -> JobSnapshot | None:
+    async with engine.connect() as connection:
+        job_id = await connection.scalar(
+            text(
+                "SELECT id FROM jobs WHERE type = :type AND render_plan_hash = :hash "
+                "AND state IN ('QUEUED', 'RUNNING', 'FINALIZING') ORDER BY created_at LIMIT 1"
+            ),
+            {"type": job_type, "hash": operation_hash},
+        )
+    return await get_job_snapshot(engine, str(job_id)) if job_id else None
 
 
 async def get_job_snapshot(engine: AsyncEngine, job_id: str) -> JobSnapshot | None:
@@ -72,7 +121,7 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
             (
                 await connection.execute(
                     text(
-                        "SELECT id, render_plan_json FROM jobs "
+                        "SELECT id, type, render_plan_json FROM jobs "
                         "WHERE state = 'QUEUED' ORDER BY created_at LIMIT 1"
                     )
                 )
@@ -99,10 +148,19 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
         if result.rowcount != 1:
             return None
 
+    job_type = str(candidate["type"])
+    plan_class = {
+        "clip_create": ClipRenderPlan,
+        "thumbnail_generate": ThumbnailJobPlan,
+        "clip_metadata_edit": MetadataEditJobPlan,
+    }.get(job_type)
+    if plan_class is None:
+        raise ValueError(f"Unsupported queued job type: {job_type}")
     return ClaimedJob(
         id=str(candidate["id"]),
         run_token=run_token,
-        render_plan=ClipRenderPlan.model_validate_json(str(candidate["render_plan_json"])),
+        type=job_type,
+        render_plan=plan_class.model_validate_json(str(candidate["render_plan_json"])),
     )
 
 
@@ -170,6 +228,7 @@ async def finish_job_success(
     run_token: str,
     *,
     clip: dict[str, Any],
+    message: str = "Clip render completed.",
 ) -> None:
     finished_at = utc_now()
     result_payload = {
@@ -193,7 +252,7 @@ async def finish_job_success(
                 "run_token": run_token,
                 "finished_at": finished_at,
                 "result_json": _dump_json(result_payload),
-                "message": "Clip render completed.",
+                "message": message,
             },
         )
         if result.rowcount != 1:
@@ -278,6 +337,35 @@ async def fail_job(
     )
 
 
+async def finish_running_job_success(
+    engine: AsyncEngine,
+    job_id: str,
+    run_token: str,
+    *,
+    result_payload: dict[str, Any],
+    message: str,
+) -> None:
+    finished_at = utc_now()
+    async with engine.begin() as connection:
+        result = await connection.execute(
+            text(
+                "UPDATE jobs SET state = 'SUCCEEDED', stage = 'complete', progress = 1, "
+                "current_stage_progress = 1, finished_at = :finished_at, run_token = NULL, "
+                "result_json = :result_json, message = :message "
+                "WHERE id = :id AND state = 'RUNNING' AND run_token = :run_token"
+            ),
+            {
+                "id": job_id,
+                "run_token": run_token,
+                "finished_at": finished_at,
+                "result_json": _dump_json(result_payload),
+                "message": message,
+            },
+        )
+        if result.rowcount != 1:
+            raise JobUpdateConflict(f"Job {job_id} could not be completed.")
+
+
 async def create_pending_operation(
     engine: AsyncEngine,
     *,
@@ -307,6 +395,128 @@ async def create_pending_operation(
                 "clip_json": _dump_json(clip),
                 "created_at": utc_now(),
             },
+        )
+
+
+async def create_pending_metadata_operation(
+    engine: AsyncEngine,
+    *,
+    job_id: str,
+    clip_id: str,
+    temp_path: Path,
+    source_path: Path,
+    destination: Path,
+    expected_revision: int,
+    operation_hash: str,
+    clip: dict[str, Any],
+) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO pending_file_operations "
+                "(id, job_id, clip_id, operation_type, temp_path, source_path, target_path, "
+                "expected_revision, render_plan_hash, clip_json, created_at) "
+                "VALUES (:id, :job_id, :clip_id, 'metadata_edit', :temp_path, :source_path, "
+                ":target_path, :expected_revision, :render_plan_hash, :clip_json, :created_at)"
+            ),
+            {
+                "id": f"pending-{uuid4()}",
+                "job_id": job_id,
+                "clip_id": clip_id,
+                "temp_path": str(temp_path),
+                "source_path": str(source_path),
+                "target_path": str(destination),
+                "expected_revision": expected_revision,
+                "render_plan_hash": operation_hash,
+                "clip_json": _dump_json(clip),
+                "created_at": utc_now(),
+            },
+        )
+
+
+async def commit_metadata_edit(
+    engine: AsyncEngine,
+    clip: dict[str, Any],
+    *,
+    expected_revision: int,
+) -> None:
+    async with engine.begin() as connection:
+        current = (
+            await connection.execute(
+                text("SELECT * FROM clips WHERE id = :id"), {"id": clip["id"]}
+            )
+        ).mappings().first()
+        if current is not None and int(current["revision"]) == int(clip["revision"]):
+            return
+        if current is None or int(current["revision"]) != expected_revision:
+            raise ClipRevisionConflict("Clip revision changed before metadata finalization.")
+        current_payload = dict(current)
+        await connection.execute(
+            text(
+                "INSERT OR IGNORE INTO clip_revisions "
+                "(clip_id, revision, metadata_json, file_path, created_at) "
+                "VALUES (:clip_id, :revision, :metadata_json, :file_path, :created_at)"
+            ),
+            {
+                "clip_id": current_payload["id"],
+                "revision": current_payload["revision"],
+                "metadata_json": _dump_json(current_payload),
+                "file_path": current_payload["file_path"],
+                "created_at": utc_now(),
+            },
+        )
+        fields = (
+            "title",
+            "custom_title",
+            "automatic_title",
+            "library",
+            "media_type",
+            "movie_title",
+            "movie_year",
+            "show_name",
+            "episode_title",
+            "season_number",
+            "episode_number",
+            "clip_number",
+            "file_path",
+            "file_size_bytes",
+            "file_modified_ns",
+            "revision",
+            "updated_at",
+            "thumbnail_path",
+            "thumbnail_source_size",
+            "thumbnail_source_modified_ns",
+        )
+        assignments = ", ".join(f"{field} = :{field}" for field in fields)
+        result = await connection.execute(
+            text(
+                f"UPDATE clips SET {assignments} WHERE id = :id AND revision = :expected_revision"
+            ),
+            {**clip, "expected_revision": expected_revision},
+        )
+        if result.rowcount != 1:
+            raise ClipRevisionConflict("Clip revision changed before metadata finalization.")
+        await connection.execute(
+            text(
+                "INSERT OR IGNORE INTO clip_revisions "
+                "(clip_id, revision, metadata_json, file_path, created_at) "
+                "VALUES (:clip_id, :revision, :metadata_json, :file_path, :created_at)"
+            ),
+            {
+                "clip_id": clip["id"],
+                "revision": clip["revision"],
+                "metadata_json": _dump_json(clip),
+                "file_path": clip["file_path"],
+                "created_at": utc_now(),
+            },
+        )
+        await connection.execute(
+            text(
+                "DELETE FROM clip_revisions WHERE clip_id = :clip_id AND id NOT IN "
+                "(SELECT id FROM clip_revisions WHERE clip_id = :clip_id "
+                "ORDER BY revision DESC LIMIT 25)"
+            ),
+            {"clip_id": clip["id"]},
         )
 
 
