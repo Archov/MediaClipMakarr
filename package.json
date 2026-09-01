@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "scripts": {
     "setup": "python scripts/bootstrap.py",
+    "setup:windows": "python setup_windows.py",
+    "start": "python launch.py",
     "dev": "python scripts/dev.py",
     "build": "npm --prefix frontend run build",
     "typecheck": "npm --prefix frontend run typecheck",

@@ -5,23 +5,43 @@ currently playing in Plex. The current Phase 1 application includes its FastAPI/
 runtime health reporting, persisted Plex and encoding settings, ordered source-path mappings, and
 a production container with pinned Jellyfin FFmpeg.
 
-## Local development (Windows, macOS, or Linux)
+## Local development
 
 Prerequisites: Python 3.12 or newer, Node.js 22 or newer, and Jellyfin FFmpeg `7.1.4-3` available
-on `PATH`. The provided `.env.example` contains container paths; when running directly on the host,
-change the path settings in `.env` to their host equivalents.
+on `PATH` or configured through the Windows setup wizard.
+
+### Windows setup wizard
+
+Keep `.env` configured for Docker Compose. The Windows wizard creates a separate, git-ignored
+`.env.windows` profile and `launch.py` automatically prefers that profile on Windows:
 
 ```powershell
 npm run setup
-npm run dev
+python setup_windows.py
+python launch.py
 ```
 
-The one development command starts FastAPI at `http://127.0.0.1:8000` and Vite at
+The wizard configures application data, read-only source folders, ordered Plex path mappings,
+development ports, and FFmpeg/FFprobe paths. It detects media tools already on `PATH`. If they are
+missing, the download button installs the official Jellyfin FFmpeg `7.1.4-3` portable Windows build
+under `data/tools`; the AMD64 or ARM64 archive is selected automatically and its pinned SHA-256
+digest is verified before extraction. The Docker `.env` is never modified.
+
+For macOS or Linux, configure `.env` with host paths and run:
+
+```powershell
+npm run setup
+python launch.py
+```
+
+The root launch script starts FastAPI at `http://127.0.0.1:8000` and Vite at
 `http://127.0.0.1:5173`. Open the Vite address. `MCM_SOURCE_DIRS` is a JSON array so Windows paths
 are unambiguous. If the default ports are occupied, set `MCM_DEV_API_PORT` and `MCM_DEV_WEB_PORT`
 in `.env` before starting the stack. Vite hot reload remains enabled everywhere; on Windows,
 restart the command after backend edits so Uvicorn retains the Proactor event loop required for
 async FFmpeg/ffprobe subprocesses.
+
+`npm start` is available as an equivalent shortcut.
 
 The application deliberately reports a degraded health state when a non-Jellyfin FFmpeg is found;
 the web/API process remains available so the exact problem is visible. Unsafe path overlap, an

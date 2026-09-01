@@ -191,6 +191,8 @@ data/private/*
 data/work/*
 data/clips/*
 data/sources/*
+data/tools/*
+.env.windows*
 !data/private/.gitkeep
 !data/work/.gitkeep
 !data/clips/.gitkeep

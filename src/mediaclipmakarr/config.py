@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mediaclipmakarr import __version__
+
+ENV_FILE_VARIABLE = "MCM_ENV_FILE"
 
 
 class Settings(BaseSettings):
@@ -106,6 +109,12 @@ class Settings(BaseSettings):
     @property
     def resolved_alembic_script_dir(self) -> Path:
         return self.resolve_path(self.alembic_script_dir)
+
+
+def load_settings() -> Settings:
+    """Load settings from an explicitly selected profile or the default .env file."""
+
+    return Settings(_env_file=os.environ.get(ENV_FILE_VARIABLE, ".env"))
 
 
 def validate_path_layout(settings: Settings) -> None:

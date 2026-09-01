@@ -19,7 +19,7 @@ from mediaclipmakarr.api.plex import build_router as build_plex_router
 from mediaclipmakarr.api.settings import build_router as build_settings_router
 from mediaclipmakarr.application_settings import get_effective_application_settings
 from mediaclipmakarr.concurrency import BlockingIOExecutor
-from mediaclipmakarr.config import Settings, validate_path_layout
+from mediaclipmakarr.config import Settings, load_settings, validate_path_layout
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import initialize_writable_directories, inspect_media_tools
 from mediaclipmakarr.jobs import (
@@ -56,7 +56,7 @@ class SPAStaticFiles(StaticFiles):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    application_settings = settings or Settings()
+    application_settings = settings or load_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
