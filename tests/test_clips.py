@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import mediaclipmakarr.api.clips as clips_api
@@ -193,3 +194,38 @@ def test_clip_api_returns_structured_validation_errors(tmp_path, monkeypatch) ->
     assert valid_response.json()["type"] == "clip_create"
     assert invalid_response.status_code == 422
     assert invalid_response.json()["detail"]["code"] == "CLIP_RANGE_ORDER"
+
+
+def test_clip_media_is_served_inline_with_byte_ranges(tmp_path, monkeypatch) -> None:
+    clip_dir = tmp_path / "clips"
+    clip_dir.mkdir()
+    clip_path = clip_dir / "Example Clip.mp4"
+    clip_path.write_bytes(b"0123456789")
+    settings = Settings(_env_file=None, clip_dir=clip_dir)
+
+    async def clip(_engine, _clip_id, _clip_root):
+        return {
+            "id": "clip-1",
+            "title": "Example Clip",
+            "file_path": str(clip_path),
+        }
+
+    monkeypatch.setattr(clips_api, "get_clip", clip)
+    app = FastAPI()
+    app.state.database_engine = object()
+    app.include_router(clips_api.build_router(settings))
+
+    with TestClient(app) as client:
+        play_response = client.get(
+            "/api/clips/clip-1/media",
+            headers={"Range": "bytes=2-5"},
+        )
+        download_response = client.get("/api/clips/clip-1/download")
+
+    assert play_response.status_code == 206
+    assert play_response.content == b"2345"
+    assert play_response.headers["content-type"] == "video/mp4"
+    assert play_response.headers["accept-ranges"] == "bytes"
+    assert play_response.headers["content-range"] == "bytes 2-5/10"
+    assert play_response.headers["content-disposition"].startswith("inline;")
+    assert download_response.headers["content-disposition"].startswith("attachment;")

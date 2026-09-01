@@ -446,6 +446,66 @@ async def test_external_text_subtitle_uses_the_plex_stream_download_path(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_plex_external_srt_without_stream_index_is_selectable(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    external = PlexPartStream(
+        id="plex-downloaded-subtitle",
+        key="/library/streams/501.srt",
+        stream_type=3,
+        codec="srt",
+        language="eng",
+        title="Plex downloaded English",
+        selected=True,
+    )
+    selected_session = session().model_copy(
+        update={
+            "selected_subtitle_streams": [external],
+            "subtitle_streams": [external],
+        }
+    )
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    capabilities_result = await resolve_media_capabilities(
+        selected_session,
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert capabilities_result.capabilities is not None
+    external_track = capabilities_result.capabilities.subtitle_tracks[-1]
+    assert external_track.plex_track_id == "plex-downloaded-subtitle"
+    assert external_track.stream_index == -1
+    assert external_track.available is True
+    assert external_track.selected is True
+    assert capabilities_result.capabilities.default_subtitle_stream_index == -1
+    assert capabilities_result.capabilities.subtitles_forced_off is False
+
+    selected_result = await resolve_and_probe_source_media(
+        selected_session,
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_subtitle_stream_index=-1,
+        subtitles_enabled=True,
+    )
+
+    assert selected_result.selected_subtitle.strategy == "external_text"
+    assert selected_result.selected_subtitle.stream is not None
+    assert selected_result.selected_subtitle.stream.stream_index == -1
+    assert (
+        selected_result.selected_subtitle.external_url
+        == "http://plex.example:32400/library/streams/501.srt"
+    )
+
+
+@pytest.mark.asyncio
 async def test_unsupported_subtitle_selection_returns_alternatives(tmp_path) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()

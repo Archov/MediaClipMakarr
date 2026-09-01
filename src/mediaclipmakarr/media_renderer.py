@@ -322,7 +322,21 @@ async def _prepare_text_subtitle_file(
     prepared = subtitles_dir / _prepared_subtitle_filename(stream.codec_name)
 
     if strategy == "external_text":
-        await _download_external_text_subtitle(plan, settings, prepared)
+        downloaded = subtitles_dir / f"downloaded-{prepared.name}"
+        await _download_external_text_subtitle(plan, settings, downloaded)
+        try:
+            await _extract_external_text_subtitle(
+                plan,
+                settings,
+                downloaded,
+                prepared,
+                subtitle_preroll_ms=subtitle_preroll_ms,
+            )
+        except CommandError as error:
+            raise SubtitleDecoderError(
+                "FFmpeg could not align the selected external subtitle to the clip range."
+            ) from error
+        await asyncio.to_thread(downloaded.unlink, missing_ok=True)
     else:
         try:
             await _extract_embedded_text_subtitle(
@@ -398,6 +412,43 @@ async def _extract_embedded_text_subtitle(
             f"0:{stream.stream_index}",
             "-c:s",
             _subtitle_encoder(stream.codec_name),
+            os.fspath(output_path),
+        ],
+        timeout_seconds=settings.media_preparation_timeout_seconds,
+    )
+
+
+async def _extract_external_text_subtitle(
+    plan: ClipRenderPlan,
+    settings: Settings,
+    input_path: Path,
+    output_path: Path,
+    *,
+    subtitle_preroll_ms: int,
+) -> None:
+    stream = plan.selected_subtitle.stream
+    if stream is None:
+        raise ValueError("Selected external text subtitle stream is missing.")
+    decode_start_ms = max(0, plan.source_start_ms - subtitle_preroll_ms)
+    preroll_seconds = (plan.source_start_ms - decode_start_ms) / 1000
+    duration_seconds = _duration_seconds(plan) + preroll_seconds
+    await run_command(
+        [
+            settings.ffmpeg_path,
+            "-hide_banner",
+            "-y",
+            "-i",
+            os.fspath(input_path),
+            "-ss",
+            f"{decode_start_ms / 1000:.3f}",
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-map",
+            "0:0",
+            "-c:s",
+            _subtitle_encoder(stream.codec_name),
+            "-output_ts_offset",
+            f"{-decode_start_ms / 1000:.3f}",
             os.fspath(output_path),
         ],
         timeout_seconds=settings.media_preparation_timeout_seconds,
@@ -522,7 +573,7 @@ def _is_supported_font_attachment(
 async def _subtitle_preroll_ms(plan: ClipRenderPlan, settings: Settings) -> int:
     if not plan.selected_subtitle.enabled:
         return 0
-    if plan.selected_subtitle.strategy == "embedded_text":
+    if plan.selected_subtitle.strategy in {"embedded_text", "external_text"}:
         return min(TEXT_SUBTITLE_PREROLL_MS, plan.source_start_ms)
     if plan.selected_subtitle.strategy != "bitmap":
         return 0
