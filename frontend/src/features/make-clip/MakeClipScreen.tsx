@@ -236,6 +236,8 @@ export function MakeClipScreen() {
                   startMs={startMs}
                   endMs={endMs}
                   livePositionMs={livePositionMs}
+                  sessionIdentity={selectedSession.session_identity}
+                  mediaIdentity={selectedSession.media_identity}
                   mediaDurationMs={selectedSession.duration_ms}
                   adjustmentSeconds={adjustmentSeconds}
                   onAdjustmentChange={setAdjustmentSeconds}

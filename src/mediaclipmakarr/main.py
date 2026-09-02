@@ -18,7 +18,7 @@ from mediaclipmakarr.api.jobs import build_router as build_jobs_router
 from mediaclipmakarr.api.plex import build_router as build_plex_router
 from mediaclipmakarr.api.settings import build_router as build_settings_router
 from mediaclipmakarr.application_settings import get_effective_application_settings
-from mediaclipmakarr.concurrency import BlockingIOExecutor
+from mediaclipmakarr.concurrency import BlockingIOExecutor, MediaProcessGate
 from mediaclipmakarr.config import Settings, load_settings, validate_path_layout
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import initialize_writable_directories, inspect_media_tools
@@ -62,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         executor = BlockingIOExecutor(application_settings.blocking_io_workers)
         app.state.blocking_io = executor
+        app.state.media_process_gate = MediaProcessGate()
         process_lock: ProcessLock | None = None
         database_engine = None
         try:
@@ -112,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 run_blocking=executor.run,
                 events=app.state.job_events,
                 plex_token_loader=load_cached_plex_token,
+                media_process_gate=app.state.media_process_gate,
             )
             await app.state.job_runner.start()
             yield

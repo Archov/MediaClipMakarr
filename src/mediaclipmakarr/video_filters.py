@@ -10,7 +10,7 @@ from mediaclipmakarr.hdr import (
     planned_hdr_strategy,
 )
 
-_SIZE_FILTER = (
+_CLIP_SIZE_FILTER = (
     "scale=w='min(1920,iw)':h='min(1080,ih)':"
     "force_original_aspect_ratio=decrease:force_divisible_by=2"
 )
@@ -18,6 +18,44 @@ _SIZE_FILTER = (
 
 def build_video_base_filter(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -> str:
     """Return the pre-subtitle filter chain for the immutable render strategy."""
+    return _build_video_filter(
+        hdr,
+        strategy,
+        size_filter=_CLIP_SIZE_FILTER,
+        output_pixel_format="yuv420p",
+    )
+
+
+def build_video_frame_filter(
+    hdr: HdrCapabilities,
+    strategy: HdrRenderStrategy,
+    *,
+    max_width: int | None = None,
+    max_height: int | None = None,
+) -> str:
+    """Return a subtitle-free still-frame filter, optionally bounded for a thumbnail."""
+    if (max_width is None) != (max_height is None):
+        raise ValueError("Frame dimensions must either both be set or both be omitted.")
+    size_filter = (
+        _bounded_size_filter(max_width, max_height)
+        if max_width is not None and max_height is not None
+        else None
+    )
+    return _build_video_filter(
+        hdr,
+        strategy,
+        size_filter=size_filter,
+        output_pixel_format="rgb24",
+    )
+
+
+def _build_video_filter(
+    hdr: HdrCapabilities,
+    strategy: HdrRenderStrategy,
+    *,
+    size_filter: str | None,
+    output_pixel_format: str,
+) -> str:
     enforce_dolby_vision_policy(hdr)
     expected = planned_hdr_strategy(hdr)
     if strategy != expected:
@@ -31,7 +69,7 @@ def build_video_base_filter(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -
             },
         )
     if strategy == "sdr":
-        return f"{_SIZE_FILTER},format=yuv420p"
+        return _finish_filter(size_filter, output_pixel_format)
 
     transfer = "smpte2084" if strategy == "tone_map_hdr10" else "arib-std-b67"
     primaries = _source_value(hdr.color.color_primaries, "bt2020")
@@ -44,8 +82,21 @@ def build_video_base_filter(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -
         "format=gbrpf32le,"
         "tonemap=tonemap=mobius:param=0.3:desat=0,"
         "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=limited,"
-        f"{_SIZE_FILTER},format=yuv420p"
+        f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
     )
+
+
+def _bounded_size_filter(max_width: int, max_height: int) -> str:
+    if max_width <= 0 or max_height <= 0:
+        raise ValueError("Maximum frame dimensions must be positive.")
+    return (
+        f"scale=w='min({max_width},iw)':h='min({max_height},ih)':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
+
+
+def _finish_filter(size_filter: str | None, output_pixel_format: str) -> str:
+    return f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
 
 
 def output_color_args() -> list[str]:
