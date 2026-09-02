@@ -37,18 +37,48 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <AppBar position="static" color="transparent" elevation={0}>
-        <Toolbar sx={{ gap: 1, flexWrap: "wrap", py: 1 }}>
-          <ContentCutRounded sx={{ mr: 1 }} />
-          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 700, minWidth: 180 }}>
-            MediaClipMakarr
-          </Typography>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mr: { sm: 2 } }}>
+      <AppBar
+        position="sticky"
+        color="transparent"
+        elevation={0}
+        sx={{
+          top: 0,
+          bgcolor: "rgba(11, 17, 32, 0.92)",
+          backdropFilter: "blur(10px)",
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        <Toolbar
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", sm: "1fr auto 1fr" },
+            alignItems: "center",
+            gap: 2,
+            py: 1,
+          }}
+        >
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ justifySelf: { sm: "start" }, minWidth: 0 }}>
+            <ContentCutRounded />
+            <Typography variant="h6" sx={{ fontWeight: 700, whiteSpace: "nowrap" }}>
+              MediaClipMakarr
+            </Typography>
+          </Stack>
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            useFlexGap
+            flexWrap="wrap"
+            sx={{ justifySelf: "center" }}
+          >
             <Button color={page === "make-clip" ? "primary" : "inherit"} startIcon={<ContentCutRounded />} variant={page === "make-clip" ? "outlined" : "text"} onClick={() => setPage("make-clip")}>Clip</Button>
             <Button color={page === "library" ? "primary" : "inherit"} startIcon={<VideoLibraryRounded />} variant={page === "library" ? "outlined" : "text"} onClick={() => setPage("library")}>Library</Button>
             <Button color={page === "settings" ? "primary" : "inherit"} startIcon={<SettingsRounded />} variant={page === "settings" ? "outlined" : "text"} onClick={() => setPage("settings")}>Settings</Button>
           </Stack>
-          {health.data && <Chip label={health.data.status.toUpperCase()} color={healthColor} size="small" />}
+          <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }}>
+            {health.data && <Chip label={health.data.status.toUpperCase()} color={healthColor} size="small" />}
+          </Stack>
         </Toolbar>
       </AppBar>
       <Container maxWidth={page === "library" ? "xl" : "md"} sx={{ py: page === "library" ? { xs: 1.5, md: 2.5 } : { xs: 4, md: 7 } }}>
