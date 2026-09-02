@@ -53,7 +53,6 @@ export function MakeClipScreen() {
   const [endMs, setEndMs] = useState<number | null>(null);
   const [startInput, setStartInput] = useState("");
   const [endInput, setEndInput] = useState("");
-  const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
   const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
@@ -218,8 +217,7 @@ export function MakeClipScreen() {
                 sessionIdentity={selectedSession.session_identity}
                 mediaIdentity={selectedSession.media_identity}
                 mediaDurationMs={selectedSession.duration_ms}
-                adjustmentSeconds={adjustmentSeconds}
-                onAdjustmentChange={setAdjustmentSeconds}
+                mediaFrameRate={capabilities.data?.frame_rate ?? null}
                 onStartChange={handleStartChange}
                 onEndChange={handleEndChange}
               >

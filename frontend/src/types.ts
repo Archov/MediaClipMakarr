@@ -188,6 +188,7 @@ export interface HdrCapabilities {
 
 export interface MediaCapabilities {
   duration_ms: number | null;
+  frame_rate: number | null;
   video_tracks: TrackDescriptor[];
   audio_tracks: TrackDescriptor[];
   subtitle_tracks: TrackDescriptor[];
