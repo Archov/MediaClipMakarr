@@ -19,7 +19,6 @@ import type {
   ClipCreateRequest,
   JobSnapshot,
   PlexSession,
-  PlexSessionSnapshotStatus,
 } from "../../types";
 import { ClipBoundaryEditor } from "./ClipBoundaryEditor";
 import { displayedPosition, useClock, useJobSnapshot, useLivePlexSessions } from "./hooks";
@@ -28,20 +27,6 @@ import { MediaErrorAlert, structuredErrorFrom } from "./MediaErrorAlert";
 import { MediaTrackSelectors } from "./MediaTrackSelectors";
 import { SessionList } from "./SessionList";
 import { initialTrackSelection } from "./trackSelection";
-
-const sessionStatusSeverity: Record<
-  PlexSessionSnapshotStatus,
-  "success" | "info" | "warning" | "error"
-> = {
-  ok: "success",
-  not_configured: "info",
-  invalid_url: "error",
-  invalid_token: "error",
-  http_error: "warning",
-  invalid_response: "error",
-  unreachable: "warning",
-  error: "error",
-};
 
 const ACTIVE_CLIP_JOB_KEY = "mediaclipmakarr.activeClipJobId";
 
@@ -191,11 +176,6 @@ export function MakeClipScreen() {
               </Stack>
             )}
             {sessions.error && <Alert severity="error">{sessions.error.message}</Alert>}
-            {snapshot && (
-              <Alert severity={sessionStatusSeverity[snapshot.status]}>
-                {snapshot.message}
-              </Alert>
-            )}
             {selectedSessionEnded && (
               <Alert severity="warning">The selected Plex session ended.</Alert>
             )}

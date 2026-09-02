@@ -1,7 +1,6 @@
 import AddRounded from "@mui/icons-material/AddRounded";
 import ChevronLeftRounded from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
-import ImageSearchRounded from "@mui/icons-material/ImageSearchRounded";
 import PlayForWorkRounded from "@mui/icons-material/PlayForWorkRounded";
 import RemoveRounded from "@mui/icons-material/RemoveRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
@@ -173,14 +172,40 @@ export function ClipBoundaryEditor({
     });
   }, [endMs, mediaIdentity, sessionIdentity, startMs]);
 
+  const commitStartPreview = (positionMs: number | null) => {
+    if (positionMs === null) {
+      setStartPreview(null);
+      return;
+    }
+    setStartPreview((current) => ({
+      sessionIdentity,
+      mediaIdentity,
+      positionMs,
+      version: (current?.version ?? 0) + 1,
+    }));
+  };
+
+  const commitEndPreview = (positionMs: number | null) => {
+    if (positionMs === null) {
+      setEndPreview(null);
+      return;
+    }
+    setEndPreview((current) => ({
+      sessionIdentity,
+      mediaIdentity,
+      positionMs,
+      version: (current?.version ?? 0) + 1,
+    }));
+  };
+
   const setStart = (value: number | null) => {
-    setStartPreview(null);
     onStartChange(formatTimestampMs(value), value);
+    commitStartPreview(value);
   };
 
   const setEnd = (value: number | null) => {
-    setEndPreview(null);
     onEndChange(formatTimestampMs(value), value);
+    commitEndPreview(value);
   };
 
   const adjustStart = (direction: 1 | -1) => {
@@ -196,19 +221,7 @@ export function ClipBoundaryEditor({
 
   return (
     <Stack spacing={2}>
-      <Stack
-        direction={{ xs: "column", sm: "row" }}
-        spacing={1}
-        justifyContent="space-between"
-        alignItems={{ sm: "baseline" }}
-      >
-        <Typography variant="h6">Clip boundaries</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-          Current position {formatMilliseconds(livePositionMs)}
-        </Typography>
-      </Stack>
-
-      <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start">
+      <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
           <PreviewSlot label="Start" preview={startPreview} />
           <Stack direction="row" spacing={1} alignItems="flex-start">
@@ -217,12 +230,15 @@ export function ClipBoundaryEditor({
               placeholder="00:00:00.000"
               value={startInput}
               error={Boolean(startParse.error)}
-              helperText={startParse.error ?? "HH:MM:SS.mmm"}
+              helperText={startParse.error}
               onChange={(event) => {
                 const input = event.target.value;
                 const parsed = parseTimestampMs(input);
                 setStartPreview(null);
                 onStartChange(input, parsed.error ? null : parsed.value);
+              }}
+              onBlur={() => {
+                if (!startParse.error) commitStartPreview(startParse.value);
               }}
               sx={{ width: { xs: "15ch", sm: "16ch" } }}
             />
@@ -238,23 +254,6 @@ export function ClipBoundaryEditor({
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title="preview">
-              <span>
-                <IconButton
-                  aria-label="Preview Start frame"
-                  disabled={startMs === null}
-                  onClick={() => startMs !== null && setStartPreview((current) => ({
-                    sessionIdentity,
-                    mediaIdentity,
-                    positionMs: startMs,
-                    version: (current?.version ?? 0) + 1,
-                  }))}
-                  sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
-                >
-                  <ImageSearchRounded />
-                </IconButton>
-              </span>
-            </Tooltip>
           </Stack>
         </Stack>
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
@@ -265,12 +264,15 @@ export function ClipBoundaryEditor({
               placeholder="00:00:00.000"
               value={endInput}
               error={Boolean(endParse.error)}
-              helperText={endParse.error ?? "HH:MM:SS.mmm"}
+              helperText={endParse.error}
               onChange={(event) => {
                 const input = event.target.value;
                 const parsed = parseTimestampMs(input);
                 setEndPreview(null);
                 onEndChange(input, parsed.error ? null : parsed.value);
+              }}
+              onBlur={() => {
+                if (!endParse.error) commitEndPreview(endParse.value);
               }}
               sx={{ width: { xs: "15ch", sm: "16ch" } }}
             />
@@ -283,23 +285,6 @@ export function ClipBoundaryEditor({
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >
                   <PlayForWorkRounded />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="preview">
-              <span>
-                <IconButton
-                  aria-label="Preview End frame"
-                  disabled={endMs === null}
-                  onClick={() => endMs !== null && setEndPreview((current) => ({
-                    sessionIdentity,
-                    mediaIdentity,
-                    positionMs: endMs,
-                    version: (current?.version ?? 0) + 1,
-                  }))}
-                  sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
-                >
-                  <ImageSearchRounded />
                 </IconButton>
               </span>
             </Tooltip>
@@ -318,24 +303,23 @@ export function ClipBoundaryEditor({
               onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds - 1))}
               sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
             >
-              <RemoveRounded fontSize="small" />
+              <ChevronLeftRounded fontSize="small" />
             </IconButton>
             <TextField
               inputRef={inputRef}
-              type="number"
+              type="text"
               variant="standard"
               value={adjustmentSeconds}
               onChange={(event) => {
-                const value = Number(event.target.value);
+                const value = Number(event.target.value.replace(/[^0-9]/g, ""));
                 onAdjustmentChange(
                   Number.isFinite(value) ? clampAdjustmentSeconds(Math.trunc(value)) : MIN_ADJUSTMENT_SECONDS,
                 );
               }}
               slotProps={{
                 htmlInput: {
-                  max: MAX_ADJUSTMENT_SECONDS,
-                  min: MIN_ADJUSTMENT_SECONDS,
-                  step: 1,
+                  inputMode: "numeric",
+                  pattern: "[0-9]*",
                   style: { textAlign: "center", width: "2.5ch" },
                 },
                 input: {
@@ -350,7 +334,7 @@ export function ClipBoundaryEditor({
               onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds + 1))}
               sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
             >
-              <AddRounded fontSize="small" />
+              <ChevronRightRounded fontSize="small" />
             </IconButton>
           </Stack>
         </Stack>
@@ -362,7 +346,7 @@ export function ClipBoundaryEditor({
             onClick={() => adjustStart(-1)}
             sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
           >
-            <ChevronLeftRounded fontSize="small" />
+            <RemoveRounded fontSize="small" />
           </IconButton>
           <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
             Start
@@ -373,7 +357,7 @@ export function ClipBoundaryEditor({
             onClick={() => adjustStart(1)}
             sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
           >
-            <ChevronRightRounded fontSize="small" />
+            <AddRounded fontSize="small" />
           </IconButton>
         </Stack>
 
@@ -384,7 +368,7 @@ export function ClipBoundaryEditor({
             onClick={() => adjustEnd(-1)}
             sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
           >
-            <ChevronLeftRounded fontSize="small" />
+            <RemoveRounded fontSize="small" />
           </IconButton>
           <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
             End
@@ -395,7 +379,7 @@ export function ClipBoundaryEditor({
             onClick={() => adjustEnd(1)}
             sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
           >
-            <ChevronRightRounded fontSize="small" />
+            <AddRounded fontSize="small" />
           </IconButton>
         </Stack>
 
