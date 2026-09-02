@@ -1,4 +1,6 @@
 import AddRounded from "@mui/icons-material/AddRounded";
+import ChevronLeftRounded from "@mui/icons-material/ChevronLeftRounded";
+import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import ImageSearchRounded from "@mui/icons-material/ImageSearchRounded";
 import PlayForWorkRounded from "@mui/icons-material/PlayForWorkRounded";
 import RemoveRounded from "@mui/icons-material/RemoveRounded";
@@ -8,6 +10,7 @@ import {
   Box,
   Button,
   IconButton,
+  InputAdornment,
   Stack,
   TextField,
   Tooltip,
@@ -20,18 +23,24 @@ import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import { SessionFrameImage } from "./SessionFrameImage";
 
 const MAX_ADJUSTMENT_SECONDS = 99;
+const MIN_ADJUSTMENT_SECONDS = 1;
+
+const pillSx = {
+  display: "flex",
+  alignItems: "center",
+  border: 1,
+  borderColor: "divider",
+  borderRadius: 1,
+  overflow: "hidden",
+} as const;
 
 function clampAdjustmentSeconds(seconds: number): number {
-  return Math.min(MAX_ADJUSTMENT_SECONDS, Math.max(-MAX_ADJUSTMENT_SECONDS, seconds));
+  return Math.min(MAX_ADJUSTMENT_SECONDS, Math.max(MIN_ADJUSTMENT_SECONDS, seconds));
 }
 
 function clampBoundaryMs(value: number, maximumMs: number | null | undefined): number {
   const nonNegative = Math.max(0, Math.floor(value));
   return maximumMs == null ? nonNegative : Math.min(nonNegative, maximumMs);
-}
-
-function adjustmentLabel(seconds: number): string {
-  return seconds > 0 ? `+${seconds}` : seconds.toString();
 }
 
 function formatMilliseconds(value: number | null): string {
@@ -174,31 +183,29 @@ export function ClipBoundaryEditor({
     onEndChange(formatTimestampMs(value), value);
   };
 
-  const adjustStart = () => {
+  const adjustStart = (direction: 1 | -1) => {
     if (startMs === null) return;
-    setStart(clampBoundaryMs(startMs + adjustmentSeconds * 1_000, mediaDurationMs));
+    setStart(clampBoundaryMs(startMs + direction * adjustmentSeconds * 1_000, mediaDurationMs));
   };
 
-  const adjustEnd = () => {
+  const adjustEnd = (direction: 1 | -1) => {
     const baseMs = endMs ?? startMs;
     if (baseMs === null) return;
-    setEnd(clampBoundaryMs(baseMs + adjustmentSeconds * 1_000, mediaDurationMs));
+    setEnd(clampBoundaryMs(baseMs + direction * adjustmentSeconds * 1_000, mediaDurationMs));
   };
 
   return (
     <Stack spacing={2}>
       <Stack
         direction={{ xs: "column", sm: "row" }}
-        spacing={2}
+        spacing={1}
         justifyContent="space-between"
-        alignItems={{ sm: "center" }}
+        alignItems={{ sm: "baseline" }}
       >
-        <Box>
-          <Typography variant="h6">Clip boundaries</Typography>
-          <Typography color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-            Current position {formatMilliseconds(livePositionMs)}
-          </Typography>
-        </Box>
+        <Typography variant="h6">Clip boundaries</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+          Current position {formatMilliseconds(livePositionMs)}
+        </Typography>
       </Stack>
 
       <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start">
@@ -300,55 +307,98 @@ export function ClipBoundaryEditor({
         </Stack>
       </Stack>
 
-      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start">
-        <TextField
-          inputRef={inputRef}
-          type="number"
-          label="Seconds"
-          value={adjustmentSeconds}
-          onChange={(event) => {
-            const value = Number(event.target.value);
-            onAdjustmentChange(
-              Number.isFinite(value) ? clampAdjustmentSeconds(Math.trunc(value)) : 0,
-            );
-          }}
-          slotProps={{
-            htmlInput: { max: MAX_ADJUSTMENT_SECONDS, min: -MAX_ADJUSTMENT_SECONDS, step: 1 },
-          }}
-          sx={{ width: "12ch" }}
-        />
-        <Stack direction="row" spacing={0.5} sx={{ minHeight: 56 }}>
+      <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="center" justifyContent="center">
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary", letterSpacing: "0.04em" }}>
+            NUDGE BY
+          </Typography>
+          <Stack direction="row" alignItems="center" sx={pillSx}>
+            <IconButton
+              aria-label="Decrease seconds"
+              onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds - 1))}
+              sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
+            >
+              <RemoveRounded fontSize="small" />
+            </IconButton>
+            <TextField
+              inputRef={inputRef}
+              type="number"
+              variant="standard"
+              value={adjustmentSeconds}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                onAdjustmentChange(
+                  Number.isFinite(value) ? clampAdjustmentSeconds(Math.trunc(value)) : MIN_ADJUSTMENT_SECONDS,
+                );
+              }}
+              slotProps={{
+                htmlInput: {
+                  max: MAX_ADJUSTMENT_SECONDS,
+                  min: MIN_ADJUSTMENT_SECONDS,
+                  step: 1,
+                  style: { textAlign: "center", width: "2.5ch" },
+                },
+                input: {
+                  disableUnderline: true,
+                  endAdornment: <InputAdornment position="end">s</InputAdornment>,
+                },
+              }}
+              sx={{ px: 1 }}
+            />
+            <IconButton
+              aria-label="Increase seconds"
+              onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds + 1))}
+              sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
+            >
+              <AddRounded fontSize="small" />
+            </IconButton>
+          </Stack>
+        </Stack>
+
+        <Stack direction="row" alignItems="center" sx={pillSx}>
           <IconButton
-            aria-label="Decrease seconds"
-            onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds - 1))}
-            sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+            aria-label="Nudge start earlier"
+            disabled={startMs === null}
+            onClick={() => adjustStart(-1)}
+            sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
           >
-            <RemoveRounded />
+            <ChevronLeftRounded fontSize="small" />
           </IconButton>
+          <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+            Start
+          </Typography>
           <IconButton
-            aria-label="Increase seconds"
-            onClick={() => onAdjustmentChange(clampAdjustmentSeconds(adjustmentSeconds + 1))}
-            sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+            aria-label="Nudge start later"
+            disabled={startMs === null}
+            onClick={() => adjustStart(1)}
+            sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
           >
-            <AddRounded />
+            <ChevronRightRounded fontSize="small" />
           </IconButton>
         </Stack>
-        <Button
-          variant="outlined"
-          disabled={startMs === null}
-          onClick={adjustStart}
-          sx={{ minHeight: 56, textTransform: "none", whiteSpace: "nowrap", width: 116 }}
-        >
-          Start {adjustmentLabel(adjustmentSeconds)}s
-        </Button>
-        <Button
-          variant="outlined"
-          disabled={endMs === null && startMs === null}
-          onClick={adjustEnd}
-          sx={{ minHeight: 56, textTransform: "none", whiteSpace: "nowrap", width: 116 }}
-        >
-          End {adjustmentLabel(adjustmentSeconds)}s
-        </Button>
+
+        <Stack direction="row" alignItems="center" sx={pillSx}>
+          <IconButton
+            aria-label="Nudge end earlier"
+            disabled={endMs === null && startMs === null}
+            onClick={() => adjustEnd(-1)}
+            sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
+          >
+            <ChevronLeftRounded fontSize="small" />
+          </IconButton>
+          <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+            End
+          </Typography>
+          <IconButton
+            aria-label="Nudge end later"
+            disabled={endMs === null && startMs === null}
+            onClick={() => adjustEnd(1)}
+            sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
+          >
+            <ChevronRightRounded fontSize="small" />
+          </IconButton>
+        </Stack>
+
         <Button
           startIcon={<RestartAltRounded />}
           variant="outlined"
@@ -358,19 +408,19 @@ export function ClipBoundaryEditor({
             setStart(null);
             setEnd(null);
           }}
-          sx={{ minHeight: 56 }}
         >
           Clear
         </Button>
       </Stack>
 
-      {children}
-
       {startMs !== null && endMs !== null && endMs > startMs && (
-        <Typography color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+        <Typography color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums", textAlign: "center" }}>
           Selected duration {formatMilliseconds(endMs - startMs)}
         </Typography>
       )}
+
+      {children}
+
       {rangeError && <Alert severity="warning">{rangeError}</Alert>}
     </Stack>
   );
