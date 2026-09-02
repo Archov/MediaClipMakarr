@@ -1,6 +1,13 @@
 import { createTheme } from "@mui/material";
 
 export const theme = createTheme({
+  components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        html: { scrollbarGutter: "stable" },
+      },
+    },
+  },
   palette: {
     mode: "dark",
     primary: { main: "#60a5fa" },

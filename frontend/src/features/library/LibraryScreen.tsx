@@ -119,9 +119,10 @@ function ClipAction({ label, icon, large, href, color = "primary", onClick }: { 
   return <Tooltip title={label}><IconButton size="small" color={color} aria-label={label} onClick={stopAndRun}>{icon}</IconButton></Tooltip>;
 }
 
-function ClipCard({ clip, mode, size, expanded, onToggle, onPlay, onEdit, onDelete }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void }) {
+function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void }) {
   const metadata = clipMetadata(clip);
   const isList = mode === "list";
+  const detailsVisible = isList || expanded;
   const [playArmed, setPlayArmed] = useState(false);
   useEffect(() => {
     setPlayArmed(false);
@@ -138,22 +139,22 @@ function ClipCard({ clip, mode, size, expanded, onToggle, onPlay, onEdit, onDele
       onKeyDown={(event) => {
         if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); onToggle(); }
       }}
-      sx={{ cursor: "pointer", display: isList ? "grid" : "block", gridTemplateColumns: isList ? `${Math.min(widths[size], 240)}px minmax(0, 1fr)` : undefined, alignItems: "start", alignSelf: "start", width: "100%", minWidth: 0, maxWidth: "100%", height: "fit-content", overflow: "hidden", transition: "box-shadow 120ms ease", "&:hover": { boxShadow: 5 } }}
+      sx={{ cursor: "pointer", display: isList ? "grid" : "block", gridTemplateColumns: isList ? `${listThumbnailWidth}px minmax(0, 1fr)` : undefined, alignItems: "start", alignSelf: "start", width: "100%", minWidth: 0, maxWidth: "100%", height: "fit-content", overflow: "hidden", transition: "box-shadow 120ms ease", "&:hover": { boxShadow: 5 } }}
     >
       <ClipThumbnail clip={clip} expanded={expanded} onActivate={() => {
         if (!expanded) onToggle();
         else if (playArmed) onPlay(clip);
       }} />
       <Box sx={{ minWidth: 0 }}>
-        <CardContent sx={{ px: 1, py: 0.75, "&:last-child": { pb: expanded ? 0.5 : 0.75 } }}>
-          <Typography variant={size === "large" ? "subtitle1" : "body2"} fontWeight={700} lineHeight={1.25} noWrap={!expanded} title={clip.title}>{clip.title}</Typography>
-          <Collapse in={expanded} unmountOnExit>
+        <CardContent sx={{ px: 1, py: 0.75, "&:last-child": { pb: detailsVisible ? 0.5 : 0.75 } }}>
+          <Typography variant={size === "large" ? "subtitle1" : "body2"} fontWeight={700} lineHeight={1.25} noWrap={!detailsVisible} title={clip.title}>{clip.title}</Typography>
+          <Collapse in={detailsVisible} unmountOnExit>
             <Stack spacing={0.15} sx={{ pt: 0.75 }}>
               {metadata.map((line) => <Typography key={line} variant="caption" color="text.secondary" lineHeight={1.35}>{line}</Typography>)}
             </Stack>
           </Collapse>
         </CardContent>
-        <Collapse in={expanded} unmountOnExit>
+        <Collapse in={detailsVisible} unmountOnExit>
           <CardActions sx={{ px: 0.5, pt: 0, pb: 0.5, gap: size === "large" ? 0 : 0.25, flexWrap: "wrap" }}>
             <ClipAction label="Play" icon={<PlayArrowRounded />} large={size === "large"} onClick={() => onPlay(clip)} />
             <ClipAction label="Edit" icon={<EditRounded />} large={size === "large"} onClick={() => onEdit(clip)} />
@@ -167,6 +168,8 @@ function ClipCard({ clip, mode, size, expanded, onToggle, onPlay, onEdit, onDele
 }
 
 export function LibraryScreen() {
+  const theme = useTheme();
+  const compactLayout = useMediaQuery(theme.breakpoints.down("sm"));
   const initial = useMemo(currentParams, []);
   const [search, setSearch] = useState(initial.get("search") ?? "");
   const [library, setLibrary] = useState(initial.get("library") ?? "");
@@ -280,6 +283,11 @@ export function LibraryScreen() {
     + movies.length + shows.length + episodes.length
     + (sort === "newest" ? 0 : 1);
   const gridColumnCount = cardColumnCount(size, layoutWidth);
+  const gridGap = compactLayout ? 6 : 10;
+  const listThumbnailWidth = layoutWidth
+    ? (layoutWidth - gridGap * (gridColumnCount - 1)) / gridColumnCount
+    : widths[size];
+  const listRowWidth = Math.min(layoutWidth || listThumbnailWidth * 3, listThumbnailWidth * 3);
 
   const updateFilter = (key: string, value: string, setter: (value: string) => void) => {
     setter(value);
@@ -348,15 +356,15 @@ export function LibraryScreen() {
       {columnize(items, gridColumnCount).map((column, columnIndex) => (
         <Stack key={columnIndex} spacing={{ xs: 0.75, sm: 1.25 }} sx={{ minWidth: 0, maxWidth: "100%" }}>
           {column.map((clip) => (
-            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
+            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
           ))}
         </Stack>
       ))}
     </Box>
   ) : (
-    <Box sx={{ display: "grid", alignItems: "start", gap: 1 }}>
+    <Box sx={{ display: "grid", alignItems: "start", alignSelf: "center", gap: 1, width: "100%", maxWidth: listRowWidth, mx: "auto" }}>
       {items.map((clip) => (
-        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
+        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
       ))}
     </Box>
   );
