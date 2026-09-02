@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from mediaclipmakarr.hdr import AdvancedMediaError, HdrCapabilities, VideoColorMetadata
-from mediaclipmakarr.video_filters import build_video_base_filter, output_color_args
+from mediaclipmakarr.video_filters import (
+    build_video_base_filter,
+    build_video_frame_filter,
+    output_color_args,
+)
 
 
 @pytest.mark.parametrize(
@@ -51,6 +55,33 @@ def test_output_is_explicitly_tagged_limited_range_bt709() -> None:
         "-color_range",
         "tv",
     ]
+
+
+def test_export_frame_tone_maps_without_reducing_source_resolution() -> None:
+    hdr = HdrCapabilities(
+        hdr10=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="smpte2084",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+
+    export_graph = build_video_frame_filter(hdr, "tone_map_hdr10")
+    thumbnail_graph = build_video_frame_filter(
+        hdr,
+        "tone_map_hdr10",
+        max_width=480,
+        max_height=270,
+    )
+
+    assert "tonemap=tonemap=mobius" in export_graph
+    assert "scale=w=" not in export_graph
+    assert export_graph.endswith("format=rgb24")
+    assert "min(480,iw)" in thumbnail_graph
+    assert "min(270,ih)" in thumbnail_graph
+    assert thumbnail_graph.endswith("format=rgb24")
 
 
 def test_unsafe_dolby_vision_is_rejected_before_filter_graph_construction() -> None:

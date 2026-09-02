@@ -25,6 +25,7 @@ from mediaclipmakarr.clip_library import (
     thumbnail_path,
 )
 from mediaclipmakarr.clips import get_clip, insert_clip
+from mediaclipmakarr.concurrency import MediaProcessGate
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
@@ -94,6 +95,7 @@ class JobRunner:
         renderer: ClipRenderer = render_clip_file,
         plex_token_loader: PlexTokenLoader | None = None,
         progress_persist_interval_seconds: float = 1.0,
+        media_process_gate: MediaProcessGate | None = None,
     ) -> None:
         self.engine = engine
         self.settings = settings
@@ -102,6 +104,7 @@ class JobRunner:
         self.renderer = renderer
         self.plex_token_loader = plex_token_loader
         self.progress_persist_interval_seconds = progress_persist_interval_seconds
+        self.media_process_gate = media_process_gate or MediaProcessGate()
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
@@ -152,7 +155,8 @@ class JobRunner:
                 continue
             await self._publish_durable_job_update(claimed.id)
             try:
-                await self._execute_claimed_job(claimed)
+                async with self.media_process_gate.slot():
+                    await self._execute_claimed_job(claimed)
             except asyncio.CancelledError:
                 await self._cleanup_job_workdir(claimed.id, "application shutdown")
                 with contextlib.suppress(Exception):

@@ -136,6 +136,22 @@ export async function fetchMediaCapabilities(sessionIdentity: string): Promise<M
   return parseResponse<MediaCapabilities>(response, "Media capabilities request");
 }
 
+export function sessionFrameUrl(
+  sessionIdentity: string,
+  mediaIdentity: string,
+  positionMs: number,
+  captureVersion: number,
+  download = false,
+): string {
+  const params = new URLSearchParams({
+    media_identity: mediaIdentity,
+    position_ms: String(positionMs),
+    v: String(captureVersion),
+  });
+  if (download) params.set("download", "true");
+  return `/api/sessions/${encodeURIComponent(sessionIdentity)}/frame?${params}`;
+}
+
 export async function createClip(request: ClipCreateRequest): Promise<JobSnapshot> {
   const response = await fetch("/api/clips", {
     method: "POST",

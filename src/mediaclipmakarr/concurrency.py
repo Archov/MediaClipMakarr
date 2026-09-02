@@ -3,11 +3,24 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from functools import partial
 from typing import ParamSpec, TypeVar
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+class MediaProcessGate:
+    """Keep FFmpeg mutations and live frame extraction sequential."""
+
+    def __init__(self) -> None:
+        self._semaphore = asyncio.Semaphore(1)
+
+    @asynccontextmanager
+    async def slot(self):
+        async with self._semaphore:
+            yield
 
 
 class BlockingIOExecutor:
