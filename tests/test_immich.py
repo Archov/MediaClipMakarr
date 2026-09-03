@@ -12,8 +12,17 @@ async def test_valid_immich_credentials_pass_connection_test() -> None:
         if request.url.path == "/api/server/ping":
             return httpx.Response(200, json={"res": "pong"})
         assert request.headers["x-api-key"] == "valid-key"
-        if request.url.path == "/api/users/me":
-            return httpx.Response(200, json={"id": "user-1", "email": "user@example.com"})
+        if request.url.path == "/api/api-keys/me":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "key-1",
+                    "name": "mediaclipmakarr",
+                    "permissions": ["asset.upload", "tag.read"],
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z",
+                },
+            )
         assert request.url.path == "/api/server/version"
         return httpx.Response(200, json={"major": 1, "minor": 118, "patch": 0})
 
@@ -25,6 +34,7 @@ async def test_valid_immich_credentials_pass_connection_test() -> None:
     assert result.connected is True
     assert result.code == "IMMICH_CONNECTED"
     assert result.server_version == "1.118.0"
+    assert result.api_key_permissions == ["asset.upload", "tag.read"]
 
 
 @pytest.mark.asyncio
@@ -44,7 +54,7 @@ async def test_invalid_url_and_api_key_have_distinct_connection_failures() -> No
     def reject_key(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/server/ping":
             return httpx.Response(200, json={"res": "pong"})
-        assert request.url.path == "/api/users/me"
+        assert request.url.path == "/api/api-keys/me"
         return httpx.Response(401)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reject_key)) as client:
@@ -69,6 +79,50 @@ async def test_unreachable_server_is_not_reported_as_bad_credentials() -> None:
 
     assert result.connected is False
     assert result.code == "IMMICH_UNREACHABLE"
+
+
+@pytest.mark.asyncio
+async def test_key_scoped_to_only_the_documented_permissions_still_validates() -> None:
+    # A key created with exactly the scopes from the "Required permissions" dialog (no
+    # user.read) must still pass validation — the old /users/me check required user.read
+    # and rejected these otherwise-valid, minimally-scoped keys.
+    granted = [
+        "asset.upload",
+        "asset.update",
+        "asset.read",
+        "tag.read",
+        "tag.create",
+        "tag.asset",
+        "album.read",
+        "album.create",
+        "albumAsset.create",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/server/ping":
+            return httpx.Response(200, json={"res": "pong"})
+        if request.url.path == "/api/api-keys/me":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "key-1",
+                    "name": "mediaclipmakarr",
+                    "permissions": granted,
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z",
+                },
+            )
+        assert request.url.path == "/api/server/version"
+        return httpx.Response(200, json={"major": 1, "minor": 118, "patch": 0})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await check_immich_connection(
+            "http://immich.example:2283", "scoped-key", client=client
+        )
+
+    assert result.connected is True
+    assert result.code == "IMMICH_CONNECTED"
+    assert result.api_key_permissions == granted
 
 
 @pytest.mark.asyncio

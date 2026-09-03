@@ -96,6 +96,7 @@ export interface ImmichConnectionResult {
   code: string;
   message: string;
   server_version: string | null;
+  api_key_permissions: string[] | null;
 }
 
 export interface ImmichConnectionRequest {

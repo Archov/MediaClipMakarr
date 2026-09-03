@@ -26,6 +26,7 @@ class ImmichConnectionResult(BaseModel):
     code: str
     message: str
     server_version: str | None = None
+    api_key_permissions: list[str] | None = None
 
 
 class ImmichConnectionRequest(BaseModel):
@@ -86,8 +87,12 @@ async def test_immich_connection(
                 message="The configured server did not return a valid Immich ping response.",
             )
 
+        # /api-keys/me reports on the calling key itself and requires no permission
+        # beyond authentication (unlike /users/me, which needs the separate "user.read"
+        # scope) — it's the right endpoint both to validate the key and to see exactly
+        # which permissions it was granted.
         auth_response = await active_client.get(
-            f"{normalized_url}/api/users/me",
+            f"{normalized_url}/api/api-keys/me",
             headers={"Accept": "application/json", "x-api-key": immich_api_key},
         )
         if auth_response.status_code in {401, 403}:
@@ -106,14 +111,21 @@ async def test_immich_connection(
                 ),
             )
         try:
-            user_payload = auth_response.json()
+            api_key_payload = auth_response.json()
         except ValueError:
             return ImmichConnectionResult(
                 connected=False,
                 code="IMMICH_INVALID_RESPONSE",
                 message="Immich did not return a valid authenticated API response.",
             )
-        if not isinstance(user_payload, dict) or not user_payload.get("id"):
+        permissions = (
+            api_key_payload.get("permissions") if isinstance(api_key_payload, dict) else None
+        )
+        if (
+            not isinstance(api_key_payload, dict)
+            or not api_key_payload.get("id")
+            or not isinstance(permissions, list)
+        ):
             return ImmichConnectionResult(
                 connected=False,
                 code="IMMICH_INVALID_RESPONSE",
@@ -159,4 +171,5 @@ async def test_immich_connection(
         code="IMMICH_CONNECTED",
         message="Connected to Immich successfully.",
         server_version=server_version,
+        api_key_permissions=[str(scope) for scope in permissions],
     )

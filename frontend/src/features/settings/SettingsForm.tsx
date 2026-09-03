@@ -1,6 +1,8 @@
 import AddRounded from "@mui/icons-material/AddRounded";
 import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
 import ArrowUpwardRounded from "@mui/icons-material/ArrowUpwardRounded";
+import CancelRounded from "@mui/icons-material/CancelRounded";
+import CheckCircleRounded from "@mui/icons-material/CheckCircleRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import {
   Alert,
@@ -24,6 +26,7 @@ import {
   Link,
   List,
   ListItem,
+  ListItemIcon,
   ListItemText,
   MenuItem,
   Select,
@@ -261,6 +264,7 @@ export function SettingsForm({
         code: "IMMICH_CREDENTIALS_REQUIRED",
         message: "Enter the Immich API key when testing a different server URL.",
         server_version: null,
+        api_key_permissions: null,
       });
       return;
     }
@@ -303,6 +307,17 @@ export function SettingsForm({
       return reordered;
     });
   };
+
+  const grantedImmichPermissions = immichConnection?.connected
+    ? (immichConnection.api_key_permissions ?? [])
+    : null;
+  const hasAllImmichPermissions = grantedImmichPermissions?.includes("all") ?? false;
+  const extraImmichPermissions =
+    grantedImmichPermissions && !hasAllImmichPermissions
+      ? grantedImmichPermissions.filter(
+          (scope) => !IMMICH_REQUIRED_PERMISSIONS.some((permission) => permission.scope === scope),
+        )
+      : [];
 
   return (
     <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 3, alignItems: "start" }}>
@@ -579,34 +594,69 @@ export function SettingsForm({
       <Dialog open={immichPermissionsOpen} onClose={() => setImmichPermissionsOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Required Immich API key permissions</DialogTitle>
         <DialogContent>
+          {!grantedImmichPermissions && (
+            <Typography variant="body2" color="text.secondary" mb={2}>
+              Test the connection to see which of these permissions your key actually has.
+            </Typography>
+          )}
           <List dense disablePadding>
-            {IMMICH_REQUIRED_PERMISSIONS.map((permission) => (
-              <ListItem key={permission.scope} disableGutters alignItems="flex-start">
-                <ListItemText
-                  primary={
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Typography component="code" sx={{ fontFamily: "monospace", fontSize: 13.5 }}>
-                        {permission.scope}
-                      </Typography>
-                      {permission.conditional && (
-                        <Chip
-                          size="small"
-                          variant="outlined"
-                          color={immichManageRemote ? "primary" : "default"}
-                          label={immichManageRemote ? "required now" : "conditional"}
-                        />
-                      )}
-                    </Stack>
-                  }
-                  secondary={
-                    permission.conditional
-                      ? "Only required when “Manage Immich clips after upload” is enabled."
-                      : undefined
-                  }
-                />
-              </ListItem>
-            ))}
+            {IMMICH_REQUIRED_PERMISSIONS.map((permission) => {
+              const isGranted = grantedImmichPermissions
+                ? hasAllImmichPermissions || grantedImmichPermissions.includes(permission.scope)
+                : null;
+              return (
+                <ListItem key={permission.scope} disableGutters alignItems="center">
+                  <ListItemIcon sx={{ minWidth: 32 }}>
+                    {isGranted === true && <CheckCircleRounded color="success" fontSize="small" />}
+                    {isGranted === false && <CancelRounded color="error" fontSize="small" />}
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Typography component="code" sx={{ fontFamily: "monospace", fontSize: 13.5 }}>
+                          {permission.scope}
+                        </Typography>
+                        {permission.conditional && (
+                          <Tooltip title="Only required when “Manage Immich clips after upload” is enabled.">
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              color={immichManageRemote ? "primary" : "default"}
+                              label={immichManageRemote ? "required now" : "conditional"}
+                            />
+                          </Tooltip>
+                        )}
+                      </Stack>
+                    }
+                  />
+                </ListItem>
+              );
+            })}
           </List>
+          {grantedImmichPermissions && (
+            <>
+              <Divider sx={{ my: 1.5 }} />
+              {hasAllImmichPermissions ? (
+                <Typography variant="body2" color="text.secondary">
+                  This key has the <code>all</code> permission, so every scope above — and
+                  everything else — is granted.
+                </Typography>
+              ) : extraImmichPermissions.length > 0 ? (
+                <>
+                  <Typography variant="overline" color="text.secondary">Also granted (not required)</Typography>
+                  <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap mt={0.5}>
+                    {extraImmichPermissions.map((scope) => (
+                      <Chip key={scope} size="small" variant="outlined" label={scope} sx={{ fontFamily: "monospace" }} />
+                    ))}
+                  </Stack>
+                </>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  This key has exactly the permissions above — nothing extra.
+                </Typography>
+              )}
+            </>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setImmichPermissionsOpen(false)}>Close</Button>
