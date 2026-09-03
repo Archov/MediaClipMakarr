@@ -78,16 +78,21 @@ function ConnectionStatusPill({
   connection,
   pending,
   notConfiguredCode,
+  missingPermissions,
 }: {
   connection: { connected: boolean; code: string } | null;
   pending: boolean;
   notConfiguredCode: string;
+  missingPermissions?: boolean;
 }) {
   if (!connection && pending) {
     return <Chip size="small" variant="outlined" icon={<CircularProgress size={12} />} label="Checking…" />;
   }
   if (!connection) return null;
-  if (connection.connected) return <Chip size="small" color="success" label="Connected" />;
+  if (connection.connected) {
+    if (missingPermissions) return <Chip size="small" color="warning" label="Missing Permissions" />;
+    return <Chip size="small" color="success" label="Connected" />;
+  }
   if (connection.code === notConfiguredCode) {
     return <Chip size="small" variant="outlined" label="Not configured" />;
   }
@@ -318,6 +323,13 @@ export function SettingsForm({
           (scope) => !IMMICH_REQUIRED_PERMISSIONS.some((permission) => permission.scope === scope),
         )
       : [];
+  const immichMissingRequiredPermissions =
+    grantedImmichPermissions !== null &&
+    !hasAllImmichPermissions &&
+    IMMICH_REQUIRED_PERMISSIONS.some((permission) => {
+      const isNeeded = !permission.conditional || immichManageRemote;
+      return isNeeded && !grantedImmichPermissions.includes(permission.scope);
+    });
 
   return (
     <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 3, alignItems: "start" }}>
@@ -419,6 +431,7 @@ export function SettingsForm({
                   connection={immichConnection}
                   pending={testImmich.isPending}
                   notConfiguredCode="IMMICH_NOT_CONFIGURED"
+                  missingPermissions={immichMissingRequiredPermissions}
                 />
               </Stack>
 
