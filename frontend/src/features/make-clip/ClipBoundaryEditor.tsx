@@ -61,6 +61,10 @@ const NUDGE_UNIT_MS_PER_STEP: Record<"minutes" | "seconds", number> = {
   seconds: 1_000,
 };
 
+function nudgeUnitSuffix(unit: NudgeUnit, value: number): string {
+  return unit === "frames" && value > 1 ? "frames" : NUDGE_UNIT_SUFFIX[unit];
+}
+
 function clampAdjustmentValue(value: number): number {
   return Math.min(MAX_ADJUSTMENT_VALUE, Math.max(MIN_ADJUSTMENT_VALUE, value));
 }
@@ -468,7 +472,7 @@ export function ClipBoundaryEditor({
                   component="span"
                   sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary", whiteSpace: "nowrap" }}
                 >
-                  {NUDGE_UNIT_SUFFIX[adjustmentUnit]}
+                  {nudgeUnitSuffix(adjustmentUnit, adjustmentValue)}
                 </Typography>
               </Box>
             </Tooltip>
@@ -502,7 +506,7 @@ export function ClipBoundaryEditor({
             >
               <RemoveRounded fontSize="small" />
             </IconButton>
-            <Tooltip title="Add or Subtract time from the current start timestamps">
+            <Tooltip title="Add or Subtract time from the current start timestamp">
               <Typography
                 variant="body2"
                 sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap", cursor: "default", userSelect: "none" }}
@@ -529,7 +533,7 @@ export function ClipBoundaryEditor({
             >
               <RemoveRounded fontSize="small" />
             </IconButton>
-            <Tooltip title="Add or Subtract time from the current end timestamps">
+            <Tooltip title="Add or Subtract time from the current end timestamp">
               <Typography
                 variant="body2"
                 sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap", cursor: "default", userSelect: "none" }}
