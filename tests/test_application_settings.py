@@ -207,7 +207,7 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
                 "plex_token": candidate_secret,
             },
         )
-        blocked_url_change = client.put(
+        url_only_update = client.put(
             "/api/settings",
             json={"plex_url": "http://untrusted.example:32400"},
         )
@@ -233,8 +233,9 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert preserved.json()["plex_token_configured"] is True
     assert fetched.json()["plex_token_configured"] is True
     assert candidate_connection.json()["connected"] is True
-    assert blocked_url_change.status_code == 409
-    assert blocked_url_change.json()["detail"]["code"] == "PLEX_CREDENTIALS_REQUIRED"
+    assert url_only_update.status_code == 200
+    assert url_only_update.json()["plex_url"] == "http://untrusted.example:32400"
+    assert url_only_update.json()["plex_token_configured"] is True
     assert saved_connection.json()["connected"] is True
     assert url_only_connection.status_code == 422
     assert token_only_connection.status_code == 422
@@ -243,7 +244,7 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert all("input" not in error for error in conflicting_update.json()["detail"])
     assert observed_connections == [
         ("http://candidate-plex:32400", candidate_secret),
-        ("", replacement_secret),
+        ("http://untrusted.example:32400", replacement_secret),
     ]
     assert cleared.json()["plex_token_configured"] is False
     serialized_responses = (

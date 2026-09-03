@@ -2,7 +2,6 @@ import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import VideoLibraryRounded from "@mui/icons-material/VideoLibraryRounded";
 import { AppBar, Box, Button, Container, CssBaseline, Stack, ThemeProvider, Toolbar, Typography } from "@mui/material";
-import { useIsMutating } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { MakeClipScreen } from "../features/make-clip/MakeClipScreen";
@@ -23,7 +22,6 @@ export function App() {
     window.addEventListener("popstate", navigate);
     return () => window.removeEventListener("popstate", navigate);
   }, []);
-  const isSavingSettings = useIsMutating({ mutationKey: ["settingsGeneralSave"] }) > 0;
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -66,19 +64,8 @@ export function App() {
             <Button color={page === "library" ? "primary" : "inherit"} startIcon={<VideoLibraryRounded />} variant={page === "library" ? "outlined" : "text"} onClick={() => setPage("library")}>Library</Button>
             <Button color={page === "settings" ? "primary" : "inherit"} startIcon={<SettingsRounded />} variant={page === "settings" ? "outlined" : "text"} onClick={() => setPage("settings")}>Settings</Button>
           </Stack>
-          <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }}>
-            {page === "settings" && (
-              <Button
-                type="submit"
-                form="settings-general-form"
-                variant="contained"
-                size="small"
-                disabled={isSavingSettings}
-              >
-                {isSavingSettings ? "Saving…" : "Save"}
-              </Button>
-            )}
-          </Stack>
+          <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }} />
+
         </Toolbar>
       </AppBar>
       <Container

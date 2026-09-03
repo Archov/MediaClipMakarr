@@ -36,7 +36,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { testImmichConnection, testPlexConnection, updateSettings } from "../../api";
 import type {
@@ -52,6 +52,7 @@ import type {
 
 const x264Presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
 const SECRET_MASK = "●●●●●●●●";
+const AUTO_SAVE_DEBOUNCE_MS = 800;
 interface ImmichPermission {
   scope: string;
   conditional: boolean;
@@ -134,15 +135,24 @@ export function SettingsForm({
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
 
+  // Whenever `settings` refreshes from the server (initial load, or after a Test
+  // connection round-trip), the fields below are resynced to match it. That resync is
+  // not a user edit and must not itself trigger another auto-save — this flag tells the
+  // auto-save effect below to skip the pass it causes.
+  const skipNextAutoSave = useRef(true);
+
   useEffect(() => {
+    skipNextAutoSave.current = true;
     setPlexUrl(settings.plex_url);
   }, [settings.plex_url]);
 
   useEffect(() => {
+    skipNextAutoSave.current = true;
     setImmichUrl(settings.immich_url);
   }, [settings.immich_url]);
 
   useEffect(() => {
+    skipNextAutoSave.current = true;
     setPlexToken(secretDraft(settings.plex_token_configured));
     setImmichApiKey(secretDraft(settings.immich_api_key_configured));
     setImmichDefaultTag(settings.immich_default_tag);
@@ -158,36 +168,23 @@ export function SettingsForm({
 
   const managed = (field: ApplicationSettingField) => settings.environment_managed[field];
 
-  const saveGeneral = useMutation({
-    mutationKey: ["settingsGeneralSave"],
+  const autoSave = useMutation({
     mutationFn: (update: ApplicationSettingsUpdate) => updateSettings(update),
     onSuccess: (updated) => {
       queryClient.setQueryData(["settings"], updated);
     },
   });
 
-  const submitGeneral = (event: FormEvent) => {
-    event.preventDefault();
-
-    // Changing the Plex URL requires re-verifying the token via that card's own "Test
-    // connection" action (the token may not be valid on a different server) — silently
-    // dropping the typed URL here would report success while leaving it unsaved, so
-    // block the whole save and explain why. The Immich API key has no such coupling:
-    // its URL is a plain setting and saves like any other field below.
-    const plexUrlChangedWithoutToken = plexUrl !== settings.plex_url && !enteredSecret(plexToken);
-    if (plexUrlChangedWithoutToken) {
-      testPlex.reset();
-      setPlexConnection({
-        connected: false,
-        code: "PLEX_CREDENTIALS_REQUIRED",
-        message: "Enter the Plex token to save the changed Plex server URL, then use Test connection.",
-        server_name: null,
-        server_version: null,
-      });
+  // Everything here is plain configuration, not a secret — it saves itself shortly
+  // after the user stops changing it. Only the Plex token and Immich API key are
+  // withheld from this and saved solely via a successful "Test connection".
+  useEffect(() => {
+    if (skipNextAutoSave.current) {
+      skipNextAutoSave.current = false;
       return;
     }
-
-    saveGeneral.mutate({
+    const update: ApplicationSettingsUpdate = {
+      ...(!managed("plex_url") && { plex_url: plexUrl }),
       ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
       ...(!managed("timezone") && { timezone }),
       ...(!managed("x264_preset") && { x264_preset: x264Preset }),
@@ -198,8 +195,23 @@ export function SettingsForm({
       ...(!managed("immich_tag_library") && { immich_tag_library: immichTagLibrary }),
       ...(!managed("immich_tag_show") && { immich_tag_show: immichTagShow }),
       ...(!managed("immich_tag_episode") && { immich_tag_episode: immichTagEpisode }),
-    });
-  };
+    };
+    const timer = setTimeout(() => autoSave.mutate(update), AUTO_SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    plexUrl,
+    mappings,
+    timezone,
+    x264Preset,
+    immichUrl,
+    immichDefaultTag,
+    immichAutoUpload,
+    immichManageRemote,
+    immichTagLibrary,
+    immichTagShow,
+    immichTagEpisode,
+  ]);
 
   interface ConnectionCandidate<TRequest> {
     test: TRequest;
@@ -678,7 +690,7 @@ export function SettingsForm({
       </Stack>
 
       <Stack spacing={3}>
-      <Box component="form" id="settings-general-form" onSubmit={submitGeneral}>
+      <Box>
         <Stack spacing={3}>
         <Card variant="outlined">
           <CardContent>
@@ -773,7 +785,7 @@ export function SettingsForm({
                         helperText={
                           settings.timezone_configured
                             ? undefined
-                            : "Detected from this browser. Save settings to keep it."
+                            : "Detected from this browser."
                         }
                       />
                     )}
@@ -796,8 +808,14 @@ export function SettingsForm({
                 </Stack>
               </Stack>
 
-              {saveGeneral.error && <Alert severity="error">{saveGeneral.error.message}</Alert>}
-              {saveGeneral.data && <Alert severity="success">Settings saved.</Alert>}
+              {autoSave.error && <Alert severity="error">{autoSave.error.message}</Alert>}
+              <Typography variant="body2" color="text.secondary">
+                {autoSave.isPending
+                  ? "Saving…"
+                  : autoSave.isSuccess
+                    ? "All changes saved"
+                    : "Changes save automatically."}
+              </Typography>
             </Stack>
           </CardContent>
         </Card>

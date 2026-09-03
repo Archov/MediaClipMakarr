@@ -46,22 +46,6 @@ def build_router(application_settings: Settings) -> APIRouter:
                 },
             )
 
-        changes_plex_url = update.plex_url is not None and update.plex_url != effective.plex_url
-        supplies_plex_token = bool(update.plex_token and update.plex_token.strip())
-        if (
-            changes_plex_url
-            and effective.plex_token
-            and not supplies_plex_token
-            and not update.clear_plex_token
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PLEX_CREDENTIALS_REQUIRED",
-                    "message": "Enter the Plex token again when changing the Plex server URL.",
-                },
-            )
-
         values = serialize_update(update)
         if values:
             await save_persisted_application_settings(
