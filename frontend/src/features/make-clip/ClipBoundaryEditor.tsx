@@ -354,7 +354,7 @@ export function ClipBoundaryEditor({
                   aria-label="Export Start frame"
                   component="a"
                   href={exportFrameUrl(startPreview)}
-                  download={`start-frame-${startPreview?.positionMs ?? 0}ms.png`}
+                  download=""
                   disabled={!startPreview}
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >
@@ -402,7 +402,7 @@ export function ClipBoundaryEditor({
                   aria-label="Export End frame"
                   component="a"
                   href={exportFrameUrl(endPreview)}
-                  download={`end-frame-${endPreview?.positionMs ?? 0}ms.png`}
+                  download=""
                   disabled={!endPreview}
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >

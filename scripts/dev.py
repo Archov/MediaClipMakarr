@@ -151,6 +151,8 @@ def main() -> None:
     interrupted = False
     try:
         while True:
+            if frontend_process.poll() is not None or backend_process.poll() is not None:
+                break
             if restart_requested.is_set():
                 restart_requested.clear()
                 print("Backend source changed; restarting uvicorn...")
@@ -161,8 +163,6 @@ def main() -> None:
                     backend_process.wait()
                 backend_process = spawn(backend_command, PROJECT_ROOT)
                 continue
-            if frontend_process.poll() is not None or backend_process.poll() is not None:
-                break
             time.sleep(0.25)
     except KeyboardInterrupt:
         interrupted = True
