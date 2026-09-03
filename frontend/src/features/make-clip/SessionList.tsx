@@ -1,7 +1,5 @@
-import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import {
   Box,
-  Button,
   List,
   ListItemText,
   Stack,
@@ -63,15 +61,6 @@ export function SessionList({
   return <List disablePadding>{snapshot.sessions.map((session) => {
     const selected = session.session_identity === selectedSessionIdentity;
     const capture = captures[session.session_identity];
-    const exportUrl = capture
-      ? sessionFrameUrl(
-          session.session_identity,
-          capture.mediaIdentity,
-          capture.positionMs,
-          capture.captureVersion,
-          true,
-        )
-      : undefined;
     return <Box
       key={session.session_identity}
       role="button"
@@ -103,19 +92,6 @@ export function SessionList({
           <ListItemText primary={session.title} secondary={<SessionDetail session={session} />} slotProps={{ secondary: { component: "div" } }} sx={{ m: 0, minWidth: 0 }} />
         </Stack>
       </Box>
-      <Stack direction="row" justifyContent="flex-end" sx={{ px: 2, py: 1, borderTop: 1, borderColor: "divider" }}>
-        <Button
-          component="a"
-          href={exportUrl}
-          download={`frame-${capture?.positionMs ?? 0}ms.png`}
-          startIcon={<DownloadRounded />}
-          size="small"
-          disabled={!exportUrl}
-          onClick={(event) => event.stopPropagation()}
-        >
-          Export frame
-        </Button>
-      </Stack>
     </Box>;
   })}</List>;
 }

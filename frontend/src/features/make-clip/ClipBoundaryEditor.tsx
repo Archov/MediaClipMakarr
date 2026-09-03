@@ -1,11 +1,12 @@
+import AddLocationAltRounded from "@mui/icons-material/AddLocationAltRounded";
 import AddRounded from "@mui/icons-material/AddRounded";
 import ChevronLeftRounded from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
-import PlayForWorkRounded from "@mui/icons-material/PlayForWorkRounded";
 import RemoveRounded from "@mui/icons-material/RemoveRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SkipNextRounded from "@mui/icons-material/SkipNextRounded";
 import SkipPreviousRounded from "@mui/icons-material/SkipPreviousRounded";
+import SystemUpdateAltRounded from "@mui/icons-material/SystemUpdateAltRounded";
 import {
   Alert,
   Box,
@@ -124,6 +125,9 @@ interface BoundaryPreview {
 }
 
 function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: BoundaryPreview | null }) {
+  const exportUrl = preview
+    ? sessionFrameUrl(preview.sessionIdentity, preview.mediaIdentity, preview.positionMs, preview.version, true)
+    : undefined;
   return (
     <Stack spacing={0.75}>
       <Typography variant="body2" color="text.secondary">
@@ -157,6 +161,18 @@ function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: Boun
           <Typography variant="caption" color="text.secondary">No preview captured</Typography>
         </Box>
       )}
+      <Button
+        component="a"
+        href={exportUrl}
+        download={`${label.toLowerCase()}-frame-${preview?.positionMs ?? 0}ms.png`}
+        startIcon={<SystemUpdateAltRounded />}
+        variant="outlined"
+        size="small"
+        fullWidth
+        disabled={!exportUrl}
+      >
+        Export frame
+      </Button>
     </Stack>
   );
 }
@@ -333,7 +349,7 @@ export function ClipBoundaryEditor({
                   onClick={() => setStart(livePositionMs)}
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >
-                  <PlayForWorkRounded />
+                  <AddLocationAltRounded />
                 </IconButton>
               </span>
             </Tooltip>
@@ -367,7 +383,7 @@ export function ClipBoundaryEditor({
                   onClick={() => setEnd(livePositionMs)}
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >
-                  <PlayForWorkRounded />
+                  <AddLocationAltRounded />
                 </IconButton>
               </span>
             </Tooltip>
