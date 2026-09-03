@@ -213,6 +213,18 @@ export function ClipBoundaryEditor({
     });
   }, [endMs, mediaIdentity, sessionIdentity, startMs]);
 
+  // A freshly selected session/media can arrive with Start already pre-filled
+  // by the parent (the current playback position), bypassing the nudge/set-to-
+  // current/blur paths below that normally trigger a preview fetch. Fetch one
+  // here whenever the selection itself changes, for whichever boundary is set.
+  useEffect(() => {
+    commitStartPreview(startMs);
+    commitEndPreview(endMs);
+    // Only re-run when the selection changes, not on every startMs/endMs edit -
+    // those are already covered by the explicit commit calls below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdentity, mediaIdentity]);
+
   const commitStartPreview = (positionMs: number | null) => {
     if (positionMs === null) {
       setStartPreview(null);
