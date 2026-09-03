@@ -435,57 +435,43 @@ export function ClipBoundaryEditor({
             >
               <ChevronLeftRounded fontSize="small" />
             </IconButton>
-            <Box
-              ref={nudgeValueBoxRef}
-              sx={{
-                display: "flex",
-                alignItems: "baseline",
-                justifyContent: "center",
-                // Tight when a decimal prefix is shown, so "0.023s" reads as one
-                // number; a small gap between the digits and a bare unit label
-                // (e.g. "20 frame") otherwise.
-                gap: NUDGE_UNIT_PREFIX[adjustmentUnit] ? 0 : "5px",
-                minWidth: 108,
-                alignSelf: "stretch",
-                px: 1.5,
-                cursor: "ns-resize",
-              }}
-            >
-              {NUDGE_UNIT_PREFIX[adjustmentUnit] && (
+            <Tooltip title="Unit count to nudge">
+              <Box
+                ref={nudgeValueBoxRef}
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  // Tight when a decimal prefix is shown, so "0.023s" reads as
+                  // one number; a small gap between the digits and a bare unit
+                  // label (e.g. "20 frame") otherwise.
+                  gap: NUDGE_UNIT_PREFIX[adjustmentUnit] ? 0 : "5px",
+                  minWidth: 108,
+                  alignSelf: "stretch",
+                  px: 1.5,
+                  cursor: "default",
+                  userSelect: "none",
+                }}
+              >
+                {NUDGE_UNIT_PREFIX[adjustmentUnit] && (
+                  <Typography
+                    component="span"
+                    sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary" }}
+                  >
+                    {NUDGE_UNIT_PREFIX[adjustmentUnit]}
+                  </Typography>
+                )}
+                <Typography component="span" sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary" }}>
+                  {adjustmentValue}
+                </Typography>
                 <Typography
                   component="span"
-                  sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary" }}
+                  sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary", whiteSpace: "nowrap" }}
                 >
-                  {NUDGE_UNIT_PREFIX[adjustmentUnit]}
+                  {NUDGE_UNIT_SUFFIX[adjustmentUnit]}
                 </Typography>
-              )}
-              <TextField
-                type="text"
-                variant="standard"
-                value={adjustmentValue}
-                onChange={(event) => {
-                  const value = Number(event.target.value.replace(/[^0-9]/g, ""));
-                  setAdjustmentValue(
-                    Number.isFinite(value) ? clampAdjustmentValue(Math.trunc(value)) : MIN_ADJUSTMENT_VALUE,
-                  );
-                }}
-                slotProps={{
-                  htmlInput: {
-                    inputMode: "numeric",
-                    pattern: "[0-9]*",
-                    style: { textAlign: "center", width: "2ch", padding: 0, fontSize: "1rem", fontWeight: 600 },
-                  },
-                  input: { disableUnderline: true },
-                }}
-                sx={{ flex: "none" }}
-              />
-              <Typography
-                component="span"
-                sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary", whiteSpace: "nowrap" }}
-              >
-                {NUDGE_UNIT_SUFFIX[adjustmentUnit]}
-              </Typography>
-            </Box>
+              </Box>
+            </Tooltip>
             <IconButton
               aria-label="Increase nudge amount"
               onClick={() => setAdjustmentValue((value) => clampAdjustmentValue(value + 1))}
@@ -516,9 +502,14 @@ export function ClipBoundaryEditor({
             >
               <RemoveRounded fontSize="small" />
             </IconButton>
-            <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
-              Start
-            </Typography>
+            <Tooltip title="Add or Subtract time from the current start timestamps">
+              <Typography
+                variant="body2"
+                sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap", cursor: "default", userSelect: "none" }}
+              >
+                Start
+              </Typography>
+            </Tooltip>
             <IconButton
               aria-label="Nudge start later"
               disabled={startMs === null}
@@ -538,9 +529,14 @@ export function ClipBoundaryEditor({
             >
               <RemoveRounded fontSize="small" />
             </IconButton>
-            <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
-              End
-            </Typography>
+            <Tooltip title="Add or Subtract time from the current end timestamps">
+              <Typography
+                variant="body2"
+                sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap", cursor: "default", userSelect: "none" }}
+              >
+                End
+              </Typography>
+            </Tooltip>
             <IconButton
               aria-label="Nudge end later"
               disabled={endMs === null && startMs === null}
