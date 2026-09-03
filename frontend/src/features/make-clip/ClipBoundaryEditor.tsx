@@ -23,7 +23,6 @@ import { sessionFrameUrl } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import { SessionFrameImage } from "./SessionFrameImage";
 
-const MAX_ADJUSTMENT_VALUE = 99;
 const MIN_ADJUSTMENT_VALUE = 1;
 
 const pillSx = {
@@ -35,28 +34,46 @@ const pillSx = {
   overflow: "hidden",
 } as const;
 
-type NudgeUnit = "minutes" | "seconds" | "centiseconds" | "milliseconds" | "frames";
+type NudgeUnit = "minutes" | "seconds" | "tenths" | "hundredths" | "frames";
 
-// Cycle order matches the mock: coarse to fine, frames last.
-const NUDGE_UNITS: NudgeUnit[] = ["minutes", "seconds", "centiseconds", "milliseconds", "frames"];
+// Cycle order: coarsest to finest, frames last. Cycling stops at either end
+// rather than wrapping.
+const NUDGE_UNITS: NudgeUnit[] = ["minutes", "seconds", "tenths", "hundredths", "frames"];
+
+// Static decimal-place prefix for the two sub-second units, e.g. tenths reads
+// "0." + digit + "s" (0.5s), hundredths reads "0.0" + digit + "s" (0.05s).
+const NUDGE_UNIT_PREFIX: Partial<Record<NudgeUnit, string>> = {
+  tenths: "0.",
+  hundredths: "0.0",
+};
 
 const NUDGE_UNIT_SUFFIX: Record<NudgeUnit, string> = {
   minutes: "m",
   seconds: "s",
-  centiseconds: "cs",
-  milliseconds: "ms",
-  frames: "f",
+  tenths: "s",
+  hundredths: "s",
+  frames: "frame",
 };
 
 const NUDGE_UNIT_MS_PER_STEP: Record<Exclude<NudgeUnit, "frames">, number> = {
   minutes: 60_000,
   seconds: 1_000,
-  centiseconds: 10,
-  milliseconds: 1,
+  tenths: 100,
+  hundredths: 10,
 };
 
-function clampAdjustmentValue(value: number): number {
-  return Math.min(MAX_ADJUSTMENT_VALUE, Math.max(MIN_ADJUSTMENT_VALUE, value));
+// Tenths/hundredths are single decimal-place digits (0-9); the rest allow two
+// digits (1-99).
+const NUDGE_UNIT_MAX_VALUE: Record<NudgeUnit, number> = {
+  minutes: 99,
+  seconds: 99,
+  tenths: 9,
+  hundredths: 9,
+  frames: 99,
+};
+
+function clampAdjustmentValue(unit: NudgeUnit, value: number): number {
+  return Math.min(NUDGE_UNIT_MAX_VALUE[unit], Math.max(MIN_ADJUSTMENT_VALUE, value));
 }
 
 function nudgeStepMs(unit: NudgeUnit, value: number, frameRate: number | null): number {
@@ -66,11 +83,18 @@ function nudgeStepMs(unit: NudgeUnit, value: number, frameRate: number | null): 
   return value * NUDGE_UNIT_MS_PER_STEP[unit];
 }
 
-function cycleNudgeUnit(current: NudgeUnit, direction: 1 | -1, framesAvailable: boolean): NudgeUnit {
-  const units = framesAvailable ? NUDGE_UNITS : NUDGE_UNITS.filter((unit) => unit !== "frames");
+function availableNudgeUnits(framesAvailable: boolean): NudgeUnit[] {
+  return framesAvailable ? NUDGE_UNITS : NUDGE_UNITS.filter((unit) => unit !== "frames");
+}
+
+// Steps toward finer (direction 1) or coarser (direction -1) units, holding at
+// either end instead of wrapping around.
+function stepNudgeUnit(current: NudgeUnit, direction: 1 | -1, framesAvailable: boolean): NudgeUnit {
+  const units = availableNudgeUnits(framesAvailable);
   const index = units.indexOf(current);
-  const nextIndex = ((index === -1 ? 0 : index) + direction + units.length) % units.length;
-  return units[nextIndex];
+  const safeIndex = index === -1 ? 0 : index;
+  const nextIndex = safeIndex + direction;
+  return nextIndex < 0 || nextIndex >= units.length ? units[safeIndex] : units[nextIndex];
 }
 
 function clampBoundaryMs(value: number, maximumMs: number | null | undefined): number {
@@ -156,12 +180,16 @@ export function ClipBoundaryEditor({
   onEndChange,
   children,
 }: ClipBoundaryEditorProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const nudgeValueBoxRef = useRef<HTMLDivElement>(null);
   const [startPreview, setStartPreview] = useState<BoundaryPreview | null>(null);
   const [endPreview, setEndPreview] = useState<BoundaryPreview | null>(null);
   const [adjustmentValue, setAdjustmentValue] = useState(5);
   const [adjustmentUnit, setAdjustmentUnit] = useState<NudgeUnit>("seconds");
   const framesAvailable = Boolean(mediaFrameRate);
+  const availableUnits = availableNudgeUnits(framesAvailable);
+  const adjustmentUnitIndex = availableUnits.indexOf(adjustmentUnit);
+  const isCoarsestUnit = adjustmentUnitIndex <= 0;
+  const isFinestUnit = adjustmentUnitIndex === availableUnits.length - 1;
   const startParse = parseTimestampMs(startInput);
   const endParse = parseTimestampMs(endInput);
   const rangeError =
@@ -177,22 +205,32 @@ export function ClipBoundaryEditor({
       : null);
 
   useEffect(() => {
-    const input = inputRef.current;
-    if (!input) return;
+    const box = nudgeValueBoxRef.current;
+    if (!box) return;
     const wheel = (event: WheelEvent) => {
       if (event.deltaY === 0) return;
       event.preventDefault();
-      setAdjustmentValue((value) => clampAdjustmentValue(value + (event.deltaY < 0 ? 1 : -1)));
+      setAdjustmentValue((value) =>
+        clampAdjustmentValue(adjustmentUnit, value + (event.deltaY < 0 ? 1 : -1)),
+      );
     };
-    input.addEventListener("wheel", wheel, { passive: false });
-    return () => input.removeEventListener("wheel", wheel);
-  }, []);
+    box.addEventListener("wheel", wheel, { passive: false });
+    return () => box.removeEventListener("wheel", wheel);
+  }, [adjustmentUnit]);
 
   useEffect(() => {
     if (adjustmentUnit === "frames" && !framesAvailable) {
       setAdjustmentUnit("seconds");
+      setAdjustmentValue((value) => clampAdjustmentValue("seconds", value));
     }
   }, [adjustmentUnit, framesAvailable]);
+
+  const cycleAdjustmentUnit = (direction: 1 | -1) => {
+    const next = stepNudgeUnit(adjustmentUnit, direction, framesAvailable);
+    if (next === adjustmentUnit) return;
+    setAdjustmentUnit(next);
+    setAdjustmentValue((value) => clampAdjustmentValue(next, value));
+  };
 
   useEffect(() => {
     setStartPreview((current) => {
@@ -347,17 +385,18 @@ export function ClipBoundaryEditor({
         </Stack>
       </Stack>
 
-      <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="center" justifyContent="center">
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary", letterSpacing: "0.04em" }}>
-            NUDGE BY
-          </Typography>
+      <Stack spacing={1} alignItems="center">
+        <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary", letterSpacing: "0.04em" }}>
+          NUDGE
+        </Typography>
+        <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="center" justifyContent="center">
           <Stack direction="row" alignItems="center" sx={pillSx}>
             <Tooltip title="Coarser unit">
               <span>
                 <IconButton
                   aria-label="Switch to coarser nudge unit"
-                  onClick={() => setAdjustmentUnit((unit) => cycleNudgeUnit(unit, -1, framesAvailable))}
+                  disabled={isCoarsestUnit}
+                  onClick={() => cycleAdjustmentUnit(-1)}
                   sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
                 >
                   <SkipPreviousRounded fontSize="small" />
@@ -366,40 +405,59 @@ export function ClipBoundaryEditor({
             </Tooltip>
             <IconButton
               aria-label="Decrease nudge amount"
-              onClick={() => setAdjustmentValue((value) => clampAdjustmentValue(value - 1))}
+              onClick={() =>
+                setAdjustmentValue((value) => clampAdjustmentValue(adjustmentUnit, value - 1))
+              }
               sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
             >
               <ChevronLeftRounded fontSize="small" />
             </IconButton>
-            <TextField
-              inputRef={inputRef}
-              type="text"
-              variant="standard"
-              value={adjustmentValue}
-              onChange={(event) => {
-                const value = Number(event.target.value.replace(/[^0-9]/g, ""));
-                setAdjustmentValue(
-                  Number.isFinite(value) ? clampAdjustmentValue(Math.trunc(value)) : MIN_ADJUSTMENT_VALUE,
-                );
+            <Box
+              ref={nudgeValueBoxRef}
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                minWidth: 64,
+                alignSelf: "stretch",
+                cursor: "ns-resize",
               }}
-              slotProps={{
-                htmlInput: {
-                  inputMode: "numeric",
-                  pattern: "[0-9]*",
-                  style: { textAlign: "center", width: "2.5ch" },
-                },
-                input: {
-                  disableUnderline: true,
-                  endAdornment: (
-                    <InputAdornment position="end">{NUDGE_UNIT_SUFFIX[adjustmentUnit]}</InputAdornment>
-                  ),
-                },
-              }}
-              sx={{ px: 1 }}
-            />
+            >
+              <TextField
+                type="text"
+                variant="standard"
+                value={adjustmentValue}
+                onChange={(event) => {
+                  const value = Number(event.target.value.replace(/[^0-9]/g, ""));
+                  setAdjustmentValue(
+                    Number.isFinite(value)
+                      ? clampAdjustmentValue(adjustmentUnit, Math.trunc(value))
+                      : MIN_ADJUSTMENT_VALUE,
+                  );
+                }}
+                slotProps={{
+                  htmlInput: {
+                    inputMode: "numeric",
+                    pattern: "[0-9]*",
+                    style: { textAlign: "center", width: "1.5ch" },
+                  },
+                  input: {
+                    disableUnderline: true,
+                    startAdornment: NUDGE_UNIT_PREFIX[adjustmentUnit] ? (
+                      <InputAdornment position="start">{NUDGE_UNIT_PREFIX[adjustmentUnit]}</InputAdornment>
+                    ) : undefined,
+                    endAdornment: (
+                      <InputAdornment position="end">{NUDGE_UNIT_SUFFIX[adjustmentUnit]}</InputAdornment>
+                    ),
+                  },
+                }}
+              />
+            </Box>
             <IconButton
               aria-label="Increase nudge amount"
-              onClick={() => setAdjustmentValue((value) => clampAdjustmentValue(value + 1))}
+              onClick={() =>
+                setAdjustmentValue((value) => clampAdjustmentValue(adjustmentUnit, value + 1))
+              }
               sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
             >
               <ChevronRightRounded fontSize="small" />
@@ -408,7 +466,8 @@ export function ClipBoundaryEditor({
               <span>
                 <IconButton
                   aria-label="Switch to finer nudge unit"
-                  onClick={() => setAdjustmentUnit((unit) => cycleNudgeUnit(unit, 1, framesAvailable))}
+                  disabled={isFinestUnit}
+                  onClick={() => cycleAdjustmentUnit(1)}
                   sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
                 >
                   <SkipNextRounded fontSize="small" />
@@ -416,64 +475,64 @@ export function ClipBoundaryEditor({
               </span>
             </Tooltip>
           </Stack>
-        </Stack>
 
-        <Stack direction="row" alignItems="center" sx={pillSx}>
-          <IconButton
-            aria-label="Nudge start earlier"
-            disabled={startMs === null}
-            onClick={() => adjustStart(-1)}
-            sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
-          >
-            <RemoveRounded fontSize="small" />
-          </IconButton>
-          <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
-            Start
-          </Typography>
-          <IconButton
-            aria-label="Nudge start later"
-            disabled={startMs === null}
-            onClick={() => adjustStart(1)}
-            sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
-          >
-            <AddRounded fontSize="small" />
-          </IconButton>
-        </Stack>
+          <Stack direction="row" alignItems="center" sx={pillSx}>
+            <IconButton
+              aria-label="Nudge start earlier"
+              disabled={startMs === null}
+              onClick={() => adjustStart(-1)}
+              sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
+            >
+              <RemoveRounded fontSize="small" />
+            </IconButton>
+            <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+              Start
+            </Typography>
+            <IconButton
+              aria-label="Nudge start later"
+              disabled={startMs === null}
+              onClick={() => adjustStart(1)}
+              sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
+            >
+              <AddRounded fontSize="small" />
+            </IconButton>
+          </Stack>
 
-        <Stack direction="row" alignItems="center" sx={pillSx}>
-          <IconButton
-            aria-label="Nudge end earlier"
-            disabled={endMs === null && startMs === null}
-            onClick={() => adjustEnd(-1)}
-            sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
-          >
-            <RemoveRounded fontSize="small" />
-          </IconButton>
-          <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
-            End
-          </Typography>
-          <IconButton
-            aria-label="Nudge end later"
-            disabled={endMs === null && startMs === null}
-            onClick={() => adjustEnd(1)}
-            sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
-          >
-            <AddRounded fontSize="small" />
-          </IconButton>
-        </Stack>
+          <Stack direction="row" alignItems="center" sx={pillSx}>
+            <IconButton
+              aria-label="Nudge end earlier"
+              disabled={endMs === null && startMs === null}
+              onClick={() => adjustEnd(-1)}
+              sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
+            >
+              <RemoveRounded fontSize="small" />
+            </IconButton>
+            <Typography variant="body2" sx={{ px: 1.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+              End
+            </Typography>
+            <IconButton
+              aria-label="Nudge end later"
+              disabled={endMs === null && startMs === null}
+              onClick={() => adjustEnd(1)}
+              sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
+            >
+              <AddRounded fontSize="small" />
+            </IconButton>
+          </Stack>
 
-        <Button
-          startIcon={<RestartAltRounded />}
-          variant="outlined"
-          onClick={() => {
-            setStartPreview(null);
-            setEndPreview(null);
-            setStart(null);
-            setEnd(null);
-          }}
-        >
-          Clear
-        </Button>
+          <Button
+            startIcon={<RestartAltRounded />}
+            variant="outlined"
+            onClick={() => {
+              setStartPreview(null);
+              setEndPreview(null);
+              setStart(null);
+              setEnd(null);
+            }}
+          >
+            Clear
+          </Button>
+        </Stack>
       </Stack>
 
       {startMs !== null && endMs !== null && endMs > startMs && (
