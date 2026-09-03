@@ -7,5 +7,5 @@ Deploy target info
     - deploy.env```
 ```
 
-Confirm deploy worked by navigating to `https://mcm.capsule-corp.me`
+Confirm deploy worked by navigating to `http://192.168.0.111:3623`
 Always create branches under `claude\*`
