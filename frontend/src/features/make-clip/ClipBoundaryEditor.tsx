@@ -125,9 +125,6 @@ interface BoundaryPreview {
 }
 
 function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: BoundaryPreview | null }) {
-  const exportUrl = preview
-    ? sessionFrameUrl(preview.sessionIdentity, preview.mediaIdentity, preview.positionMs, preview.version, true)
-    : undefined;
   return (
     <Stack spacing={0.75}>
       <Typography variant="body2" color="text.secondary">
@@ -161,20 +158,14 @@ function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: Boun
           <Typography variant="caption" color="text.secondary">No preview captured</Typography>
         </Box>
       )}
-      <Button
-        component="a"
-        href={exportUrl}
-        download={`${label.toLowerCase()}-frame-${preview?.positionMs ?? 0}ms.png`}
-        startIcon={<SystemUpdateAltRounded />}
-        variant="outlined"
-        size="small"
-        fullWidth
-        disabled={!exportUrl}
-      >
-        Export frame
-      </Button>
     </Stack>
   );
+}
+
+function exportFrameUrl(preview: BoundaryPreview | null): string | undefined {
+  return preview
+    ? sessionFrameUrl(preview.sessionIdentity, preview.mediaIdentity, preview.positionMs, preview.version, true)
+    : undefined;
 }
 
 export function ClipBoundaryEditor({
@@ -353,6 +344,20 @@ export function ClipBoundaryEditor({
                 </IconButton>
               </span>
             </Tooltip>
+            <Tooltip title="Export frame">
+              <span>
+                <IconButton
+                  aria-label="Export Start frame"
+                  component="a"
+                  href={exportFrameUrl(startPreview)}
+                  download={`start-frame-${startPreview?.positionMs ?? 0}ms.png`}
+                  disabled={!startPreview}
+                  sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                >
+                  <SystemUpdateAltRounded />
+                </IconButton>
+              </span>
+            </Tooltip>
           </Stack>
         </Stack>
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
@@ -384,6 +389,20 @@ export function ClipBoundaryEditor({
                   sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                 >
                   <AddLocationAltRounded />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title="Export frame">
+              <span>
+                <IconButton
+                  aria-label="Export End frame"
+                  component="a"
+                  href={exportFrameUrl(endPreview)}
+                  download={`end-frame-${endPreview?.positionMs ?? 0}ms.png`}
+                  disabled={!endPreview}
+                  sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                >
+                  <SystemUpdateAltRounded />
                 </IconButton>
               </span>
             </Tooltip>
