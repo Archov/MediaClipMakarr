@@ -100,6 +100,7 @@ class TrackDescriptor(BaseModel):
 
 class MediaCapabilities(BaseModel):
     duration_ms: int | None
+    frame_rate: float | None = None
     video_tracks: list[TrackDescriptor]
     audio_tracks: list[TrackDescriptor]
     subtitle_tracks: list[TrackDescriptor]
@@ -151,6 +152,8 @@ class FFProbeStream(BaseModel):
     color_transfer: str | None = None
     color_primaries: str | None = None
     color_range: str | None = None
+    avg_frame_rate: str | None = None
+    r_frame_rate: str | None = None
     tags: dict[str, Any] = Field(default_factory=dict)
     side_data_list: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -419,6 +422,30 @@ def _track_descriptor(
         unavailable_reason=None if supported else "This subtitle codec cannot be burned yet.",
         subtitle_kind=subtitle_kind,
         external=bool(plex_stream and plex_stream.key and stream.index < 0),
+    )
+
+
+def _parse_frame_rate_ratio(value: str | None) -> float | None:
+    if not value:
+        return None
+    numerator, _, denominator = value.partition("/")
+    try:
+        num = float(numerator)
+        den = float(denominator) if denominator else 1.0
+    except ValueError:
+        return None
+    if den == 0:
+        return None
+    rate = num / den
+    return rate if rate > 0 else None
+
+
+def _video_frame_rate(stream: FFProbeStream) -> float | None:
+    # Prefer avg_frame_rate: it reflects actual playback timing (duration / frame
+    # count) rather than the container's nominal rate, which matters for the rare
+    # variable-frame-rate source. Fall back to r_frame_rate when unavailable.
+    return _parse_frame_rate_ratio(stream.avg_frame_rate) or _parse_frame_rate_ratio(
+        stream.r_frame_rate
     )
 
 
@@ -709,6 +736,7 @@ def _media_capabilities(
     ]
     return MediaCapabilities(
         duration_ms=_duration_ms(probe),
+        frame_rate=_video_frame_rate(first_video) if first_video is not None else None,
         video_tracks=[
             _track_descriptor(stream, kind="video", selected=index == 0)
             for index, stream in enumerate(video)

@@ -14,6 +14,7 @@ from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.hdr import AdvancedMediaError, HdrCapabilities, planned_hdr_strategy
 from mediaclipmakarr.plex import PlexSession
+from mediaclipmakarr.render_plan import sanitize_display_name
 from mediaclipmakarr.source_media import BlockingRunner, resolve_media_capabilities
 from mediaclipmakarr.subprocesses import CommandError, CommandResult, run_command
 from mediaclipmakarr.video_filters import build_video_frame_filter
@@ -124,7 +125,8 @@ async def render_session_frame(
         await run_blocking(cleanup_session_frame_work_dir, work_dir)
         raise
 
-    filename = f"frame-{position_ms}ms.png"
+    source_stem = sanitize_display_name(Path(source.local_path).stem)
+    filename = f"{source_stem}-frame-{position_ms}ms.png"
     return RenderedSessionFrame(path=output_path, work_dir=work_dir, filename=filename)
 
 

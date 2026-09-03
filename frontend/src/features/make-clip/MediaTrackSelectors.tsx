@@ -1,4 +1,4 @@
-import { Alert, FormControl, InputLabel, MenuItem, Select, Stack, Typography } from "@mui/material";
+import { Alert, FormControl, InputLabel, MenuItem, Select, Stack } from "@mui/material";
 
 import type { MediaCapabilities, TrackDescriptor } from "../../types";
 
@@ -31,7 +31,6 @@ export function MediaTrackSelectors({
   const subtitleOptions = capabilities.subtitle_tracks.filter((track) => track.stream_index !== null);
   return (
     <Stack spacing={2}>
-      <Typography variant="h6">Tracks</Typography>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
         <FormControl fullWidth>
           <InputLabel id="audio-track-label">Audio</InputLabel>

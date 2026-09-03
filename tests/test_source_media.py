@@ -562,3 +562,72 @@ async def test_media_capabilities_report_unavailable_subtitle_warnings(tmp_path)
 
     assert result.capabilities is not None
     assert result.capabilities.warnings == ["This subtitle codec cannot be burned yet."]
+
+
+@pytest.mark.asyncio
+async def test_media_capabilities_frame_rate_prefers_average_over_nominal(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"][0]["avg_frame_rate"] = "24000/1001"
+    payload["streams"][0]["r_frame_rate"] = "25/1"
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
+
+    result = await resolve_media_capabilities(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.capabilities is not None
+    assert result.capabilities.frame_rate == pytest.approx(23.976, abs=0.001)
+
+
+@pytest.mark.asyncio
+async def test_media_capabilities_frame_rate_falls_back_to_nominal(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+    payload = json.loads(probe_payload())
+    payload["streams"][0]["avg_frame_rate"] = "0/0"
+    payload["streams"][0]["r_frame_rate"] = "30/1"
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, json.dumps(payload), "")
+
+    result = await resolve_media_capabilities(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.capabilities is not None
+    assert result.capabilities.frame_rate == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_media_capabilities_frame_rate_none_when_unreported(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "Movie.mkv").write_bytes(b"fake media")
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_media_capabilities(
+        session(),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root]),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.capabilities is not None
+    assert result.capabilities.frame_rate is None

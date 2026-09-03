@@ -1,12 +1,10 @@
 import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import {
   Alert,
-  Box,
   Button,
   Card,
   CardContent,
   CircularProgress,
-  Divider,
   Stack,
   Typography,
 } from "@mui/material";
@@ -21,7 +19,6 @@ import type {
   ClipCreateRequest,
   JobSnapshot,
   PlexSession,
-  PlexSessionSnapshotStatus,
 } from "../../types";
 import { ClipBoundaryEditor } from "./ClipBoundaryEditor";
 import { displayedPosition, useClock, useJobSnapshot, useLivePlexSessions } from "./hooks";
@@ -30,20 +27,6 @@ import { MediaErrorAlert, structuredErrorFrom } from "./MediaErrorAlert";
 import { MediaTrackSelectors } from "./MediaTrackSelectors";
 import { SessionList } from "./SessionList";
 import { initialTrackSelection } from "./trackSelection";
-
-const sessionStatusSeverity: Record<
-  PlexSessionSnapshotStatus,
-  "success" | "info" | "warning" | "error"
-> = {
-  ok: "success",
-  not_configured: "info",
-  invalid_url: "error",
-  invalid_token: "error",
-  http_error: "warning",
-  invalid_response: "error",
-  unreachable: "warning",
-  error: "error",
-};
 
 const ACTIVE_CLIP_JOB_KEY = "mediaclipmakarr.activeClipJobId";
 
@@ -70,7 +53,6 @@ export function MakeClipScreen() {
   const [endMs, setEndMs] = useState<number | null>(null);
   const [startInput, setStartInput] = useState("");
   const [endInput, setEndInput] = useState("");
-  const [adjustmentSeconds, setAdjustmentSeconds] = useState(5);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
   const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
@@ -183,122 +165,123 @@ export function MakeClipScreen() {
   };
 
   return (
-    <Card variant="outlined">
-      <CardContent>
-        <Stack spacing={3}>
-          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={2}>
-            <Box>
-              <Typography variant="h5" gutterBottom>Make Clip</Typography>
-              <Typography color="text.secondary">Live Plex video sessions</Typography>
-            </Box>
-            {sessions.isFetching && <CircularProgress size={24} aria-label="Refreshing sessions" />}
+    <Stack spacing={3} sx={{ maxWidth: 760, mx: "auto" }}>
+      <Card variant="outlined">
+        <CardContent>
+          <Stack spacing={2}>
+            {sessions.isFetching && (
+              <Stack direction="row" justifyContent="flex-end">
+                <CircularProgress size={20} aria-label="Refreshing sessions" />
+              </Stack>
+            )}
+            {sessions.error && <Alert severity="error">{sessions.error.message}</Alert>}
+            {selectedSessionEnded && (
+              <Alert severity="warning">The selected Plex session ended.</Alert>
+            )}
+            {boundaryNotice && <Alert severity="info">{boundaryNotice}</Alert>}
+
+            <SessionList
+              snapshot={snapshot}
+              selectedSessionIdentity={selectedSessionIdentity}
+              onSelect={(session) => {
+                if (session.session_identity === selectedSessionIdentity) return;
+                setSelectedSessionIdentity(session.session_identity);
+                setSelectedMediaIdentity(session.media_identity);
+                const initialStartMs = displayedPosition(session, Date.now());
+                setStartMs(initialStartMs);
+                setStartInput(formatTimestampMs(initialStartMs));
+                setEndMs(null);
+                setEndInput("");
+                clearSubmittedJob();
+                clipCreate.reset();
+                setBoundaryNotice(null);
+                setAudioStreamIndex("");
+                setSubtitleStreamIndex("");
+                setSubtitlesEnabled(false);
+              }}
+            />
           </Stack>
+        </CardContent>
+      </Card>
 
-          {sessions.error && <Alert severity="error">{sessions.error.message}</Alert>}
-          {snapshot && (
-            <Alert severity={sessionStatusSeverity[snapshot.status]}>
-              {snapshot.message}
-            </Alert>
-          )}
-          {selectedSessionEnded && (
-            <Alert severity="warning">The selected Plex session ended.</Alert>
-          )}
-          {boundaryNotice && <Alert severity="info">{boundaryNotice}</Alert>}
-
-          <SessionList
-            snapshot={snapshot}
-            selectedSessionIdentity={selectedSessionIdentity}
-            onSelect={(session) => {
-              if (session.session_identity === selectedSessionIdentity) return;
-              setSelectedSessionIdentity(session.session_identity);
-              setSelectedMediaIdentity(session.media_identity);
-              const initialStartMs = displayedPosition(session, Date.now());
-              setStartMs(initialStartMs);
-              setStartInput(formatTimestampMs(initialStartMs));
-              setEndMs(null);
-              setEndInput("");
-              clearSubmittedJob();
-              clipCreate.reset();
-              setBoundaryNotice(null);
-              setAudioStreamIndex("");
-              setSubtitleStreamIndex("");
-              setSubtitlesEnabled(false);
-            }}
-          />
-
-          {selectedSession && (
-            <>
-              <Divider />
-              <Stack spacing={2}>
-                <ClipBoundaryEditor
-                  startInput={startInput}
-                  endInput={endInput}
-                  startMs={startMs}
-                  endMs={endMs}
-                  livePositionMs={livePositionMs}
-                  sessionIdentity={selectedSession.session_identity}
-                  mediaIdentity={selectedSession.media_identity}
-                  mediaDurationMs={selectedSession.duration_ms}
-                  adjustmentSeconds={adjustmentSeconds}
-                  onAdjustmentChange={setAdjustmentSeconds}
-                  onStartChange={handleStartChange}
-                  onEndChange={handleEndChange}
-                >
-                  {capabilities.isFetching && (
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <CircularProgress size={18} aria-label="Loading media capabilities" />
-                      <Typography color="text.secondary">Loading media tracks…</Typography>
-                    </Stack>
-                  )}
-                  {capabilities.error && (
-                    <MediaErrorAlert
-                      error={structuredErrorFrom(capabilities.error)}
-                      fallbackMessage={capabilities.error.message}
-                      onSelectAlternative={selectAlternativeTrack}
-                    />
-                  )}
-                  <MediaTrackSelectors
-                    capabilities={capabilities.data}
-                    audioStreamIndex={audioStreamIndex}
-                    subtitleStreamIndex={subtitleStreamIndex}
-                    subtitlesEnabled={subtitlesEnabled}
-                    onAudioChange={(value) => {
-                      setAudioStreamIndex(value);
-                      clearSubmittedJob();
-                      clipCreate.reset();
-                    }}
-                    onSubtitleChange={(enabled, value) => {
-                      setSubtitlesEnabled(enabled);
-                      setSubtitleStreamIndex(value);
-                      clearSubmittedJob();
-                      clipCreate.reset();
-                    }}
-                  />
-                </ClipBoundaryEditor>
-                {clipCreate.error && (
+      {selectedSession && (
+        <Card variant="outlined">
+          <CardContent>
+            <Stack spacing={2}>
+              <ClipBoundaryEditor
+                startInput={startInput}
+                endInput={endInput}
+                startMs={startMs}
+                endMs={endMs}
+                livePositionMs={livePositionMs}
+                sessionIdentity={selectedSession.session_identity}
+                mediaIdentity={selectedSession.media_identity}
+                mediaDurationMs={selectedSession.duration_ms}
+                mediaFrameRate={capabilities.data?.frame_rate ?? null}
+                onStartChange={handleStartChange}
+                onEndChange={handleEndChange}
+              >
+                {capabilities.isFetching && (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} aria-label="Loading media capabilities" />
+                    <Typography color="text.secondary">Loading media tracks…</Typography>
+                  </Stack>
+                )}
+                {capabilities.error && (
                   <MediaErrorAlert
-                    error={structuredErrorFrom(clipCreate.error)}
-                    fallbackMessage={clipCreate.error.message}
+                    error={structuredErrorFrom(capabilities.error)}
+                    fallbackMessage={capabilities.error.message}
                     onSelectAlternative={selectAlternativeTrack}
                   />
                 )}
-                <JobStatus job={activeJob} onSelectAlternative={selectAlternativeTrack} />
+                <MediaTrackSelectors
+                  capabilities={capabilities.data}
+                  audioStreamIndex={audioStreamIndex}
+                  subtitleStreamIndex={subtitleStreamIndex}
+                  subtitlesEnabled={subtitlesEnabled}
+                  onAudioChange={(value) => {
+                    setAudioStreamIndex(value);
+                    clearSubmittedJob();
+                    clipCreate.reset();
+                  }}
+                  onSubtitleChange={(enabled, value) => {
+                    setSubtitlesEnabled(enabled);
+                    setSubtitleStreamIndex(value);
+                    clearSubmittedJob();
+                    clipCreate.reset();
+                  }}
+                />
+              </ClipBoundaryEditor>
+              {clipCreate.error && (
+                <MediaErrorAlert
+                  error={structuredErrorFrom(clipCreate.error)}
+                  fallbackMessage={clipCreate.error.message}
+                  onSelectAlternative={selectAlternativeTrack}
+                />
+              )}
 
-                <Button
-                  startIcon={<ContentCutRounded />}
-                  variant="contained"
-                  disabled={!hasValidRange || clipCreate.isPending}
-                  onClick={submitClip}
-                  sx={{ alignSelf: "flex-start" }}
-                >
-                  {clipCreate.isPending ? "Submitting…" : "Create clip"}
-                </Button>
-              </Stack>
-            </>
-          )}
-        </Stack>
-      </CardContent>
-    </Card>
+              <Button
+                startIcon={<ContentCutRounded />}
+                variant="contained"
+                disabled={!hasValidRange || clipCreate.isPending}
+                onClick={submitClip}
+                sx={{ alignSelf: "flex-start" }}
+              >
+                {clipCreate.isPending ? "Submitting…" : "Create clip"}
+              </Button>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeJob && (
+        <Card variant="outlined">
+          <CardContent>
+            <JobStatus job={activeJob} onSelectAlternative={selectAlternativeTrack} />
+          </CardContent>
+        </Card>
+      )}
+    </Stack>
   );
 }
 
