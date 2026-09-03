@@ -318,7 +318,7 @@ export function ClipBoundaryEditor({
       <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
           <PreviewSlot label="Start" preview={startPreview} />
-          <Stack direction="row" spacing={1} alignItems="flex-start">
+          <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="Start"
               placeholder="00:00:00.000"
@@ -366,7 +366,7 @@ export function ClipBoundaryEditor({
         </Stack>
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
           <PreviewSlot label="End" preview={endPreview} />
-          <Stack direction="row" spacing={1} alignItems="flex-start">
+          <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="End"
               placeholder="00:00:00.000"
