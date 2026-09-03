@@ -11,6 +11,11 @@ from mediaclipmakarr.application_settings import (
     serialize_update,
 )
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.immich import (
+    ImmichConnectionRequest,
+    ImmichConnectionResult,
+    test_immich_connection,
+)
 from mediaclipmakarr.plex import (
     PlexConnectionRequest,
     PlexConnectionResult,
@@ -80,5 +85,18 @@ def build_router(application_settings: Settings) -> APIRouter:
             candidate_url = connection.plex_url
             candidate_token = connection.plex_token.get_secret_value().strip()
         return await test_plex_connection(candidate_url, candidate_token)
+
+    @router.post("/api/settings/immich/test", response_model=ImmichConnectionResult)
+    async def test_current_immich_connection(
+        request: Request, connection: ImmichConnectionRequest | None = None
+    ) -> ImmichConnectionResult:
+        effective = request.app.state.effective_application_settings
+        if connection is None or connection.immich_url is None or connection.immich_api_key is None:
+            candidate_url = effective.immich_url
+            candidate_key = effective.immich_api_key
+        else:
+            candidate_url = connection.immich_url
+            candidate_key = connection.immich_api_key.get_secret_value().strip()
+        return await test_immich_connection(candidate_url, candidate_key)
 
     return router

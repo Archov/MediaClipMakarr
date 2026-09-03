@@ -8,6 +8,8 @@ import type {
   ClipDeleteResult,
   ClipFilterOptions,
   HealthResponse,
+  ImmichConnectionRequest,
+  ImmichConnectionResult,
   JobSnapshot,
   MediaCapabilities,
   PlexConnectionRequest,
@@ -44,6 +46,14 @@ function structuredError(value: unknown): StructuredError | null {
         ? detail.context as Record<string, unknown>
         : {},
   };
+}
+
+async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new ApiRequestError("Could not reach the server. Check that it's running and try again.");
+  }
 }
 
 async function parseResponse<T>(response: Response, action: string): Promise<T> {
@@ -84,14 +94,14 @@ async function parseResponse<T>(response: Response, action: string): Promise<T> 
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
-  const response = await fetch("/api/health", {
+  const response = await apiFetch("/api/health", {
     headers: { Accept: "application/json" },
   });
   return parseResponse<HealthResponse>(response, "Health request");
 }
 
 export async function fetchSettings(): Promise<ApplicationSettings> {
-  const response = await fetch("/api/settings", {
+  const response = await apiFetch("/api/settings", {
     headers: { Accept: "application/json" },
   });
   return parseResponse<ApplicationSettings>(response, "Settings request");
@@ -100,7 +110,7 @@ export async function fetchSettings(): Promise<ApplicationSettings> {
 export async function updateSettings(
   update: ApplicationSettingsUpdate,
 ): Promise<ApplicationSettings> {
-  const response = await fetch("/api/settings", {
+  const response = await apiFetch("/api/settings", {
     method: "PUT",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(update),
@@ -111,7 +121,7 @@ export async function updateSettings(
 export async function testPlexConnection(
   connection: PlexConnectionRequest,
 ): Promise<PlexConnectionResult> {
-  const response = await fetch("/api/settings/plex/test", {
+  const response = await apiFetch("/api/settings/plex/test", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(connection),
@@ -119,15 +129,26 @@ export async function testPlexConnection(
   return parseResponse<PlexConnectionResult>(response, "Plex connection test");
 }
 
+export async function testImmichConnection(
+  connection: ImmichConnectionRequest,
+): Promise<ImmichConnectionResult> {
+  const response = await apiFetch("/api/settings/immich/test", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(connection),
+  });
+  return parseResponse<ImmichConnectionResult>(response, "Immich connection test");
+}
+
 export async function fetchPlexSessions(): Promise<PlexSessionSnapshot> {
-  const response = await fetch("/api/sessions", {
+  const response = await apiFetch("/api/sessions", {
     headers: { Accept: "application/json" },
   });
   return parseResponse<PlexSessionSnapshot>(response, "Plex sessions request");
 }
 
 export async function fetchMediaCapabilities(sessionIdentity: string): Promise<MediaCapabilities> {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionIdentity)}/media-capabilities`,
     {
       headers: { Accept: "application/json" },
@@ -153,7 +174,7 @@ export function sessionFrameUrl(
 }
 
 export async function createClip(request: ClipCreateRequest): Promise<JobSnapshot> {
-  const response = await fetch("/api/clips", {
+  const response = await apiFetch("/api/clips", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -162,7 +183,7 @@ export async function createClip(request: ClipCreateRequest): Promise<JobSnapsho
 }
 
 export async function fetchJob(jobId: string): Promise<JobSnapshot> {
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+  const response = await apiFetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
     headers: { Accept: "application/json" },
   });
   return parseResponse<JobSnapshot>(response, "Job request");
@@ -190,26 +211,26 @@ export async function fetchClips(query: ClipQuery): Promise<ClipPage> {
   query.media?.forEach((value) => params.append("media", value));
   query.episode?.forEach((value) => params.append("episode", value));
   if (query.sort) params.set("sort", query.sort);
-  const response = await fetch(`/api/clips?${params}`, { headers: { Accept: "application/json" } });
+  const response = await apiFetch(`/api/clips?${params}`, { headers: { Accept: "application/json" } });
   return parseResponse<ClipPage>(response, "Clip library request");
 }
 
 export async function fetchClip(clipId: string): Promise<ClipRecord> {
-  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}`, {
     headers: { Accept: "application/json" },
   });
   return parseResponse<ClipRecord>(response, "Clip detail request");
 }
 
 export async function fetchClipLibraries(): Promise<string[]> {
-  const response = await fetch("/api/clips/libraries", {
+  const response = await apiFetch("/api/clips/libraries", {
     headers: { Accept: "application/json" },
   });
   return parseResponse<string[]>(response, "Clip libraries request");
 }
 
 export async function fetchClipFilterOptions(): Promise<ClipFilterOptions> {
-  const response = await fetch("/api/clips/filter-options", {
+  const response = await apiFetch("/api/clips/filter-options", {
     headers: { Accept: "application/json" },
   });
   return parseResponse<ClipFilterOptions>(response, "Clip filter options request");
@@ -219,7 +240,7 @@ export async function updateClipMetadata(
   clipId: string,
   update: ClipMetadataUpdate,
 ): Promise<JobSnapshot> {
-  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}`, {
     method: "PUT",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(update),
@@ -231,7 +252,7 @@ export async function deleteClip(
   clipId: string,
   expectedRevision: number,
 ): Promise<ClipDeleteResult> {
-  const response = await fetch(`/api/clips/${encodeURIComponent(clipId)}`, {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}`, {
     method: "DELETE",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify({ expected_revision: expectedRevision }),

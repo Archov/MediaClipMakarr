@@ -18,7 +18,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchHealth, fetchSettings } from "../../api";
-import type { HealthStatus } from "../../types";
+import type { HealthResponse, HealthStatus } from "../../types";
 import { SettingsForm } from "./SettingsForm";
 
 function StatusIcon({ status }: { status: HealthStatus }) {
@@ -30,6 +30,36 @@ function StatusIcon({ status }: { status: HealthStatus }) {
 function StatusChip({ status }: { status: HealthStatus }) {
   const color = status === "ok" ? "success" : status === "degraded" ? "warning" : "error";
   return <Chip label={status.toUpperCase()} color={color} size="small" />;
+}
+
+function RuntimeReadinessCard({ health }: { health: HealthResponse }) {
+  return (
+    <Card variant="outlined">
+      <CardContent>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Typography variant="h5">Runtime readiness</Typography>
+          <StatusChip status={health.status} />
+        </Stack>
+        <List>
+          {[
+            ["Application", health.application],
+            ["SQLite", health.database],
+            ["Jellyfin FFmpeg", health.media_tools],
+          ].map(([name, component]) => {
+            const item = component as typeof health.application;
+            return (
+              <ListItem key={name as string} disableGutters alignItems="flex-start">
+                <ListItemIcon sx={{ minWidth: 40, pt: 0.5 }}>
+                  <StatusIcon status={item.status} />
+                </ListItemIcon>
+                <ListItemText primary={name as string} secondary={item.message} />
+              </ListItem>
+            );
+          })}
+        </List>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function SettingsScreen() {
@@ -48,34 +78,12 @@ export function SettingsScreen() {
         </Box>
       )}
       {settings.error && <Alert severity="error">{settings.error.message}</Alert>}
-      {settings.data && <SettingsForm settings={settings.data} />}
       {health.error && <Alert severity="error">{health.error.message}</Alert>}
-      {health.data && (
-        <Card variant="outlined">
-          <CardContent>
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="h5">Runtime readiness</Typography>
-              <StatusChip status={health.data.status} />
-            </Stack>
-            <List>
-              {[
-                ["Application", health.data.application],
-                ["SQLite", health.data.database],
-                ["Jellyfin FFmpeg", health.data.media_tools],
-              ].map(([name, component]) => {
-                const item = component as typeof health.data.application;
-                return (
-                  <ListItem key={name as string} disableGutters alignItems="flex-start">
-                    <ListItemIcon sx={{ minWidth: 40, pt: 0.5 }}>
-                      <StatusIcon status={item.status} />
-                    </ListItemIcon>
-                    <ListItemText primary={name as string} secondary={item.message} />
-                  </ListItem>
-                );
-              })}
-            </List>
-          </CardContent>
-        </Card>
+      {settings.data && (
+        <SettingsForm
+          settings={settings.data}
+          readiness={health.data && <RuntimeReadinessCard health={health.data} />}
+        />
       )}
     </Stack>
   );

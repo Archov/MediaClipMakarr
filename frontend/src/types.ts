@@ -31,7 +31,15 @@ export type ApplicationSettingField =
   | "plex_token"
   | "source_path_mappings"
   | "timezone"
-  | "x264_preset";
+  | "x264_preset"
+  | "immich_url"
+  | "immich_api_key"
+  | "immich_default_tag"
+  | "immich_auto_upload"
+  | "immich_manage_remote"
+  | "immich_tag_library"
+  | "immich_tag_show"
+  | "immich_tag_episode";
 
 export interface ApplicationSettings {
   plex_url: string;
@@ -41,6 +49,14 @@ export interface ApplicationSettings {
   timezone_configured: boolean;
   available_timezones: string[];
   x264_preset: string;
+  immich_url: string;
+  immich_api_key_configured: boolean;
+  immich_default_tag: string;
+  immich_auto_upload: boolean;
+  immich_manage_remote: boolean;
+  immich_tag_library: boolean;
+  immich_tag_show: boolean;
+  immich_tag_episode: boolean;
   environment_managed: Record<ApplicationSettingField, boolean>;
 }
 
@@ -51,6 +67,15 @@ export interface ApplicationSettingsUpdate {
   source_path_mappings?: SourcePathMapping[];
   timezone?: string;
   x264_preset?: string;
+  immich_url?: string;
+  immich_api_key?: string;
+  clear_immich_api_key?: boolean;
+  immich_default_tag?: string;
+  immich_auto_upload?: boolean;
+  immich_manage_remote?: boolean;
+  immich_tag_library?: boolean;
+  immich_tag_show?: boolean;
+  immich_tag_episode?: boolean;
 }
 
 export interface PlexConnectionResult {
@@ -64,6 +89,18 @@ export interface PlexConnectionResult {
 export interface PlexConnectionRequest {
   plex_url?: string;
   plex_token?: string;
+}
+
+export interface ImmichConnectionResult {
+  connected: boolean;
+  code: string;
+  message: string;
+  server_version: string | null;
+}
+
+export interface ImmichConnectionRequest {
+  immich_url?: string;
+  immich_api_key?: string;
 }
 
 export type PlexSessionSnapshotStatus =
