@@ -6,8 +6,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+from watchfiles import watch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WINDOWS_ENV_FILE = PROJECT_ROOT / ".env.windows"
@@ -105,8 +108,12 @@ def main() -> None:
         api_port,
     ]
     # Uvicorn's Windows reload worker uses a SelectorEventLoop, which cannot host
-    # the required asyncio subprocess boundary. Keep the normal ProactorEventLoop.
-    if sys.platform != "win32":
+    # the required asyncio subprocess boundary. Keep the normal ProactorEventLoop
+    # and instead watch src/ ourselves, restarting the whole backend process on
+    # change (see watch_backend_source below). Elsewhere uvicorn's own --reload
+    # already does this in-process and more cheaply.
+    watch_backend_externally = sys.platform == "win32"
+    if not watch_backend_externally:
         backend_command.extend(["--reload", "--reload-dir", "src"])
     frontend_command = [
         node,
@@ -116,31 +123,52 @@ def main() -> None:
         "--port",
         web_port,
     ]
-    commands = [
-        (backend_command, PROJECT_ROOT),
-        (frontend_command, PROJECT_ROOT / "frontend"),
-    ]
     process_group_options = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if sys.platform == "win32"
         else {"start_new_session": True}
     )
-    processes = [
-        subprocess.Popen(
-            command,
-            cwd=working_directory,
-            env=environment,
-            **process_group_options,
-        )
-        for command, working_directory in commands
-    ]
+
+    def spawn(command: list[str], cwd: Path) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(command, cwd=cwd, env=environment, **process_group_options)
+
+    backend_process = spawn(backend_command, PROJECT_ROOT)
+    frontend_process = spawn(frontend_command, PROJECT_ROOT / "frontend")
+
+    restart_requested = threading.Event()
+    stop_watching = threading.Event()
+    watcher_thread: threading.Thread | None = None
+    if watch_backend_externally:
+
+        def watch_backend_source() -> None:
+            for _ in watch(PROJECT_ROOT / "src", stop_event=stop_watching):
+                restart_requested.set()
+
+        watcher_thread = threading.Thread(target=watch_backend_source, daemon=True)
+        watcher_thread.start()
+        print("Watching src/ for changes; the backend restarts automatically on save.")
+
     interrupted = False
     try:
-        while all(process.poll() is None for process in processes):
+        while True:
+            if restart_requested.is_set():
+                restart_requested.clear()
+                print("Backend source changed; restarting uvicorn...")
+                request_graceful_shutdown({backend_process})
+                wait_for_graceful_shutdown([backend_process])
+                if backend_process.poll() is None:
+                    force_stop_process_tree(backend_process)
+                    backend_process.wait()
+                backend_process = spawn(backend_command, PROJECT_ROOT)
+                continue
+            if frontend_process.poll() is not None or backend_process.poll() is not None:
+                break
             time.sleep(0.25)
     except KeyboardInterrupt:
         interrupted = True
     finally:
+        stop_watching.set()
+        processes = [backend_process, frontend_process]
         shutdown_targets = {process for process in processes if process.poll() is None}
         request_graceful_shutdown(shutdown_targets)
         wait_for_graceful_shutdown(processes)
@@ -148,6 +176,8 @@ def main() -> None:
             if process.poll() is None:
                 force_stop_process_tree(process)
                 process.wait()
+        if watcher_thread is not None:
+            watcher_thread.join(timeout=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS)
         failed = [
             process.returncode
             for process in processes
