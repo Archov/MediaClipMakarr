@@ -11,7 +11,6 @@ import {
   Box,
   Button,
   IconButton,
-  InputAdornment,
   Stack,
   TextField,
   Tooltip,
@@ -24,6 +23,7 @@ import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import { SessionFrameImage } from "./SessionFrameImage";
 
 const MIN_ADJUSTMENT_VALUE = 1;
+const MAX_ADJUSTMENT_VALUE = 99;
 
 const pillSx = {
   display: "flex",
@@ -55,32 +55,27 @@ const NUDGE_UNIT_SUFFIX: Record<NudgeUnit, string> = {
   frames: "frame",
 };
 
-const NUDGE_UNIT_MS_PER_STEP: Record<Exclude<NudgeUnit, "frames">, number> = {
+const NUDGE_UNIT_MS_PER_STEP: Record<"minutes" | "seconds", number> = {
   minutes: 60_000,
   seconds: 1_000,
-  tenths: 100,
-  hundredths: 10,
 };
 
-// Tenths/hundredths are single decimal-place digits (0-9); the rest allow two
-// digits (1-99).
-const NUDGE_UNIT_MAX_VALUE: Record<NudgeUnit, number> = {
-  minutes: 99,
-  seconds: 99,
-  tenths: 9,
-  hundredths: 9,
-  frames: 99,
-};
-
-function clampAdjustmentValue(unit: NudgeUnit, value: number): number {
-  return Math.min(NUDGE_UNIT_MAX_VALUE[unit], Math.max(MIN_ADJUSTMENT_VALUE, value));
+function clampAdjustmentValue(value: number): number {
+  return Math.min(MAX_ADJUSTMENT_VALUE, Math.max(MIN_ADJUSTMENT_VALUE, value));
 }
 
 function nudgeStepMs(unit: NudgeUnit, value: number, frameRate: number | null): number {
   if (unit === "frames") {
     return frameRate ? Math.round((value * 1_000) / frameRate) : 0;
   }
-  return value * NUDGE_UNIT_MS_PER_STEP[unit];
+  const prefix = NUDGE_UNIT_PREFIX[unit];
+  if (prefix) {
+    // Parse the literal displayed decimal (e.g. prefix "0.0" + value "23" ->
+    // 0.023) so the applied delta always matches what's on screen, regardless
+    // of how many digits are currently entered.
+    return Math.round(Number(`${prefix}${value}`) * 1_000);
+  }
+  return value * NUDGE_UNIT_MS_PER_STEP[unit as "minutes" | "seconds"];
 }
 
 function availableNudgeUnits(framesAvailable: boolean): NudgeUnit[] {
@@ -210,26 +205,21 @@ export function ClipBoundaryEditor({
     const wheel = (event: WheelEvent) => {
       if (event.deltaY === 0) return;
       event.preventDefault();
-      setAdjustmentValue((value) =>
-        clampAdjustmentValue(adjustmentUnit, value + (event.deltaY < 0 ? 1 : -1)),
-      );
+      setAdjustmentValue((value) => clampAdjustmentValue(value + (event.deltaY < 0 ? 1 : -1)));
     };
     box.addEventListener("wheel", wheel, { passive: false });
     return () => box.removeEventListener("wheel", wheel);
-  }, [adjustmentUnit]);
+  }, []);
 
   useEffect(() => {
     if (adjustmentUnit === "frames" && !framesAvailable) {
       setAdjustmentUnit("seconds");
-      setAdjustmentValue((value) => clampAdjustmentValue("seconds", value));
     }
   }, [adjustmentUnit, framesAvailable]);
 
   const cycleAdjustmentUnit = (direction: 1 | -1) => {
     const next = stepNudgeUnit(adjustmentUnit, direction, framesAvailable);
-    if (next === adjustmentUnit) return;
     setAdjustmentUnit(next);
-    setAdjustmentValue((value) => clampAdjustmentValue(next, value));
   };
 
   useEffect(() => {
@@ -405,9 +395,7 @@ export function ClipBoundaryEditor({
             </Tooltip>
             <IconButton
               aria-label="Decrease nudge amount"
-              onClick={() =>
-                setAdjustmentValue((value) => clampAdjustmentValue(adjustmentUnit, value - 1))
-              }
+              onClick={() => setAdjustmentValue((value) => clampAdjustmentValue(value - 1))}
               sx={{ borderRadius: 0, borderRight: 1, borderColor: "divider" }}
             >
               <ChevronLeftRounded fontSize="small" />
@@ -416,13 +404,26 @@ export function ClipBoundaryEditor({
               ref={nudgeValueBoxRef}
               sx={{
                 display: "flex",
-                alignItems: "center",
+                alignItems: "baseline",
                 justifyContent: "center",
-                minWidth: 64,
+                // Tight when a decimal prefix is shown, so "0.023s" reads as one
+                // number; a small gap between the digits and a bare unit label
+                // (e.g. "20 frame") otherwise.
+                gap: NUDGE_UNIT_PREFIX[adjustmentUnit] ? 0 : "5px",
+                minWidth: 108,
                 alignSelf: "stretch",
+                px: 1.5,
                 cursor: "ns-resize",
               }}
             >
+              {NUDGE_UNIT_PREFIX[adjustmentUnit] && (
+                <Typography
+                  component="span"
+                  sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary" }}
+                >
+                  {NUDGE_UNIT_PREFIX[adjustmentUnit]}
+                </Typography>
+              )}
               <TextField
                 type="text"
                 variant="standard"
@@ -430,34 +431,29 @@ export function ClipBoundaryEditor({
                 onChange={(event) => {
                   const value = Number(event.target.value.replace(/[^0-9]/g, ""));
                   setAdjustmentValue(
-                    Number.isFinite(value)
-                      ? clampAdjustmentValue(adjustmentUnit, Math.trunc(value))
-                      : MIN_ADJUSTMENT_VALUE,
+                    Number.isFinite(value) ? clampAdjustmentValue(Math.trunc(value)) : MIN_ADJUSTMENT_VALUE,
                   );
                 }}
                 slotProps={{
                   htmlInput: {
                     inputMode: "numeric",
                     pattern: "[0-9]*",
-                    style: { textAlign: "center", width: "1.5ch" },
+                    style: { textAlign: "center", width: "2ch", padding: 0, fontSize: "1rem", fontWeight: 600 },
                   },
-                  input: {
-                    disableUnderline: true,
-                    startAdornment: NUDGE_UNIT_PREFIX[adjustmentUnit] ? (
-                      <InputAdornment position="start">{NUDGE_UNIT_PREFIX[adjustmentUnit]}</InputAdornment>
-                    ) : undefined,
-                    endAdornment: (
-                      <InputAdornment position="end">{NUDGE_UNIT_SUFFIX[adjustmentUnit]}</InputAdornment>
-                    ),
-                  },
+                  input: { disableUnderline: true },
                 }}
+                sx={{ flex: "none" }}
               />
+              <Typography
+                component="span"
+                sx={{ fontSize: "1rem", fontWeight: 600, color: "text.primary", whiteSpace: "nowrap" }}
+              >
+                {NUDGE_UNIT_SUFFIX[adjustmentUnit]}
+              </Typography>
             </Box>
             <IconButton
               aria-label="Increase nudge amount"
-              onClick={() =>
-                setAdjustmentValue((value) => clampAdjustmentValue(adjustmentUnit, value + 1))
-              }
+              onClick={() => setAdjustmentValue((value) => clampAdjustmentValue(value + 1))}
               sx={{ borderRadius: 0, borderLeft: 1, borderColor: "divider" }}
             >
               <ChevronRightRounded fontSize="small" />
