@@ -187,7 +187,7 @@ export function ImmichDeletePermissionDialog({
   onRetry: () => void;
 }) {
   return (
-    <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="xs">
+    <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
       <DialogTitle>Missing Immich permission</DialogTitle>
       <DialogContent>
         <Stack spacing={2}>
@@ -199,18 +199,26 @@ export function ImmichDeletePermissionDialog({
           {error && <Alert severity="error">{error}</Alert>}
         </Stack>
       </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose} disabled={busy}>Dismiss</Button>
+      <DialogActions sx={{ flexWrap: "nowrap" }}>
+        <Button onClick={onClose} disabled={busy} sx={{ whiteSpace: "nowrap" }}>Dismiss</Button>
         <Button
+          variant="contained"
           component="a"
           href={settingsUrl}
           target="_blank"
           rel="noopener noreferrer"
           disabled={busy}
+          sx={{ whiteSpace: "nowrap" }}
         >
           Open API Key Settings
         </Button>
-        <Button variant="contained" disabled={busy} onClick={onRetry}>
+        <Button
+          variant="contained"
+          color="error"
+          disabled={busy}
+          onClick={onRetry}
+          sx={{ whiteSpace: "nowrap" }}
+        >
           {busy ? "Retrying…" : "Retry Delete"}
         </Button>
       </DialogActions>
