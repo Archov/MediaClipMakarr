@@ -140,6 +140,9 @@ function ImmichIcon({ uploaded }: { uploaded: boolean }) {
 
 function ImmichStatusChip({ clip }: { clip: ClipRecord }) {
   const job = clip.immich_upload_job;
+  // A terminal success needs no chip — the upload icon's own blue/red fill
+  // already says "uploaded or not". Only show a chip when there's something
+  // that fill can't convey: active progress, or a partial/failed outcome.
   if (job && NONTERMINAL_JOB_STATES.has(job.state)) {
     return <Chip size="small" variant="outlined" icon={<CircularProgress size={12} />} label="Uploading…" />;
   }
@@ -147,9 +150,6 @@ function ImmichStatusChip({ clip }: { clip: ClipRecord }) {
     const label = job.state === "PARTIAL" ? "Partial" : "Failed";
     const detail = job.error ? `${job.error.code}: ${job.error.message}` : label;
     return <Tooltip title={detail}><Chip size="small" color={job.state === "PARTIAL" ? "warning" : "error"} label={label} /></Tooltip>;
-  }
-  if (job?.state === "SUCCEEDED" || clip.immich_asset_id) {
-    return <Chip size="small" color="success" label="Uploaded" />;
   }
   return null;
 }
