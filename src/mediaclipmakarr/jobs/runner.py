@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import shutil
 import time
@@ -13,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -32,6 +34,7 @@ from mediaclipmakarr.clip_library import (
     thumbnail_path,
 )
 from mediaclipmakarr.clips import (
+    clear_clip_immich_asset_id,
     get_clip,
     insert_clip,
     parse_stored_immich_tag_ids,
@@ -43,6 +46,8 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.immich import (
     ImmichApiError,
     ImmichAssetNotFoundError,
+    fetch_immich_api_key_permissions,
+    read_immich_asset,
     set_immich_asset_description,
     tag_immich_assets,
     untag_immich_assets,
@@ -69,6 +74,7 @@ from .repository import (
     finish_running_job_partial,
     finish_running_job_success,
     get_job_snapshot,
+    record_immich_upload_result,
     transition_to_finalizing,
     update_running_job,
     utc_now,
@@ -90,6 +96,7 @@ class ImmichJobSettings:
     tag_show: bool
     tag_episode: bool
     auto_upload: bool
+    timezone: str
 
 
 ImmichSettingsLoader = Callable[[], Awaitable[ImmichJobSettings]]
@@ -675,6 +682,7 @@ class JobRunner:
                 immich_api_key,
                 file_created_at=_as_utc_datetime(clip["created_at"]),
                 file_modified_at=datetime.fromtimestamp(source_stat.st_mtime, tz=UTC),
+                local_timezone=immich_settings.timezone,
             )
             try:
                 await set_clip_immich_asset_id(self.engine, clip_id, asset_id, normalized_url)
@@ -702,16 +710,34 @@ class JobRunner:
         # short-circuits the other, so a failure in one never hides a success in
         # the other. The one exception: a confirmed-missing asset on the reuse
         # path means nothing further is worth attempting against it.
+        # On a fresh upload Immich already derived the capture date/time correctly
+        # from the upload's own fileCreatedAt — only a reuse (validating/re-syncing
+        # an existing asset) needs it re-sent, so a clip's timestamp fix (e.g. this
+        # app's timezone setting changing) reaches assets uploaded before that change.
+        date_time_original = (
+            _as_utc_datetime(clip["created_at"])
+            .astimezone(ZoneInfo(immich_settings.timezone))
+            .isoformat()
+            if reusing
+            else None
+        )
         description_error: JobError | None = None
         try:
             await set_immich_asset_description(
-                asset_id, str(clip["title"]), normalized_url, immich_api_key
+                asset_id,
+                str(clip["title"]),
+                normalized_url,
+                immich_api_key,
+                date_time_original=date_time_original,
             )
         except ImmichApiError as error:
             if reusing and isinstance(error, ImmichAssetNotFoundError):
                 # Nothing new was created this run — a PARTIAL result would wrongly
-                # imply a confirmed asset. The stale `immich_asset_id` is left as-is;
-                # relinking it is a P4-05 concern.
+                # imply a confirmed asset. The stale `immich_asset_id` is left as-is
+                # here; the bulk job's validation stage is what actually detects this
+                # (via this same FAILED/IMMICH_ASSET_NOT_FOUND signal) and clears it
+                # to trigger a re-upload. A single-clip retry through this function
+                # alone would otherwise keep hitting the same stale id forever.
                 return ImmichOrganizeResult(
                     asset_id=asset_id,
                     state="FAILED",
@@ -899,39 +925,257 @@ class JobRunner:
             return None
 
         total = len(plan.clip_ids)
+        if total == 0:
+            await finish_running_job_success(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                result_payload={
+                    "total": 0,
+                    "succeeded": 0,
+                    "partial": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "reuploaded": 0,
+                    "permission_warnings": [],
+                    "details": [],
+                },
+                message="Nothing to upload.",
+            )
+            await self._publish_durable_job_update(claimed.id)
+            return
+
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="validating",
+            progress=0.0,
+            current_stage_progress=0.0,
+            message="Checking the Immich API key's permissions.",
+        )
+        await self._publish_durable_job_update(claimed.id)
+
+        try:
+            permissions = set(
+                await fetch_immich_api_key_permissions(normalized_url, immich_settings.api_key)
+            )
+        except ImmichApiError as error:
+            await fail_job(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                code=error.job_error_code,
+                message=str(error),
+                retryable=error.job_retryable,
+            )
+            await self._publish_durable_job_update(claimed.id)
+            return
+
+        has_all = "all" in permissions
+        if not (has_all or "asset.upload" in permissions):
+            await fail_job(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                code="IMMICH_MISSING_ASSET_UPLOAD",
+                message=(
+                    "The configured Immich API key is missing the asset.upload "
+                    "permission, so no clips can be uploaded."
+                ),
+                retryable=True,
+            )
+            await self._publish_durable_job_update(claimed.id)
+            return
+
+        can_validate = has_all or "asset.read" in permissions
+        can_sync_metadata = can_validate and (
+            has_all or {"asset.update", "tag.read", "tag.create", "tag.asset"} <= permissions
+        )
+        permission_warnings: list[str] = []
+        if not can_validate:
+            permission_warnings.append(
+                "The Immich API key is missing asset.read — existing uploads could not "
+                "be validated; only unassociated clips were uploaded."
+            )
+        elif not can_sync_metadata:
+            permission_warnings.append(
+                "The Immich API key is missing asset.update or a tag permission — "
+                "existing uploads were only checked for existence, not re-synced."
+            )
+
         succeeded = partial = failed = skipped = 0
+        reuploaded = 0
         details: list[dict[str, Any]] = []
 
-        for index, clip_id in enumerate(plan.clip_ids):
+        def tally(state: str) -> None:
+            nonlocal succeeded, partial, failed
+            if state == "SUCCEEDED":
+                succeeded += 1
+            elif state == "PARTIAL":
+                partial += 1
+            else:
+                failed += 1
+
+        clips: dict[str, dict[str, Any]] = {}
+        already_linked_ids: list[str] = []
+        unlinked_ids: list[str] = []
+        for clip_id in plan.clip_ids:
+            clip = await get_clip(self.engine, clip_id, self.settings.resolved_clip_dir)
+            if clip is None:
+                skipped += 1
+                details.append(
+                    {
+                        "clip_id": clip_id,
+                        "title": None,
+                        "stage": "validate",
+                        "outcome": "skipped",
+                        "error_code": None,
+                    }
+                )
+                continue
+            clips[clip_id] = clip
+            if (
+                bool(clip.get("immich_asset_id"))
+                and clip.get("immich_server_url") == normalized_url
+            ):
+                already_linked_ids.append(clip_id)
+            else:
+                unlinked_ids.append(clip_id)
+
+        # --- Stage 1: validate/update existing uploads --------------------------
+        reupload_ids: list[str] = []
+        if can_validate:
+            for index, clip_id in enumerate(already_linked_ids):
+                await update_running_job(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    stage="validating",
+                    progress=(index / len(already_linked_ids)) * 0.5,
+                    current_stage_progress=index / len(already_linked_ids),
+                    message=f"Validating {index + 1} of {len(already_linked_ids)} existing uploads.",
+                )
+                await self._publish_durable_job_update(claimed.id)
+
+                clip = clips[clip_id]
+                if can_sync_metadata:
+                    result = await self._upload_and_organize_clip(
+                        clip, immich_settings, report_stage=noop_report_stage
+                    )
+                    if (
+                        result.state == "FAILED"
+                        and result.error is not None
+                        and result.error.code == "IMMICH_ASSET_NOT_FOUND"
+                    ):
+                        await clear_clip_immich_asset_id(self.engine, clip_id)
+                        reupload_ids.append(clip_id)
+                        details.append(
+                            {
+                                "clip_id": clip_id,
+                                "title": str(clip["title"]),
+                                "stage": "validate",
+                                "outcome": "failed",
+                                "error_code": "IMMICH_ASSET_NOT_FOUND",
+                            }
+                        )
+                        continue
+                    tally(result.state)
+                    details.append(
+                        {
+                            "clip_id": clip_id,
+                            "title": str(clip["title"]),
+                            "stage": "validate",
+                            "outcome": result.state.lower(),
+                            "error_code": result.error.code if result.error else None,
+                        }
+                    )
+                    await record_immich_upload_result(
+                        self.engine,
+                        build_immich_upload_plan(clip),
+                        state=result.state,
+                        result_payload=result.result_payload,
+                        message=result.message,
+                        error=result.error,
+                    )
+                else:
+                    try:
+                        await read_immich_asset(
+                            str(clip["immich_asset_id"]), normalized_url, immich_settings.api_key
+                        )
+                    except ImmichAssetNotFoundError:
+                        await clear_clip_immich_asset_id(self.engine, clip_id)
+                        reupload_ids.append(clip_id)
+                        details.append(
+                            {
+                                "clip_id": clip_id,
+                                "title": str(clip["title"]),
+                                "stage": "validate",
+                                "outcome": "failed",
+                                "error_code": "IMMICH_ASSET_NOT_FOUND",
+                            }
+                        )
+                    except ImmichApiError as error:
+                        failed += 1
+                        details.append(
+                            {
+                                "clip_id": clip_id,
+                                "title": str(clip["title"]),
+                                "stage": "validate",
+                                "outcome": "failed",
+                                "error_code": error.job_error_code,
+                            }
+                        )
+                    else:
+                        succeeded += 1
+                        details.append(
+                            {
+                                "clip_id": clip_id,
+                                "title": str(clip["title"]),
+                                "stage": "validate",
+                                "outcome": "succeeded",
+                                "error_code": None,
+                            }
+                        )
+        else:
+            for clip_id in already_linked_ids:
+                skipped += 1
+                details.append(
+                    {
+                        "clip_id": clip_id,
+                        "title": str(clips[clip_id]["title"]),
+                        "stage": "validate",
+                        "outcome": "skipped",
+                        "error_code": None,
+                    }
+                )
+
+        reuploaded = len(reupload_ids)
+
+        # --- Stage 2: upload unassociated (and just-discovered-missing) clips ---
+        upload_ids = unlinked_ids + reupload_ids
+        for index, clip_id in enumerate(upload_ids):
             await update_running_job(
                 self.engine,
                 claimed.id,
                 claimed.run_token,
                 stage="uploading_asset",
-                progress=(index / total) if total else 1.0,
-                current_stage_progress=0.0,
-                message=f"Processing clip {index + 1} of {total}.",
+                progress=0.5 + (index / len(upload_ids)) * 0.5,
+                current_stage_progress=index / len(upload_ids),
+                message=f"Uploading {index + 1} of {len(upload_ids)} clips.",
             )
             await self._publish_durable_job_update(claimed.id)
 
+            # Re-fetch: a reupload candidate's association was just cleared above,
+            # and this must see that to take the fresh-upload path, not "reusing".
             clip = await get_clip(self.engine, clip_id, self.settings.resolved_clip_dir)
             if clip is None:
                 skipped += 1
                 details.append(
-                    {"clip_id": clip_id, "title": None, "outcome": "skipped", "error_code": None}
-                )
-                continue
-
-            already_linked = (
-                bool(clip.get("immich_asset_id"))
-                and clip.get("immich_server_url") == normalized_url
-            )
-            if already_linked:
-                skipped += 1
-                details.append(
                     {
                         "clip_id": clip_id,
-                        "title": str(clip["title"]),
+                        "title": None,
+                        "stage": "upload",
                         "outcome": "skipped",
                         "error_code": None,
                     }
@@ -944,31 +1188,71 @@ class JobRunner:
                 )
             except Exception as error:
                 failed += 1
+                error_code = getattr(error, "job_error_code", type(error).__name__.upper())
+                error_message = str(error) or error_code
                 details.append(
                     {
                         "clip_id": clip_id,
                         "title": str(clip.get("title") or clip_id),
+                        "stage": "upload",
                         "outcome": "failed",
-                        "error_code": getattr(
-                            error, "job_error_code", type(error).__name__.upper()
-                        ),
+                        "error_code": error_code,
                     }
+                )
+                await record_immich_upload_result(
+                    self.engine,
+                    build_immich_upload_plan(clip),
+                    state="FAILED",
+                    result_payload=None,
+                    message=error_message,
+                    error=JobError(code=error_code, message=error_message, retryable=True),
                 )
                 continue
 
-            if result.state == "SUCCEEDED":
-                succeeded += 1
-            elif result.state == "PARTIAL":
-                partial += 1
-            else:
-                failed += 1
+            # A fresh asset should exist immediately — a 404 here means the upload
+            # didn't actually stick (a rare race/inconsistency), not a permanent
+            # local/remote divergence like the validate-stage check above, so this
+            # doesn't attempt a same-run second re-upload — just reports it.
+            if can_validate and result.state != "FAILED" and result.asset_id:
+                try:
+                    await read_immich_asset(
+                        result.asset_id, normalized_url, immich_settings.api_key
+                    )
+                except ImmichAssetNotFoundError:
+                    result = dataclasses.replace(
+                        result,
+                        state="FAILED",
+                        error=JobError(
+                            code="IMMICH_UPLOAD_VERIFICATION_FAILED",
+                            message=(
+                                "Immich reported this asset as uploaded, but it could "
+                                "not be found immediately afterward."
+                            ),
+                            retryable=True,
+                        ),
+                    )
+                except ImmichApiError:
+                    # A transient verify failure (auth hiccup, timeout) doesn't mean
+                    # the upload itself failed — its own result stands.
+                    pass
+
+            tally(result.state)
             details.append(
                 {
                     "clip_id": clip_id,
                     "title": str(clip["title"]),
+                    "stage": "upload",
                     "outcome": result.state.lower(),
                     "error_code": result.error.code if result.error else None,
                 }
+            )
+            await record_immich_upload_result(
+                self.engine,
+                build_immich_upload_plan(clip),
+                state=result.state,
+                result_payload=result.result_payload,
+                message=result.message,
+                error=result.error,
             )
 
         attempted = succeeded + partial + failed
@@ -978,10 +1262,12 @@ class JobRunner:
             "partial": partial,
             "failed": failed,
             "skipped": skipped,
+            "reuploaded": reuploaded,
+            "permission_warnings": permission_warnings,
             "details": details,
         }
         summary_message = (
-            f"Bulk upload complete: {succeeded} succeeded, {partial} partial, "
+            f"Validate and upload complete: {succeeded} succeeded, {partial} partial, "
             f"{failed} failed, {skipped} skipped."
         )
 
@@ -1001,6 +1287,7 @@ class JobRunner:
                 code="BULK_UPLOAD_FAILED",
                 message=summary_message,
                 retryable=True,
+                result_payload=result_payload,
             )
         else:
             await finish_running_job_partial(

@@ -138,6 +138,24 @@ async def set_clip_immich_asset_id(
             )
 
 
+async def clear_clip_immich_asset_id(engine: AsyncEngine, clip_id: str) -> None:
+    """Drop a clip's Immich association after its asset was confirmed gone
+    (deleted directly in Immich, detected via a 404 on read/update).
+
+    Without this, `set_clip_immich_asset_id`'s same-server guard would refuse
+    to record the id from a fresh re-upload — it only ever replaces an
+    association for a *different* server, not a stale one for the same server.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE clips SET immich_asset_id = NULL, immich_server_url = NULL, "
+                "immich_tag_ids = NULL WHERE id = :id"
+            ),
+            {"id": clip_id},
+        )
+
+
 def parse_stored_immich_tag_ids(value: object) -> list[str]:
     """Decode the `immich_tag_ids` column (a JSON array, or NULL) into a list."""
     if not value:

@@ -292,6 +292,7 @@ export interface ImmichUploadJobResult {
 export interface BulkImmichUploadJobResultDetail {
   clip_id: string;
   title: string | null;
+  stage: "validate" | "upload";
   outcome: "succeeded" | "partial" | "failed" | "skipped";
   error_code: string | null;
 }
@@ -302,6 +303,8 @@ export interface BulkImmichUploadJobResult {
   partial: number;
   failed: number;
   skipped: number;
+  reuploaded: number;
+  permission_warnings: string[];
   details: BulkImmichUploadJobResultDetail[];
 }
 

@@ -48,6 +48,7 @@ import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
   BulkImmichUploadJobResult,
+  BulkImmichUploadJobResultDetail,
   ImmichConnectionRequest,
   ImmichConnectionResult,
   JobSnapshot,
@@ -499,9 +500,43 @@ export function SettingsForm({
     window.sessionStorage.removeItem(ACTIVE_BULK_UPLOAD_JOB_KEY);
   };
   const bulkUploadResult = bulkUploadTerminal ? (activeBulkUploadJob?.result as BulkImmichUploadJobResult | null) : null;
-  const bulkUploadAttentionTitles = bulkUploadResult?.details
+  // A re-uploaded clip appears twice (its validate-stage discovery, then its
+  // upload-stage resolution) — only the last entry per clip is its final outcome.
+  const bulkUploadFinalDetails = (() => {
+    const byClip = new Map<string, BulkImmichUploadJobResultDetail>();
+    bulkUploadResult?.details.forEach((item) => byClip.set(item.clip_id, item));
+    return [...byClip.values()];
+  })();
+  const bulkUploadAttentionTitles = bulkUploadFinalDetails
     .filter((item) => item.outcome === "partial" || item.outcome === "failed")
-    .map((item) => item.title || item.clip_id) ?? [];
+    .map((item) => item.title || item.clip_id);
+  const bulkUploadNeedsLog = Boolean(
+    bulkUploadResult && (bulkUploadResult.partial > 0 || bulkUploadResult.failed > 0)
+  );
+  const downloadBulkUploadLog = () => {
+    if (!bulkUploadResult) return;
+    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const rows = [
+      ["clip_id", "title", "stage", "outcome", "error_code"],
+      ...bulkUploadResult.details.map((item) => [
+        item.clip_id,
+        item.title ?? "",
+        item.stage,
+        item.outcome,
+        item.error_code ?? "",
+      ]),
+    ];
+    const csv = rows.map((row) => row.map((cell) => escape(String(cell))).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `immich-validate-and-upload-${activeBulkUploadJob?.id ?? "log"}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
   const immichConfigured = Boolean(settings.immich_url && settings.immich_api_key_configured);
 
   useEffect(() => {
@@ -861,14 +896,14 @@ export function SettingsForm({
               <Divider />
 
               <Stack spacing={1} alignItems="flex-start">
-                <Tooltip title={immichConfigured ? "Uploads every clip not yet in Immich" : "Configure Immich above to enable bulk upload"}>
+                <Tooltip title={immichConfigured ? "Checks the API key's permissions, re-syncs existing uploads, and uploads everything else" : "Configure Immich above to enable this"}>
                   <span>
                     <Button
                       variant="outlined"
                       disabled={!immichConfigured || bulkUploadMutation.isPending || (Boolean(activeBulkUploadJob) && !bulkUploadTerminal)}
                       onClick={() => bulkUploadMutation.mutate()}
                     >
-                      Upload all non-uploaded clips
+                      Validate and upload all clips
                     </Button>
                   </span>
                 </Tooltip>
@@ -883,13 +918,17 @@ export function SettingsForm({
                     <Typography variant="caption" color="text.secondary">{activeBulkUploadJob.message}</Typography>
                   </Stack>
                 )}
+                {bulkUploadResult && bulkUploadResult.permission_warnings.map((warning) => (
+                  <Alert key={warning} severity="warning" sx={{ width: "100%" }}>{warning}</Alert>
+                ))}
                 {activeBulkUploadJob && bulkUploadTerminal && bulkUploadResult && (
                   <Alert
                     severity={activeBulkUploadJob.state === "FAILED" ? "error" : activeBulkUploadJob.state === "PARTIAL" ? "warning" : "success"}
                     onClose={dismissBulkUploadSummary}
                     sx={{ width: "100%" }}
                   >
-                    Bulk upload complete: {bulkUploadResult.succeeded} succeeded, {bulkUploadResult.partial} partial, {bulkUploadResult.failed} failed, {bulkUploadResult.skipped} skipped.
+                    Validate and upload complete: {bulkUploadResult.succeeded} succeeded, {bulkUploadResult.partial} partial, {bulkUploadResult.failed} failed, {bulkUploadResult.skipped} skipped.
+                    {bulkUploadResult.reuploaded > 0 && ` ${bulkUploadResult.reuploaded} clip${bulkUploadResult.reuploaded === 1 ? "" : "s"} had a missing Immich asset and were re-uploaded.`}
                     {bulkUploadAttentionTitles.length > 0 && (
                       <>
                         {" "}These need attention — retry individually from the Library screen: {bulkUploadAttentionTitles.join(", ")}.
@@ -899,8 +938,13 @@ export function SettingsForm({
                 )}
                 {activeBulkUploadJob && bulkUploadTerminal && !bulkUploadResult && (
                   <Alert severity="error" onClose={dismissBulkUploadSummary} sx={{ width: "100%" }}>
-                    {activeBulkUploadJob.error?.message ?? "The bulk Immich upload failed."}
+                    {activeBulkUploadJob.error?.message ?? "Validate and upload failed."}
                   </Alert>
+                )}
+                {bulkUploadNeedsLog && (
+                  <Button size="small" variant="text" onClick={downloadBulkUploadLog}>
+                    Download itemized log
+                  </Button>
                 )}
               </Stack>
             </Stack>

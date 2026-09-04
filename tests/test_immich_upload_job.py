@@ -30,10 +30,19 @@ from mediaclipmakarr.jobs import (
     enqueue_bulk_immich_upload_job,
     enqueue_immich_upload_job,
     get_job_snapshot,
+    get_latest_jobs_for_operations,
 )
 
 IMMICH_URL = "http://immich.example:2283"
 OTHER_IMMICH_URL = "http://other-immich.example:2283"
+FULL_IMMICH_PERMISSIONS = [
+    "asset.upload",
+    "asset.read",
+    "asset.update",
+    "tag.read",
+    "tag.create",
+    "tag.asset",
+]
 
 
 async def run_blocking(function, *args, **kwargs):
@@ -80,6 +89,7 @@ def _make_runner(
     tag_show: bool = False,
     tag_episode: bool = False,
     auto_upload: bool = False,
+    timezone: str = "UTC",
 ) -> JobRunner:
     async def immich_settings_loader() -> ImmichJobSettings:
         return ImmichJobSettings(
@@ -90,6 +100,7 @@ def _make_runner(
             tag_show=tag_show,
             tag_episode=tag_episode,
             auto_upload=auto_upload,
+            timezone=timezone,
         )
 
     return JobRunner(
@@ -126,11 +137,11 @@ async def test_immich_upload_succeeds_end_to_end(tmp_path, monkeypatch) -> None:
     upload_calls: list[str] = []
     description_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(url)
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         description_calls.append(asset_id)
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
@@ -181,11 +192,11 @@ async def test_immich_upload_partial_on_description_failure_then_retry_succeeds(
     upload_calls: list[str] = []
     description_attempts = {"count": 0}
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(url)
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         description_attempts["count"] += 1
         if description_attempts["count"] == 1:
             raise ImmichInvalidResponseError("temporary failure")
@@ -247,11 +258,11 @@ async def test_immich_upload_reuploads_when_configured_server_changes(
 
     upload_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(url)
         return f"asset-for-{url}"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
@@ -306,7 +317,7 @@ async def test_immich_upload_partial_when_local_association_write_loses_a_race(
                 {"asset_id": "asset-from-elsewhere", "server_url": IMMICH_URL, "id": "clip-one"},
             )
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         # Simulate a second writer landing between this job's `get_clip` read and its
         # own `set_clip_immich_asset_id` call, by writing a conflicting association
         # as a side effect of "the network call" completing.
@@ -315,7 +326,7 @@ async def test_immich_upload_partial_when_local_association_write_loses_a_race(
 
     description_calls: list[str] = []
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         description_calls.append(asset_id)
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
@@ -366,11 +377,11 @@ async def test_immich_upload_fails_without_clearing_stale_asset_on_reuse_path(
 
     upload_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(url)
         return "should-not-be-called"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
@@ -421,7 +432,7 @@ async def test_immich_upload_rejects_a_fingerprint_mismatch_before_uploading(
 
     upload_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(url)
         return "should-not-upload"
 
@@ -517,10 +528,10 @@ async def test_immich_upload_applies_default_and_hierarchy_tags_on_success(
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     upsert_calls: list[list[str]] = []
@@ -583,10 +594,10 @@ async def test_immich_upload_partial_when_tagging_fails_but_description_succeeds
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     async def fake_upsert_tags(tag_paths, url, api_key):
@@ -633,10 +644,10 @@ async def test_immich_upload_partial_when_description_fails_but_tagging_succeeds
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         raise ImmichInvalidResponseError("description service unavailable")
 
     async def fake_upsert_tags(tag_paths, url, api_key):
@@ -687,10 +698,10 @@ async def test_immich_upload_combines_errors_when_description_and_tagging_both_f
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         raise ImmichInvalidResponseError("description service unavailable")
 
     async def fake_upsert_tags(tag_paths, url, api_key):
@@ -739,10 +750,10 @@ async def test_immich_upload_skips_tagging_step_when_nothing_configured(
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     async def fail_if_called(*args, **kwargs):
@@ -786,10 +797,10 @@ async def test_immich_upload_ignores_a_missing_fingerprint_baseline(
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
@@ -828,10 +839,10 @@ async def test_immich_upload_removes_stale_tags_no_longer_resolved(
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return "asset-remote-1"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     async def fake_upsert_tags(tag_paths, url, api_key):
@@ -907,10 +918,10 @@ async def test_immich_upload_does_not_carry_stale_tag_ids_across_a_server_change
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         return f"asset-for-{url}"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         return None
 
     async def fake_upsert_tags(tag_paths, url, api_key):
@@ -994,7 +1005,7 @@ async def test_enqueue_bulk_immich_upload_job_reuses_an_already_active_job(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_bulk_upload_reuploads_stale_server_clip_but_skips_current_server_clip(
+async def test_bulk_upload_uploads_stale_server_clip_and_validates_current_server_clip(
     tmp_path, monkeypatch
 ) -> None:
     database_path = tmp_path / "application.db"
@@ -1008,22 +1019,31 @@ async def test_bulk_upload_reuploads_stale_server_clip_but_skips_current_server_
     engine = create_database_engine(database_path)
 
     upload_calls: list[str] = []
+    description_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(str(source_path))
         return "asset-remote-new"
 
-    async def fake_set_description(asset_id, description, url, api_key):
-        return None
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
+        description_calls.append(asset_id)
+
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    async def fake_read_asset(asset_id, url, api_key):
+        return {"id": asset_id}
 
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
     monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
     try:
         await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
         await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
-        # clip-one is linked to a different (stale) server — still eligible.
+        # clip-one is linked to a different (stale) server — treated as unlinked, uploaded fresh.
         await set_clip_immich_asset_id(engine, "clip-one", "asset-old", OTHER_IMMICH_URL)
-        # clip-two is already linked to the currently configured server — skip it.
+        # clip-two is already linked to the currently configured server — validated, not re-uploaded.
         await set_clip_immich_asset_id(engine, "clip-two", "asset-current", IMMICH_URL)
 
         plan = build_bulk_immich_upload_plan(["clip-one", "clip-two"])
@@ -1036,26 +1056,34 @@ async def test_bulk_upload_reuploads_stale_server_clip_but_skips_current_server_
     finally:
         await engine.dispose()
 
+    # clip-one's asset was actually (re-)uploaded; clip-two's existing asset was
+    # only validated/re-synced via set_immich_asset_description, never re-uploaded.
     assert upload_calls == [str(source_one)]
+    # Validate stage (already-linked clip-two) runs before upload stage (clip-one).
+    assert description_calls == ["asset-current", "asset-remote-new"]
     assert snapshot is not None
     assert snapshot.state == "SUCCEEDED"
     assert snapshot.result == {
         "total": 2,
-        "succeeded": 1,
+        "succeeded": 2,
         "partial": 0,
         "failed": 0,
-        "skipped": 1,
+        "skipped": 0,
+        "reuploaded": 0,
+        "permission_warnings": [],
         "details": [
             {
-                "clip_id": "clip-one",
-                "title": "Pilot",
+                "clip_id": "clip-two",
+                "title": "Encore",
+                "stage": "validate",
                 "outcome": "succeeded",
                 "error_code": None,
             },
             {
-                "clip_id": "clip-two",
-                "title": "Encore",
-                "outcome": "skipped",
+                "clip_id": "clip-one",
+                "title": "Pilot",
+                "stage": "upload",
+                "outcome": "succeeded",
                 "error_code": None,
             },
         ],
@@ -1080,18 +1108,26 @@ async def test_bulk_upload_continues_after_a_clip_fails_and_tallies_outcomes(
 
     upload_calls: list[str] = []
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         upload_calls.append(str(source_path))
         if source_path == source_two:
             raise ImmichInvalidResponseError("upload exploded")
         return f"asset-for-{source_path.name}"
 
-    async def fake_set_description(asset_id, description, url, api_key):
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
         if asset_id == "asset-for-Finale.mp4":
             raise ImmichInvalidResponseError("description exploded")
 
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    async def fake_read_asset(asset_id, url, api_key):
+        return {"id": asset_id}
+
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
     monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
     try:
         await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
         await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
@@ -1104,6 +1140,13 @@ async def test_bulk_upload_continues_after_a_clip_fails_and_tallies_outcomes(
         runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
         await runner._execute_claimed_job(claimed)
         snapshot = await get_job_snapshot(engine, claimed.id)
+        # Each attempted clip must get its own immich_upload job record — otherwise
+        # the Library screen's per-clip status has nothing but immich_asset_id to
+        # fall back on, which reads as a plain "Uploaded" even for the partial and
+        # failed clips here.
+        per_clip = await get_latest_jobs_for_operations(
+            engine, "immich_upload", ["clip-one", "clip-two", "clip-three"]
+        )
     finally:
         await engine.dispose()
 
@@ -1122,6 +1165,10 @@ async def test_bulk_upload_continues_after_a_clip_fails_and_tallies_outcomes(
     assert outcomes == {"clip-one": "succeeded", "clip-two": "failed", "clip-three": "partial"}
     titles = {item["clip_id"]: item["title"] for item in snapshot.result["details"]}
     assert titles == {"clip-one": "Pilot", "clip-two": "Encore", "clip-three": "Finale"}
+
+    assert per_clip["clip-one"].state == "SUCCEEDED"
+    assert per_clip["clip-two"].state == "FAILED"
+    assert per_clip["clip-three"].state == "PARTIAL"
 
 
 @pytest.mark.asyncio
@@ -1148,6 +1195,8 @@ async def test_bulk_upload_with_no_eligible_clips_is_marked_succeeded(tmp_path) 
         "partial": 0,
         "failed": 0,
         "skipped": 0,
+        "reuploaded": 0,
+        "permission_warnings": [],
         "details": [],
     }
 
@@ -1166,10 +1215,14 @@ async def test_bulk_upload_marks_failed_when_every_attempted_clip_fails(
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
-    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
         raise ImmichInvalidResponseError("upload exploded")
 
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
     monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
     try:
         await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
         await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
@@ -1188,3 +1241,293 @@ async def test_bulk_upload_marks_failed_when_every_attempted_clip_fails(
     assert snapshot.state == "FAILED"
     assert snapshot.error is not None
     assert snapshot.error.code == "BULK_UPLOAD_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_hard_fails_when_asset_upload_permission_missing(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"one")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_permissions(url, api_key):
+        return ["asset.read", "asset.update", "tag.read", "tag.create", "tag.asset"]
+
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+
+        plan = build_bulk_immich_upload_plan(["clip-one"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.error is not None
+    assert snapshot.error.code == "IMMICH_MISSING_ASSET_UPLOAD"
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_falls_back_to_read_only_validation_without_update_permission(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"one")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    read_calls: list[str] = []
+    description_called = False
+
+    async def fake_permissions(url, api_key):
+        return ["asset.upload", "asset.read"]
+
+    async def fake_read_asset(asset_id, url, api_key):
+        read_calls.append(asset_id)
+        return {"id": asset_id}
+
+    async def fake_set_description(*args, **kwargs):
+        nonlocal description_called
+        description_called = True
+
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-current", IMMICH_URL)
+
+        plan = build_bulk_immich_upload_plan(["clip-one"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    # Missing asset.update (and the tag permissions) means metadata can't be
+    # re-synced — only a plain existence check runs, not the full reuse/update path.
+    assert read_calls == ["asset-current"]
+    assert description_called is False
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result is not None
+    assert snapshot.result["succeeded"] == 1
+    assert snapshot.result["skipped"] == 0
+    assert snapshot.result["permission_warnings"] == [
+        "The Immich API key is missing asset.update or a tag permission — existing "
+        "uploads were only checked for existence, not re-synced."
+    ]
+    assert snapshot.result["details"] == [
+        {
+            "clip_id": "clip-one",
+            "title": "Pilot",
+            "stage": "validate",
+            "outcome": "succeeded",
+            "error_code": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_skips_validation_entirely_without_read_permission(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source_linked = clip_root / "TV Shows" / "Pilot.mp4"
+    source_new = clip_root / "TV Shows" / "Encore.mp4"
+    source_linked.parent.mkdir(parents=True)
+    source_linked.write_bytes(b"one")
+    source_new.write_bytes(b"two")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    async def fake_permissions(url, api_key):
+        return ["asset.upload"]
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
+        upload_calls.append(str(source_path))
+        return "asset-new"
+
+    async def fake_set_description(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source_linked, clip_id="clip-linked", title="Pilot"))
+        await insert_clip(engine, clip_payload(source_new, clip_id="clip-new", title="Encore"))
+        await set_clip_immich_asset_id(engine, "clip-linked", "asset-current", IMMICH_URL)
+
+        plan = build_bulk_immich_upload_plan(["clip-linked", "clip-new"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    # Without asset.read, the already-linked clip is left untouched (not even a
+    # verification read after the new clip's upload); only the never-linked clip
+    # is uploaded.
+    assert upload_calls == [str(source_new)]
+    assert snapshot is not None
+    assert snapshot.result is not None
+    assert snapshot.result["succeeded"] == 1
+    assert snapshot.result["skipped"] == 1
+    outcomes = {item["clip_id"]: item["outcome"] for item in snapshot.result["details"]}
+    assert outcomes == {"clip-linked": "skipped", "clip-new": "succeeded"}
+    assert snapshot.result["permission_warnings"] == [
+        "The Immich API key is missing asset.read — existing uploads could not be "
+        "validated; only unassociated clips were uploaded."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_reuploads_a_clip_whose_asset_was_deleted_in_immich(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"one")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+    description_calls: list[str] = []
+
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
+        description_calls.append(asset_id)
+        if asset_id == "asset-deleted":
+            raise ImmichAssetNotFoundError("Immich asset asset-deleted no longer exists.")
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
+        upload_calls.append(str(source_path))
+        return "asset-fresh"
+
+    async def fake_read_asset(asset_id, url, api_key):
+        return {"id": asset_id}
+
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-deleted", IMMICH_URL)
+
+        plan = build_bulk_immich_upload_plan(["clip-one"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+        clip_after = await get_clip(engine, "clip-one", tmp_path / "clips")
+    finally:
+        await engine.dispose()
+
+    # The stale asset is detected during validation, cleared, and the clip is
+    # re-uploaded (as a fresh asset, not a description update) within the same run.
+    assert description_calls == ["asset-deleted", "asset-fresh"]
+    assert upload_calls == [str(source)]
+    assert clip_after is not None
+    assert clip_after["immich_asset_id"] == "asset-fresh"
+    assert clip_after["immich_server_url"] == IMMICH_URL
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result is not None
+    assert snapshot.result["reuploaded"] == 1
+    assert snapshot.result["succeeded"] == 1
+    assert snapshot.result["failed"] == 0
+    assert snapshot.result["details"] == [
+        {
+            "clip_id": "clip-one",
+            "title": "Pilot",
+            "stage": "validate",
+            "outcome": "failed",
+            "error_code": "IMMICH_ASSET_NOT_FOUND",
+        },
+        {
+            "clip_id": "clip-one",
+            "title": "Pilot",
+            "stage": "upload",
+            "outcome": "succeeded",
+            "error_code": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_marks_upload_failed_when_verification_read_returns_404(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"one")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
+        return "asset-vanished"
+
+    async def fake_set_description(*args, **kwargs):
+        return None
+
+    async def fake_read_asset(asset_id, url, api_key):
+        raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+
+        plan = build_bulk_immich_upload_plan(["clip-one"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.result is not None
+    assert snapshot.result["failed"] == 1
+    assert snapshot.result["details"][0]["error_code"] == "IMMICH_UPLOAD_VERIFICATION_FAILED"

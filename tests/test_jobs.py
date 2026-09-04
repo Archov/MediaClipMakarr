@@ -240,6 +240,7 @@ async def test_clip_create_auto_enqueues_immich_upload_when_configured(tmp_path)
             tag_show=False,
             tag_episode=False,
             auto_upload=True,
+            timezone="UTC",
         )
 
     try:
@@ -309,6 +310,7 @@ async def test_clip_create_does_not_auto_enqueue_immich_upload_when_disabled(tmp
             tag_show=False,
             tag_episode=False,
             auto_upload=False,
+            timezone="UTC",
         )
 
     try:

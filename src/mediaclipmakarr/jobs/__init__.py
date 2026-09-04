@@ -19,6 +19,7 @@ from .repository import (
     finish_running_job_partial,
     get_job_snapshot,
     get_latest_jobs_for_operations,
+    record_immich_upload_result,
     transition_to_finalizing,
     update_running_job,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "get_job_snapshot",
     "get_latest_jobs_for_operations",
     "job_sse_payload",
+    "record_immich_upload_result",
     "recover_finalizing_jobs",
     "transition_to_finalizing",
     "update_running_job",

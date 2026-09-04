@@ -351,6 +351,7 @@ async def fail_job(
     retryable: bool = False,
     alternatives: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
+    result_payload: dict[str, Any] | None = None,
 ) -> None:
     finished_at = utc_now()
     error = JobError(
@@ -361,12 +362,17 @@ async def fail_job(
         context=context or {},
     )
     token_clause = "AND run_token = :run_token" if run_token else ""
+    # A caller that already built a structured result (e.g. the bulk upload job's
+    # itemized per-clip outcomes) before deciding the run counts as a total
+    # failure still needs that result persisted — otherwise a 100%-failure run
+    # would have no result_json for a downloadable log to be built from.
+    result_clause = ", result_json = :result_json" if result_payload is not None else ""
     await _execute_update(
         engine,
         (
             "UPDATE jobs SET state = 'FAILED', stage = 'failed', progress = 1, "
             "current_stage_progress = 1, finished_at = :finished_at, run_token = NULL, "
-            "error_json = :error_json, message = :message "
+            f"error_json = :error_json, message = :message{result_clause} "
             f"WHERE id = :id AND state IN ('QUEUED', 'RUNNING', 'FINALIZING') {token_clause}"
         ),
         {
@@ -375,6 +381,7 @@ async def fail_job(
             "finished_at": finished_at,
             "error_json": _dump_json(error.model_dump(mode="json")),
             "message": message,
+            **({"result_json": _dump_json(result_payload)} if result_payload is not None else {}),
         },
     )
 
@@ -437,6 +444,53 @@ async def finish_running_job_partial(
         )
         if result.rowcount != 1:
             raise JobUpdateConflict(f"Job {job_id} could not be marked partially complete.")
+
+
+async def record_immich_upload_result(
+    engine: AsyncEngine,
+    plan: ImmichUploadJobPlan,
+    *,
+    state: str,
+    result_payload: dict[str, Any] | None,
+    message: str,
+    error: JobError | None = None,
+) -> None:
+    """Insert an already-finished `immich_upload` job row directly, bypassing the
+    QUEUED-claim-run pipeline.
+
+    Used by the bulk-upload job, which performs the actual upload itself rather
+    than delegating to a per-clip job: without this, a clip uploaded only via
+    bulk has no `immich_upload`-type row for `get_latest_jobs_for_operations` to
+    find, so the Library screen's per-clip status falls back to a bare "Uploaded"
+    (from `immich_asset_id` alone) even when this run left it PARTIAL or FAILED.
+    The terminal-only active-jobs unique index (see migration
+    0007_immich_upload_active_unique) doesn't apply here since this row is never
+    QUEUED/RUNNING/FINALIZING.
+    """
+    now = utc_now()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO jobs "
+                "(id, type, state, stage, progress, current_stage_progress, message, attempt, "
+                "render_plan_json, render_plan_hash, result_json, error_json, created_at, "
+                "started_at, finished_at) "
+                "VALUES (:id, 'immich_upload', :state, :stage, 1, 1, :message, 1, "
+                ":render_plan_json, :render_plan_hash, :result_json, :error_json, :now, "
+                ":now, :now)"
+            ),
+            {
+                "id": plan.job_id,
+                "state": state,
+                "stage": "failed" if state == "FAILED" else "complete",
+                "message": message,
+                "render_plan_json": _dump_json(plan.model_dump(mode="json")),
+                "render_plan_hash": plan.operation_hash,
+                "result_json": _dump_json(result_payload) if result_payload is not None else None,
+                "error_json": _dump_json(error.model_dump(mode="json")) if error else None,
+                "now": now,
+            },
+        )
 
 
 async def get_latest_jobs_for_operations(
