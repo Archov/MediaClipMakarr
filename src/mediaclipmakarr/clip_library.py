@@ -116,6 +116,7 @@ class ClipDeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_revision: int = Field(ge=1)
+    delete_from_immich: bool = False
 
 
 class ClipDeleteResult(BaseModel):
@@ -123,6 +124,15 @@ class ClipDeleteResult(BaseModel):
     title: str
     deleted: bool = True
     cleanup_warnings: list[str] = Field(default_factory=list)
+
+
+class ImmichAssetCheckResult(BaseModel):
+    """The outcome of a read-before-open check against a clip's linked Immich
+    asset — see the "Open in Immich" flow in `api/clips.py`."""
+
+    status: Literal["ok", "missing_permission", "asset_missing"]
+    open_url: str | None = None
+    settings_url: str | None = None
 
 
 class MetadataEditJobPlan(BaseModel):

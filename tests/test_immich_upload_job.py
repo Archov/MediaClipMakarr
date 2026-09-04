@@ -94,6 +94,7 @@ def _make_runner(
     tag_show: bool = False,
     tag_episode: bool = False,
     auto_upload: bool = False,
+    manage_remote: bool = False,
     timezone: str = "UTC",
 ) -> JobRunner:
     async def immich_settings_loader() -> ImmichJobSettings:
@@ -105,6 +106,7 @@ def _make_runner(
             tag_show=tag_show,
             tag_episode=tag_episode,
             auto_upload=auto_upload,
+            manage_remote=manage_remote,
             timezone=timezone,
         )
 
@@ -1973,6 +1975,7 @@ async def test_upload_and_organize_uses_freshly_fetched_clip_not_a_stale_snapsho
             tag_show=False,
             tag_episode=False,
             auto_upload=False,
+            manage_remote=False,
             timezone="UTC",
         )
         result = await runner._upload_and_organize_clip(
@@ -1983,3 +1986,87 @@ async def test_upload_and_organize_uses_freshly_fetched_clip_not_a_stale_snapsho
 
     assert result.state == "SUCCEEDED"
     assert description_calls == ["Renamed While Bulk Was Running"]
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_chains_a_follow_up_when_the_clip_changes_mid_run(
+    tmp_path, monkeypatch
+) -> None:
+    """`_upload_and_organize_clip` re-fetches the clip fresh at its own start, so
+    an edit landing before that point is already reflected. A concurrent edit
+    landing *after* that re-fetch but before this job finishes would have its own
+    sync-chain attempt silently swallowed by the active-job dedup — immich_upload
+    allows only one active job per clip, a hard DB constraint. This job must
+    notice the drift once it finalizes and chain a follow-up itself."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_set_description(
+        asset_id, description, url, api_key, *, date_time_original=None
+    ):
+        # Simulate a concurrent metadata edit landing mid-flight, after
+        # _upload_and_organize_clip's own re-fetch already happened.
+        async with engine.begin() as connection:
+            await connection.execute(text("UPDATE clips SET revision = 2 WHERE id = 'clip-one'"))
+
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-one", IMMICH_URL)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+
+        follow_up = await claim_next_job(engine, "run-two")
+    finally:
+        await engine.dispose()
+
+    assert follow_up is not None
+    assert follow_up.type == "immich_upload"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_does_not_chain_a_follow_up_when_nothing_changed(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_set_description(
+        asset_id, description, url, api_key, *, date_time_original=None
+    ):
+        return None
+
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-one", IMMICH_URL)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+
+        follow_up = await claim_next_job(engine, "run-two")
+    finally:
+        await engine.dispose()
+
+    assert follow_up is None

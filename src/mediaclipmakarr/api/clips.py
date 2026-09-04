@@ -7,6 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from mediaclipmakarr.application_settings import normalize_immich_url
 from mediaclipmakarr.clip_library import (
     ClipAssetUnavailable,
     ClipDeleteRequest,
@@ -17,6 +18,7 @@ from mediaclipmakarr.clip_library import (
     ClipPage,
     ClipRecord,
     ClipRevisionConflict,
+    ImmichAssetCheckResult,
     build_bulk_immich_upload_plan,
     build_immich_upload_plan,
     build_metadata_edit_plan,
@@ -32,10 +34,20 @@ from mediaclipmakarr.clip_library import (
 from mediaclipmakarr.clips import (
     ClipCreateRequest,
     ClipCreateValidationError,
+    clear_clip_immich_asset_id,
     get_clip,
     validate_clip_create_request,
 )
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.immich import (
+    ImmichApiError,
+    ImmichAssetNotFoundError,
+    build_immich_api_key_settings_url,
+    build_immich_asset_url,
+    delete_immich_asset,
+    fetch_immich_api_key_permissions,
+    read_immich_asset,
+)
 from mediaclipmakarr.jobs import (
     JobSnapshot,
     enqueue_bulk_immich_upload_job,
@@ -198,6 +210,103 @@ def build_router(application_settings: Settings) -> APIRouter:
         request.app.state.job_runner.wake()
         return job
 
+    @router.post("/api/clips/{clip_id}/immich-check", response_model=ImmichAssetCheckResult)
+    async def check_immich_asset(clip_id: str, request: Request) -> ImmichAssetCheckResult:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        effective = request.app.state.effective_application_settings
+        if not effective.immich_url or not effective.immich_api_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_CONFIGURED",
+                    "message": "Configure Immich in Settings before opening this clip in Immich.",
+                },
+            )
+        normalized_url = normalize_immich_url(effective.immich_url)
+        asset_id = clip.get("immich_asset_id")
+        if not asset_id or clip.get("immich_server_url") != normalized_url:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_LINKED",
+                    "message": "This clip is not linked to the currently configured Immich server.",
+                },
+            )
+        try:
+            await read_immich_asset(str(asset_id), normalized_url, effective.immich_api_key)
+        except ImmichAssetNotFoundError:
+            try:
+                permissions = set(
+                    await fetch_immich_api_key_permissions(
+                        normalized_url, effective.immich_api_key
+                    )
+                )
+            except ImmichApiError as error:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": error.job_error_code,
+                        "message": str(error),
+                        "retryable": error.job_retryable,
+                    },
+                ) from error
+            if "all" in permissions or "asset.read" in permissions:
+                # Confirmed gone (not just an unreadable/permission-denied
+                # asset) — clear the stale association immediately rather
+                # than waiting on the user to dismiss anything.
+                await clear_clip_immich_asset_id(request.app.state.database_engine, clip_id)
+                return ImmichAssetCheckResult(status="asset_missing")
+            return ImmichAssetCheckResult(
+                status="missing_permission",
+                settings_url=build_immich_api_key_settings_url(normalized_url),
+            )
+        except ImmichApiError as error:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": error.job_error_code,
+                    "message": str(error),
+                    "retryable": error.job_retryable,
+                },
+            ) from error
+        return ImmichAssetCheckResult(
+            status="ok", open_url=build_immich_asset_url(normalized_url, str(asset_id))
+        )
+
+    @router.post("/api/clips/{clip_id}/immich-reupload", response_model=JobSnapshot)
+    async def reupload_clip_to_immich(clip_id: str, request: Request) -> JobSnapshot:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        effective = request.app.state.effective_application_settings
+        if not effective.immich_url or not effective.immich_api_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_CONFIGURED",
+                    "message": "Configure Immich in Settings before uploading.",
+                },
+            )
+        # The plain upload route's "reusing" guard refuses to overwrite an
+        # association still pointing at the same server — this route exists
+        # specifically for a confirmed-dead asset, so clear it first.
+        await clear_clip_immich_asset_id(request.app.state.database_engine, clip_id)
+        plan = build_immich_upload_plan(clip)
+        job = await enqueue_immich_upload_job(request.app.state.database_engine, plan)
+        await request.app.state.job_events.publish(job.id, job)
+        request.app.state.job_runner.wake()
+        return job
+
     @router.post("/api/clips/immich-upload/bulk", response_model=JobSnapshot)
     async def bulk_upload_clips_to_immich(request: Request) -> JobSnapshot:
         effective = request.app.state.effective_application_settings
@@ -252,9 +361,25 @@ def build_router(application_settings: Settings) -> APIRouter:
     async def remove_clip(
         clip_id: str, deletion: ClipDeleteRequest, request: Request
     ) -> ClipDeleteResult:
+        engine = request.app.state.database_engine
+        effective = request.app.state.effective_application_settings
+        # Captured before local deletion — there's nothing left to read from
+        # once the clip row is gone. Only populated when remote deletion was
+        # actually requested and the clip is linked to the *current* server,
+        # so a stale/foreign association is never touched.
+        immich_asset_id: str | None = None
+        if deletion.delete_from_immich and effective.immich_url and effective.immich_api_key:
+            existing = await get_clip(engine, clip_id, application_settings.resolved_clip_dir)
+            if existing is not None:
+                normalized_url = normalize_immich_url(effective.immich_url)
+                if (
+                    existing.get("immich_asset_id")
+                    and existing.get("immich_server_url") == normalized_url
+                ):
+                    immich_asset_id = str(existing["immich_asset_id"])
         try:
             result = await delete_clip(
-                request.app.state.database_engine,
+                engine,
                 clip_id,
                 deletion.expected_revision,
                 clip_root=application_settings.resolved_clip_dir,
@@ -290,6 +415,20 @@ def build_router(application_settings: Settings) -> APIRouter:
             ) from error
         if result is None:
             raise HTTPException(status_code=404, detail="Clip not found.")
+        # Local delete is authoritative and already committed above — a remote
+        # failure here is reported, never rolled back into it. A 404 (already
+        # gone from Immich) is the goal already achieved, not a failure.
+        if immich_asset_id is not None:
+            try:
+                await delete_immich_asset(
+                    immich_asset_id, effective.immich_url, effective.immich_api_key
+                )
+            except ImmichAssetNotFoundError:
+                pass
+            except ImmichApiError as error:
+                result.cleanup_warnings.append(
+                    f"The clip was deleted, but the Immich asset could not be removed: {error}"
+                )
         return result
 
     @router.get("/api/clips/{clip_id}/thumbnail")

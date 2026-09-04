@@ -409,3 +409,9 @@ export interface ClipDeleteResult {
   deleted: boolean;
   cleanup_warnings: string[];
 }
+
+export interface ImmichAssetCheckResult {
+  status: "ok" | "missing_permission" | "asset_missing";
+  open_url: string | null;
+  settings_url: string | null;
+}

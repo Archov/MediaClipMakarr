@@ -7,11 +7,14 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
   InputLabel,
   MenuItem,
   Select,
   Stack,
+  Switch,
   TextField,
+  Typography,
 } from "@mui/material";
 import { useEffect, useState } from "react";
 
@@ -21,17 +24,20 @@ export function DeleteClipDialog({
   clip,
   busy,
   error,
+  showImmichToggle = false,
   onClose,
   onConfirm,
 }: {
   clip: ClipRecord;
   busy: boolean;
   error: string | null;
+  showImmichToggle?: boolean;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (deleteFromImmich: boolean) => void;
 }) {
   const [ready, setReady] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [deleteFromImmich, setDeleteFromImmich] = useState(false);
   useEffect(() => {
     const timeout = window.setTimeout(() => setReady(true), 1_000);
     return () => window.clearTimeout(timeout);
@@ -42,8 +48,15 @@ export function DeleteClipDialog({
   const confirm = () => {
     if (!ready || busy || submitted) return;
     setSubmitted(true);
-    onConfirm();
+    onConfirm(deleteFromImmich);
   };
+  const confirmLabel = !ready
+    ? "Confirm in 1 second…"
+    : busy || submitted
+      ? "Deleting…"
+      : deleteFromImmich
+        ? "Delete from MCM & Immich"
+        : "Delete from MCM";
   return (
     <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
       <DialogTitle>Delete “{clip.title}”?</DialogTitle>
@@ -62,21 +75,98 @@ export function DeleteClipDialog({
             preload="metadata"
             sx={{ width: "100%", maxHeight: 360, bgcolor: "black" }}
           />
+          {showImmichToggle && (
+            <Stack
+              direction="row"
+              spacing={2}
+              alignItems="center"
+              justifyContent="space-between"
+              sx={{ p: 1.5, borderRadius: 1, border: 1, borderColor: "divider" }}
+            >
+              <Stack spacing={0}>
+                <Typography variant="body2" fontWeight={600}>Also delete from Immich</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {deleteFromImmich
+                    ? "The Immich copy will be deleted too."
+                    : "Only the local clip is deleted."}
+                </Typography>
+              </Stack>
+              <Switch
+                checked={deleteFromImmich}
+                disabled={busy}
+                onChange={(event) => setDeleteFromImmich(event.target.checked)}
+              />
+            </Stack>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={onClose} disabled={busy}>Nevermind</Button>
         <Button
           color="error"
           variant="contained"
           disabled={!ready || busy || submitted}
           onClick={confirm}
         >
-          {!ready
-            ? "Confirm in 1 second…"
-            : busy || submitted
-              ? "Deleting…"
-              : "Confirm delete"}
+          {confirmLabel}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+export function ImmichPermissionDialog({
+  settingsUrl,
+  onClose,
+}: {
+  settingsUrl: string;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="xs">
+      <DialogTitle>Missing Immich permission</DialogTitle>
+      <DialogContent>
+        <Alert severity="warning">
+          The configured API key does not have the <code>asset.read</code> permission. Please
+          update the permissions and try again.
+        </Alert>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Dismiss</Button>
+        <Button
+          variant="contained"
+          component="a"
+          href={settingsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={onClose}
+        >
+          Open API Key Settings
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+export function ImmichAssetMissingDialog({
+  busy,
+  onClose,
+  onReupload,
+}: {
+  busy: boolean;
+  onClose: () => void;
+  onReupload: () => void;
+}) {
+  return (
+    <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="xs">
+      <DialogTitle>Immich asset missing</DialogTitle>
+      <DialogContent>
+        <Alert severity="warning">The associated Immich asset couldn’t be found.</Alert>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={busy}>Dismiss</Button>
+        <Button variant="contained" disabled={busy} onClick={onReupload}>
+          {busy ? "Reuploading…" : "Reupload"}
         </Button>
       </DialogActions>
     </Dialog>

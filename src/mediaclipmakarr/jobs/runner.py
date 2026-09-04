@@ -97,6 +97,7 @@ class ImmichJobSettings:
     tag_show: bool
     tag_episode: bool
     auto_upload: bool
+    manage_remote: bool
     timezone: str
 
 
@@ -652,6 +653,23 @@ class JobRunner:
             build_thumbnail_job_plan(proposed, installed_stat),
         )
         await self._publish_durable_job_update(thumbnail_job.id)
+
+        immich_settings = (
+            await self.immich_settings_loader() if self.immich_settings_loader else None
+        )
+        if (
+            immich_settings is not None
+            and immich_settings.manage_remote
+            and immich_settings.url
+            and immich_settings.api_key
+            and proposed.get("immich_asset_id")
+            and proposed.get("immich_server_url") == normalize_immich_url(immich_settings.url)
+        ):
+            sync_job = await enqueue_immich_upload_job(
+                self.engine, build_immich_upload_plan(proposed)
+            )
+            await self._publish_durable_job_update(sync_job.id)
+
         self.wake()
 
 
@@ -759,16 +777,15 @@ class JobRunner:
         # short-circuits the other, so a failure in one never hides a success in
         # the other. The one exception: a confirmed-missing asset on the reuse
         # path means nothing further is worth attempting against it.
-        # On a fresh upload Immich already derived the capture date/time correctly
-        # from the upload's own fileCreatedAt — only a reuse (validating/re-syncing
-        # an existing asset) needs it re-sent, so a clip's timestamp fix (e.g. this
-        # app's timezone setting changing) reaches assets uploaded before that change.
+        # Always sent explicitly (fresh upload or reuse alike): Immich's own
+        # date derivation for a fresh upload isn't reliable — nothing this app
+        # renders embeds a standard creation_time container tag it could read —
+        # so an unset date_time_original left freshly-uploaded assets showing
+        # UTC instead of this app's configured timezone.
         date_time_original = (
             _as_utc_datetime(clip["created_at"])
             .astimezone(ZoneInfo(immich_settings.timezone))
             .isoformat()
-            if reusing
-            else None
         )
         description_error: JobError | None = None
         try:
@@ -958,6 +975,23 @@ class JobRunner:
                 message=result.message,
             )
         await self._publish_durable_job_update(claimed.id)
+
+        # `_upload_and_organize_clip` re-fetches the clip fresh at its own start,
+        # so an edit landing before that re-fetch is already reflected above. The
+        # remaining gap: an edit landing after that re-fetch but before this job
+        # finished — its own attempt to enqueue a sync would have found this job
+        # still active (immich_upload allows at most one active job per clip, a
+        # hard DB constraint, not just a courtesy) and silently returned it
+        # instead of creating a new one. Now that this job has just finalized and
+        # freed that slot, check whether the clip moved on since `clip` was
+        # fetched above and, if so, chain a follow-up run for the current state.
+        latest = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if latest is not None and int(latest["revision"]) != int(clip["revision"]):
+            follow_up = await enqueue_immich_upload_job(
+                self.engine, build_immich_upload_plan(latest)
+            )
+            await self._publish_durable_job_update(follow_up.id)
+            self.wake()
 
     async def _execute_bulk_immich_upload_job(self, claimed: ClaimedJob) -> None:
         plan = claimed.render_plan

@@ -27,6 +27,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import MediaToolInspection
 from mediaclipmakarr.jobs import (
+    ImmichJobSettings,
     JobEventBroker,
     JobRunner,
     claim_next_job,
@@ -430,6 +431,157 @@ async def test_metadata_edit_job_moves_file_records_history_and_rejects_stale_pl
     assert not source.exists()
     assert snapshot is not None and snapshot.state == "SUCCEEDED"
     assert history_count == 2
+
+
+def _immich_runner(engine, tmp_path, clip_root, *, manage_remote: bool, immich_url: str):
+    async def immich_settings_loader():
+        return ImmichJobSettings(
+            url=immich_url,
+            api_key="test-key",
+            default_tag="",
+            tag_library=False,
+            tag_show=False,
+            tag_episode=False,
+            auto_upload=False,
+            manage_remote=manage_remote,
+            timezone="UTC",
+        )
+
+    return JobRunner(
+        engine,
+        Settings(
+            _env_file=None,
+            work_dir=tmp_path / "work",
+            clip_dir=clip_root,
+            thumbnail_dir=tmp_path / "thumbnails",
+        ),
+        run_blocking=run_blocking,
+        events=JobEventBroker(),
+        immich_settings_loader=immich_settings_loader,
+    )
+
+
+async def _drain_thumbnail_job(engine, run_token: str) -> None:
+    thumbnail_claim = await claim_next_job(engine, run_token)
+    assert thumbnail_claim is not None and thumbnail_claim.type == "thumbnail_generate"
+    await fail_job(
+        engine,
+        thumbnail_claim.id,
+        thumbnail_claim.run_token,
+        code="TEST_SKIPPED",
+        message="Thumbnail is outside this test.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_metadata_edit_enqueues_immich_sync_when_managed_and_linked_to_current_server(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old clip")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_rewrite(_source, output, metadata, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"new clip")
+
+    monkeypatch.setattr(runner_module, "rewrite_clip_metadata", fake_rewrite)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        await set_clip_immich_asset_id(
+            engine, "clip-one", "asset-one", "http://immich.example:2283"
+        )
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_metadata_edit_plan(
+            row, ClipMetadataUpdate(expected_revision=1, custom_title="Renamed"), clip_root
+        )
+        await enqueue_metadata_edit_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-one")
+        assert claimed is not None
+        runner = _immich_runner(
+            engine, tmp_path, clip_root, manage_remote=True, immich_url="http://immich.example:2283"
+        )
+        await runner._execute_claimed_job(claimed)
+        edit_snapshot = await get_job_snapshot(engine, claimed.id)
+        await _drain_thumbnail_job(engine, "run-thumbnail")
+        sync_claim = await claim_next_job(engine, "run-sync")
+    finally:
+        await engine.dispose()
+
+    assert edit_snapshot is not None
+    assert edit_snapshot.state == "SUCCEEDED"
+    assert sync_claim is not None
+    assert sync_claim.type == "immich_upload"
+
+
+@pytest.mark.asyncio
+async def test_metadata_edit_does_not_enqueue_immich_sync_when_gate_conditions_are_unmet(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+
+    async def fake_rewrite(_source, output, metadata, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"new clip")
+
+    monkeypatch.setattr(runner_module, "rewrite_clip_metadata", fake_rewrite)
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        # clip-a: manage_remote is off.
+        source_a = clip_root / "TV Shows" / "A.mp4"
+        source_a.parent.mkdir(parents=True)
+        source_a.write_bytes(b"clip a")
+        await insert_clip(engine, clip_payload(source_a, clip_id="clip-a", title="A"))
+        await set_clip_immich_asset_id(engine, "clip-a", "asset-a", "http://immich.example:2283")
+
+        # clip-b: never linked to any Immich server.
+        source_b = clip_root / "TV Shows" / "B.mp4"
+        source_b.write_bytes(b"clip b")
+        await insert_clip(engine, clip_payload(source_b, clip_id="clip-b", title="B"))
+
+        # clip-c: linked, but to a different (stale) server than the one configured now.
+        source_c = clip_root / "TV Shows" / "C.mp4"
+        source_c.write_bytes(b"clip c")
+        await insert_clip(engine, clip_payload(source_c, clip_id="clip-c", title="C"))
+        await set_clip_immich_asset_id(
+            engine, "clip-c", "asset-c", "http://old-immich.example:2283"
+        )
+
+        runner_unmanaged = _immich_runner(
+            engine, tmp_path, clip_root, manage_remote=False, immich_url="http://immich.example:2283"
+        )
+        runner_managed = _immich_runner(
+            engine, tmp_path, clip_root, manage_remote=True, immich_url="http://immich.example:2283"
+        )
+
+        for index, (clip_id, runner) in enumerate(
+            [("clip-a", runner_unmanaged), ("clip-b", runner_managed), ("clip-c", runner_managed)]
+        ):
+            row = await get_clip(engine, clip_id, clip_root)
+            assert row is not None
+            plan = build_metadata_edit_plan(
+                row,
+                ClipMetadataUpdate(expected_revision=1, custom_title=f"Renamed {clip_id}"),
+                clip_root,
+            )
+            await enqueue_metadata_edit_job(engine, plan)
+            claimed = await claim_next_job(engine, f"run-edit-{index}")
+            assert claimed is not None
+            await runner._execute_claimed_job(claimed)
+            await _drain_thumbnail_job(engine, f"run-thumb-{index}")
+
+        next_job = await claim_next_job(engine, "run-final")
+    finally:
+        await engine.dispose()
+
+    assert next_job is None
 
 
 @pytest.mark.asyncio
