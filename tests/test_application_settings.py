@@ -39,6 +39,29 @@ def test_windows_timezone_separator_is_normalized() -> None:
     assert update.timezone == "America/Chicago"
 
 
+@pytest.mark.parametrize("field", ["plex_url", "immich_url"])
+@pytest.mark.parametrize(
+    "host",
+    ["169.254.169.254", "169.254.0.1", "[fe80::1]"],
+)
+def test_link_local_urls_are_rejected(field: str, host: str) -> None:
+    with pytest.raises(ValueError, match="link-local"):
+        ApplicationSettingsUpdate(**{field: f"http://{host}"})
+
+
+@pytest.mark.parametrize("field", ["plex_url", "immich_url"])
+@pytest.mark.parametrize(
+    "host",
+    ["192.168.1.20:32400", "10.0.0.5", "127.0.0.1:2283", "plex.example.com"],
+)
+def test_ordinary_and_private_hosts_are_still_allowed(field: str, host: str) -> None:
+    # Most self-hosted Plex/Immich servers live on exactly these kinds of addresses —
+    # only the link-local cloud-metadata range is blocked, not private ranges broadly.
+    update = ApplicationSettingsUpdate(**{field: f"http://{host}"})
+
+    assert getattr(update, field) is not None
+
+
 @pytest.mark.asyncio
 async def test_timezone_catalog_distinguishes_default_from_saved_value(tmp_path) -> None:
     database_path = tmp_path / "application.db"
@@ -207,7 +230,7 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
                 "plex_token": candidate_secret,
             },
         )
-        url_only_update = client.put(
+        blocked_url_change = client.put(
             "/api/settings",
             json={"plex_url": "http://untrusted.example:32400"},
         )
@@ -225,6 +248,10 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
             json={"plex_token": validation_secret, "clear_plex_token": True},
         )
         cleared = client.put("/api/settings", json={"clear_plex_token": True})
+        url_change_after_clear = client.put(
+            "/api/settings",
+            json={"plex_url": "http://untrusted.example:32400"},
+        )
 
     assert created.status_code == 200
     assert replaced.status_code == 200
@@ -233,9 +260,8 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert preserved.json()["plex_token_configured"] is True
     assert fetched.json()["plex_token_configured"] is True
     assert candidate_connection.json()["connected"] is True
-    assert url_only_update.status_code == 200
-    assert url_only_update.json()["plex_url"] == "http://untrusted.example:32400"
-    assert url_only_update.json()["plex_token_configured"] is True
+    assert blocked_url_change.status_code == 409
+    assert blocked_url_change.json()["detail"]["code"] == "PLEX_CREDENTIALS_REQUIRED"
     assert saved_connection.json()["connected"] is True
     assert url_only_connection.status_code == 422
     assert token_only_connection.status_code == 422
@@ -244,9 +270,11 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert all("input" not in error for error in conflicting_update.json()["detail"])
     assert observed_connections == [
         ("http://candidate-plex:32400", candidate_secret),
-        ("http://untrusted.example:32400", replacement_secret),
+        ("", replacement_secret),
     ]
     assert cleared.json()["plex_token_configured"] is False
+    assert url_change_after_clear.status_code == 200
+    assert url_change_after_clear.json()["plex_url"] == "http://untrusted.example:32400"
     serialized_responses = (
         created.text
         + replaced.text
@@ -305,7 +333,7 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_immich_api_key(
                 "immich_api_key": candidate_secret,
             },
         )
-        url_only_update = client.put(
+        blocked_url_change = client.put(
             "/api/settings",
             json={"immich_url": "http://untrusted.example:2283"},
         )
@@ -323,6 +351,10 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_immich_api_key(
             json={"immich_api_key": validation_secret, "clear_immich_api_key": True},
         )
         cleared = client.put("/api/settings", json={"clear_immich_api_key": True})
+        url_change_after_clear = client.put(
+            "/api/settings",
+            json={"immich_url": "http://untrusted.example:2283"},
+        )
 
     assert created.status_code == 200
     assert replaced.status_code == 200
@@ -331,18 +363,19 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_immich_api_key(
     assert preserved.json()["immich_api_key_configured"] is True
     assert fetched.json()["immich_api_key_configured"] is True
     assert candidate_connection.json()["connected"] is True
-    assert url_only_update.status_code == 200
-    assert url_only_update.json()["immich_url"] == "http://untrusted.example:2283"
-    assert url_only_update.json()["immich_api_key_configured"] is True
+    assert blocked_url_change.status_code == 409
+    assert blocked_url_change.json()["detail"]["code"] == "IMMICH_CREDENTIALS_REQUIRED"
     assert saved_connection.json()["connected"] is True
     assert url_only_connection.status_code == 422
     assert key_only_connection.status_code == 422
     assert conflicting_update.status_code == 422
     assert observed_connections == [
         ("http://candidate-immich:2283", candidate_secret),
-        ("http://untrusted.example:2283", replacement_secret),
+        ("", replacement_secret),
     ]
     assert cleared.json()["immich_api_key_configured"] is False
+    assert url_change_after_clear.status_code == 200
+    assert url_change_after_clear.json()["immich_url"] == "http://untrusted.example:2283"
     serialized_responses = (
         created.text
         + replaced.text

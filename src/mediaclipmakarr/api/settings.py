@@ -46,6 +46,48 @@ def build_router(application_settings: Settings) -> APIRouter:
                 },
             )
 
+        # Retargeting a service URL while its credential stays configured would let a
+        # mistyped or malicious URL silently inherit the saved secret — background
+        # processes (the Plex session poller, the Immich auto-connection-check on
+        # settings load) would then send that credential to whatever the URL now
+        # points at, before anyone verifies it belongs there. Require either a fresh
+        # credential in the same request or an explicit clear first.
+        changes_plex_url = update.plex_url is not None and update.plex_url != effective.plex_url
+        supplies_plex_token = bool(update.plex_token and update.plex_token.strip())
+        if (
+            changes_plex_url
+            and effective.plex_token
+            and not supplies_plex_token
+            and not update.clear_plex_token
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PLEX_CREDENTIALS_REQUIRED",
+                    "message": "Enter the Plex token again when changing the Plex server URL.",
+                },
+            )
+
+        changes_immich_url = (
+            update.immich_url is not None and update.immich_url != effective.immich_url
+        )
+        supplies_immich_api_key = bool(update.immich_api_key and update.immich_api_key.strip())
+        if (
+            changes_immich_url
+            and effective.immich_api_key
+            and not supplies_immich_api_key
+            and not update.clear_immich_api_key
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_CREDENTIALS_REQUIRED",
+                    "message": (
+                        "Enter the Immich API key again when changing the Immich server URL."
+                    ),
+                },
+            )
+
         values = serialize_update(update)
         if values:
             await save_persisted_application_settings(

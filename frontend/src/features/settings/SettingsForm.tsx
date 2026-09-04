@@ -4,6 +4,7 @@ import ArrowUpwardRounded from "@mui/icons-material/ArrowUpwardRounded";
 import CancelRounded from "@mui/icons-material/CancelRounded";
 import CheckCircleRounded from "@mui/icons-material/CheckCircleRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
+import LockRounded from "@mui/icons-material/LockRounded";
 import {
   Alert,
   Autocomplete,
@@ -22,6 +23,7 @@ import {
   FormControl,
   FormControlLabel,
   IconButton,
+  InputAdornment,
   InputLabel,
   Link,
   List,
@@ -135,35 +137,75 @@ export function SettingsForm({
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
 
+  // A saved secret locks its service's URL field: retargeting the URL while the old
+  // secret stays configured would let it silently follow to wherever the URL now
+  // points (the Plex session poller and the Immich auto-connection-check both send the
+  // saved credential on their own, with no chance to verify the new destination first).
+  // Unlocking requires an explicit confirmation that clears the secret.
+  const [plexUrlUnlocked, setPlexUrlUnlocked] = useState(false);
+  const [immichUrlUnlocked, setImmichUrlUnlocked] = useState(false);
+  const [unlockConfirmTarget, setUnlockConfirmTarget] = useState<"plex" | "immich" | null>(null);
+  const plexUrlLocked = settings.plex_token_configured && !plexUrlUnlocked;
+  const immichUrlLocked = settings.immich_api_key_configured && !immichUrlUnlocked;
+
+  // Re-lock once a secret is (re)configured, e.g. after a successful Test connection.
+  useEffect(() => {
+    if (settings.plex_token_configured) setPlexUrlUnlocked(false);
+  }, [settings.plex_token_configured]);
+
+  useEffect(() => {
+    if (settings.immich_api_key_configured) setImmichUrlUnlocked(false);
+  }, [settings.immich_api_key_configured]);
+
   // Whenever `settings` refreshes from the server (initial load, or after a Test
-  // connection round-trip), the fields below are resynced to match it. That resync is
-  // not a user edit and must not itself trigger another auto-save — this flag tells the
-  // auto-save effect below to skip the pass it causes.
-  const skipNextAutoSave = useRef(true);
-
+  // connection or auto-save round-trip elsewhere), each field below only adopts the
+  // fresh value if the local draft still matches what we last knew the server to have.
+  // If it doesn't, there's an edit in progress that this refresh knows nothing about —
+  // leave it alone rather than clobbering it with a now-stale response, and the
+  // diff-based auto-save effect below will pick it up and save it normally.
+  const previousSettingsRef = useRef(settings);
   useEffect(() => {
-    skipNextAutoSave.current = true;
-    setPlexUrl(settings.plex_url);
-  }, [settings.plex_url]);
+    const previous = previousSettingsRef.current;
+    previousSettingsRef.current = settings;
 
-  useEffect(() => {
-    skipNextAutoSave.current = true;
-    setImmichUrl(settings.immich_url);
-  }, [settings.immich_url]);
-
-  useEffect(() => {
-    skipNextAutoSave.current = true;
-    setPlexToken(secretDraft(settings.plex_token_configured));
-    setImmichApiKey(secretDraft(settings.immich_api_key_configured));
-    setImmichDefaultTag(settings.immich_default_tag);
-    setImmichAutoUpload(settings.immich_auto_upload);
-    setImmichManageRemote(settings.immich_manage_remote);
-    setImmichTagLibrary(settings.immich_tag_library);
-    setImmichTagShow(settings.immich_tag_show);
-    setImmichTagEpisode(settings.immich_tag_episode);
-    setTimezone(initialTimezone(settings));
-    setX264Preset(settings.x264_preset);
-    setMappings(settings.source_path_mappings);
+    setPlexUrl((current) => (current === previous.plex_url ? settings.plex_url : current));
+    setPlexToken((current) => {
+      const previousDraft = secretDraft(previous.plex_token_configured);
+      return current === previousDraft ? secretDraft(settings.plex_token_configured) : current;
+    });
+    setImmichUrl((current) => (current === previous.immich_url ? settings.immich_url : current));
+    setImmichApiKey((current) => {
+      const previousDraft = secretDraft(previous.immich_api_key_configured);
+      return current === previousDraft ? secretDraft(settings.immich_api_key_configured) : current;
+    });
+    setImmichDefaultTag((current) =>
+      current === previous.immich_default_tag ? settings.immich_default_tag : current,
+    );
+    setImmichAutoUpload((current) =>
+      current === previous.immich_auto_upload ? settings.immich_auto_upload : current,
+    );
+    setImmichManageRemote((current) =>
+      current === previous.immich_manage_remote ? settings.immich_manage_remote : current,
+    );
+    setImmichTagLibrary((current) =>
+      current === previous.immich_tag_library ? settings.immich_tag_library : current,
+    );
+    setImmichTagShow((current) =>
+      current === previous.immich_tag_show ? settings.immich_tag_show : current,
+    );
+    setImmichTagEpisode((current) =>
+      current === previous.immich_tag_episode ? settings.immich_tag_episode : current,
+    );
+    setTimezone((current) => {
+      const previousInitial = initialTimezone(previous);
+      return current === previousInitial ? initialTimezone(settings) : current;
+    });
+    setX264Preset((current) => (current === previous.x264_preset ? settings.x264_preset : current));
+    setMappings((current) =>
+      JSON.stringify(current) === JSON.stringify(previous.source_path_mappings)
+        ? settings.source_path_mappings
+        : current,
+    );
   }, [settings]);
 
   const managed = (field: ApplicationSettingField) => settings.environment_managed[field];
@@ -177,29 +219,50 @@ export function SettingsForm({
 
   // Everything here is plain configuration, not a secret — it saves itself shortly
   // after the user stops changing it. Only the Plex token and Immich API key are
-  // withheld from this and saved solely via a successful "Test connection".
+  // withheld from this and saved solely via a successful "Test connection". The
+  // payload only ever includes fields that currently differ from the last-known
+  // server state (recomputed on every run, including whenever `settings` itself
+  // refreshes), so a save racing in from elsewhere just reschedules this debounce
+  // instead of silently dropping or redundantly resending anything.
   useEffect(() => {
-    if (skipNextAutoSave.current) {
-      skipNextAutoSave.current = false;
-      return;
+    const update: ApplicationSettingsUpdate = {};
+    if (!managed("plex_url") && plexUrl !== settings.plex_url) update.plex_url = plexUrl;
+    if (
+      !managed("source_path_mappings") &&
+      JSON.stringify(mappings) !== JSON.stringify(settings.source_path_mappings)
+    ) {
+      update.source_path_mappings = mappings;
     }
-    const update: ApplicationSettingsUpdate = {
-      ...(!managed("plex_url") && { plex_url: plexUrl }),
-      ...(!managed("source_path_mappings") && { source_path_mappings: mappings }),
-      ...(!managed("timezone") && { timezone }),
-      ...(!managed("x264_preset") && { x264_preset: x264Preset }),
-      ...(!managed("immich_url") && { immich_url: immichUrl }),
-      ...(!managed("immich_default_tag") && { immich_default_tag: immichDefaultTag }),
-      ...(!managed("immich_auto_upload") && { immich_auto_upload: immichAutoUpload }),
-      ...(!managed("immich_manage_remote") && { immich_manage_remote: immichManageRemote }),
-      ...(!managed("immich_tag_library") && { immich_tag_library: immichTagLibrary }),
-      ...(!managed("immich_tag_show") && { immich_tag_show: immichTagShow }),
-      ...(!managed("immich_tag_episode") && { immich_tag_episode: immichTagEpisode }),
-    };
+    if (!managed("timezone") && timezone !== settings.timezone) update.timezone = timezone;
+    if (!managed("x264_preset") && x264Preset !== settings.x264_preset) {
+      update.x264_preset = x264Preset;
+    }
+    if (!managed("immich_url") && immichUrl !== settings.immich_url) update.immich_url = immichUrl;
+    if (!managed("immich_default_tag") && immichDefaultTag !== settings.immich_default_tag) {
+      update.immich_default_tag = immichDefaultTag;
+    }
+    if (!managed("immich_auto_upload") && immichAutoUpload !== settings.immich_auto_upload) {
+      update.immich_auto_upload = immichAutoUpload;
+    }
+    if (!managed("immich_manage_remote") && immichManageRemote !== settings.immich_manage_remote) {
+      update.immich_manage_remote = immichManageRemote;
+    }
+    if (!managed("immich_tag_library") && immichTagLibrary !== settings.immich_tag_library) {
+      update.immich_tag_library = immichTagLibrary;
+    }
+    if (!managed("immich_tag_show") && immichTagShow !== settings.immich_tag_show) {
+      update.immich_tag_show = immichTagShow;
+    }
+    if (!managed("immich_tag_episode") && immichTagEpisode !== settings.immich_tag_episode) {
+      update.immich_tag_episode = immichTagEpisode;
+    }
+    if (Object.keys(update).length === 0) return;
+
     const timer = setTimeout(() => autoSave.mutate(update), AUTO_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    settings,
     plexUrl,
     mappings,
     timezone,
@@ -213,6 +276,21 @@ export function SettingsForm({
     immichTagEpisode,
   ]);
 
+  const confirmUnlockUrl = () => {
+    if (unlockConfirmTarget === "plex") {
+      setPlexUrlUnlocked(true);
+      setPlexToken("");
+      setPlexConnection(null);
+      autoSave.mutate({ clear_plex_token: true });
+    } else if (unlockConfirmTarget === "immich") {
+      setImmichUrlUnlocked(true);
+      setImmichApiKey("");
+      setImmichConnection(null);
+      autoSave.mutate({ clear_immich_api_key: true });
+    }
+    setUnlockConfirmTarget(null);
+  };
+
   interface ConnectionCandidate<TRequest> {
     test: TRequest;
     save: ApplicationSettingsUpdate;
@@ -221,16 +299,22 @@ export function SettingsForm({
   const testPlex = useMutation({
     mutationFn: async (candidate: ConnectionCandidate<PlexConnectionRequest>) => {
       const result = await testPlexConnection(candidate.test);
+      // Only ever report settings that were actually just written — falling back to
+      // the settings captured when this mutation started would let a slow, read-only
+      // connection check (e.g. the automatic check on page load) overwrite the cache
+      // with a stale snapshot if a real save elsewhere had already moved it forward.
       const updated =
         result.connected && Object.keys(candidate.save).length
           ? await updateSettings(candidate.save)
-          : settings;
+          : null;
       return { settings: updated, connection: result };
     },
     onSuccess: (result) => {
-      queryClient.setQueryData(["settings"], result.settings);
       setPlexConnection(result.connection);
-      if (result.connection.connected) setPlexToken(secretDraft(result.settings.plex_token_configured));
+      if (result.settings) {
+        queryClient.setQueryData(["settings"], result.settings);
+        setPlexToken(secretDraft(result.settings.plex_token_configured));
+      }
     },
   });
 
@@ -259,16 +343,20 @@ export function SettingsForm({
   const testImmich = useMutation({
     mutationFn: async (candidate: ConnectionCandidate<ImmichConnectionRequest>) => {
       const result = await testImmichConnection(candidate.test);
+      // See the equivalent comment on testPlex above — don't fall back to a stale
+      // settings snapshot when nothing was actually saved.
       const updated =
         result.connected && Object.keys(candidate.save).length
           ? await updateSettings(candidate.save)
-          : settings;
+          : null;
       return { settings: updated, connection: result };
     },
     onSuccess: (result) => {
-      queryClient.setQueryData(["settings"], result.settings);
       setImmichConnection(result.connection);
-      if (result.connection.connected) setImmichApiKey(secretDraft(result.settings.immich_api_key_configured));
+      if (result.settings) {
+        queryClient.setQueryData(["settings"], result.settings);
+        setImmichApiKey(secretDraft(result.settings.immich_api_key_configured));
+      }
     },
   });
 
@@ -365,11 +453,30 @@ export function SettingsForm({
                   label="Plex server URL"
                   placeholder="http://192.168.1.20:32400"
                   value={plexUrl}
-                  disabled={managed("plex_url")}
+                  disabled={managed("plex_url") || plexUrlLocked}
                   onChange={(event) => {
                     setPlexUrl(event.target.value);
                     setPlexConnection(null);
                   }}
+                  slotProps={
+                    plexUrlLocked && !managed("plex_url")
+                      ? {
+                          input: {
+                            endAdornment: (
+                              <InputAdornment position="end">
+                                <IconButton
+                                  size="small"
+                                  aria-label="Unlock to change the Plex server URL"
+                                  onClick={() => setUnlockConfirmTarget("plex")}
+                                >
+                                  <LockRounded fontSize="small" />
+                                </IconButton>
+                              </InputAdornment>
+                            ),
+                          },
+                        }
+                      : undefined
+                  }
                 />
                 <ManagedLabel managed={managed("plex_url")} />
               </Stack>
@@ -453,11 +560,30 @@ export function SettingsForm({
                   label="Immich URL"
                   placeholder="https://photos.example.com"
                   value={immichUrl}
-                  disabled={managed("immich_url")}
+                  disabled={managed("immich_url") || immichUrlLocked}
                   onChange={(event) => {
                     setImmichUrl(event.target.value);
                     setImmichConnection(null);
                   }}
+                  slotProps={
+                    immichUrlLocked && !managed("immich_url")
+                      ? {
+                          input: {
+                            endAdornment: (
+                              <InputAdornment position="end">
+                                <IconButton
+                                  size="small"
+                                  aria-label="Unlock to change the Immich URL"
+                                  onClick={() => setUnlockConfirmTarget("immich")}
+                                >
+                                  <LockRounded fontSize="small" />
+                                </IconButton>
+                              </InputAdornment>
+                            ),
+                          },
+                        }
+                      : undefined
+                  }
                 />
                 <ManagedLabel managed={managed("immich_url")} />
               </Stack>
@@ -685,6 +811,23 @@ export function SettingsForm({
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setImmichPermissionsOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={unlockConfirmTarget !== null} onClose={() => setUnlockConfirmTarget(null)}>
+        <DialogTitle>
+          Change the {unlockConfirmTarget === "plex" ? "Plex server URL" : "Immich URL"}?
+        </DialogTitle>
+        <DialogContent>
+          <Typography>
+            Changing the URL will delete the saved{" "}
+            {unlockConfirmTarget === "plex" ? "Plex token" : "Immich API key"}. You&rsquo;ll
+            need to enter it again and test the connection before it&rsquo;s saved.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setUnlockConfirmTarget(null)}>Nevermind</Button>
+          <Button color="error" onClick={confirmUnlockUrl}>Change Anyway</Button>
         </DialogActions>
       </Dialog>
       </Stack>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -51,6 +52,22 @@ _DATABASE_KEYS = {field: f"setting.{field}" for field in SETTING_FIELDS}
 AVAILABLE_TIMEZONES = sorted(available_timezones() | {"UTC"})
 
 
+def _is_link_local_literal(hostname: str) -> bool:
+    """True for a literal link-local address (RFC 3927 / RFC 4291) — the standard
+    cloud-metadata SSRF vector (AWS/GCP/Azure/DigitalOcean/OpenStack all serve
+    instance credentials from addresses in this range, most commonly
+    169.254.169.254). Ordinary private ranges (192.168.0.0/16, 10.0.0.0/8, 127.0.0.1,
+    ...) are deliberately left unrestricted: that's where the Plex and Immich servers
+    this app is built to reach actually live, and this app has no authentication layer
+    of its own to gate on instead — it depends on the operator keeping it off an
+    untrusted network, same as the rest of its API.
+    """
+    try:
+        return ipaddress.ip_address(hostname).is_link_local
+    except ValueError:
+        return False  # Not a literal IP (a hostname) — nothing to check here.
+
+
 def _normalize_absolute_http_url(value: str, service_name: str) -> str:
     value = value.strip()
     if not value:
@@ -62,6 +79,8 @@ def _normalize_absolute_http_url(value: str, service_name: str) -> str:
         raise ValueError(
             f"{service_name} URL cannot contain credentials, a query string, or a fragment."
         )
+    if _is_link_local_literal(parsed.hostname):
+        raise ValueError(f"{service_name} URL cannot point at a link-local address.")
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
