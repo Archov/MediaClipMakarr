@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from mediaclipmakarr.clip_library import embedded_revision_matches
+from mediaclipmakarr.clip_library import embedded_render_matches, embedded_revision_matches
 from mediaclipmakarr.clips import insert_clip_if_missing
 
 from .finalization import (
@@ -19,6 +19,7 @@ from .models import BlockingRunner, JobError
 from .repository import (
     _dump_json,
     _load_json,
+    commit_clip_replacement,
     commit_metadata_edit,
     fail_job,
     finish_job_success_without_token,
@@ -70,7 +71,7 @@ async def recover_finalizing_jobs(
             await connection.execute(
                 text(
                     "SELECT job_id, clip_id, operation_type, temp_path, source_path, target_path, "
-                    "expected_revision, clip_json "
+                    "expected_revision, render_plan_hash, clip_json "
                     "FROM pending_file_operations "
                     "WHERE job_id IN (SELECT id FROM jobs WHERE state = 'FINALIZING')"
                 )
@@ -146,6 +147,46 @@ async def recover_finalizing_jobs(
                 engine, clip, expected_revision=int(row["expected_revision"])
             )
             await run_blocking(remove_superseded_clip, source_path, target_path)
+            await finish_job_success_without_token(engine, job_id, clip=clip)
+            recovered.append(job_id)
+            continue
+
+        if row["operation_type"] == "replace_clip":
+            source_path = Path(str(row["source_path"]))
+            target_path = Path(str(row["target_path"]))
+            temp_path = Path(str(row["temp_path"]))
+            target_is_new = await run_blocking(
+                embedded_render_matches,
+                target_path,
+                str(row["clip_id"]),
+                int(clip["revision"]),
+                str(row["render_plan_hash"]),
+            )
+            if not target_is_new:
+                if not await run_blocking(temp_path.exists):
+                    await fail_job(
+                        engine,
+                        job_id,
+                        None,
+                        code="FINALIZATION_RECOVERY_FAILED",
+                        message=(
+                            "The existing clip is intact, but the validated replacement was "
+                            "unavailable after restart."
+                        ),
+                        retryable=True,
+                    )
+                    recovered.append(job_id)
+                    await _delete_pending_operation(engine, job_id)
+                    continue
+                await run_blocking(
+                    install_metadata_revision, temp_path, source_path, target_path
+                )
+            installed_stat = await run_blocking(target_path.stat)
+            clip["file_size_bytes"] = installed_stat.st_size
+            clip["file_modified_ns"] = installed_stat.st_mtime_ns
+            await commit_clip_replacement(
+                engine, clip, expected_revision=int(row["expected_revision"])
+            )
             await finish_job_success_without_token(engine, job_id, clip=clip)
             recovered.append(job_id)
             continue

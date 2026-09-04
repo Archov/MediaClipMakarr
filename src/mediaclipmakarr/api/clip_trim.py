@@ -10,8 +10,15 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
+from mediaclipmakarr.clip_edits import (
+    ClipEditError,
+    ClipTrimSaveRequest,
+    build_trim_render_plan,
+)
 from mediaclipmakarr.clips import get_clip
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.jobs import JobSnapshot, enqueue_clip_create_job
+from mediaclipmakarr.source_media import SourceMediaError, probe_managed_media_file
 from mediaclipmakarr.subprocesses import CommandError, CommandResult, run_command
 
 CommandRunner = Callable[..., Awaitable[CommandResult]]
@@ -127,5 +134,55 @@ def build_router(application_settings: Settings) -> APIRouter:
             play_url=f"/api/clips/{clip_id}/media",
             frame_rate=frame_rate,
         )
+
+    @router.post("/api/clips/{clip_id}/trim", response_model=JobSnapshot)
+    async def save_trim(
+        clip_id: str, trim: ClipTrimSaveRequest, request: Request
+    ) -> JobSnapshot:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        path = Path(str(clip["file_path"]))
+        try:
+            render_source = await probe_managed_media_file(
+                path,
+                application_settings,
+                run_blocking=request.app.state.blocking_io.run,
+            )
+            source_stat = await request.app.state.blocking_io.run(path.stat)
+            plan = build_trim_render_plan(
+                clip,
+                trim,
+                render_source,
+                source_stat,
+                x264_preset=request.app.state.effective_application_settings.x264_preset,
+            )
+            job = await enqueue_clip_create_job(request.app.state.database_engine, plan)
+        except ClipEditError as error:
+            raise HTTPException(
+                status_code=409 if error.job_error_code == "CLIP_REVISION_CONFLICT" else 422,
+                detail={
+                    "code": error.job_error_code,
+                    "message": str(error),
+                    "retryable": error.job_retryable,
+                },
+            ) from error
+        except SourceMediaError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                    "alternatives": error.alternatives,
+                },
+            ) from error
+        await request.app.state.job_events.publish(job.id, job)
+        request.app.state.job_runner.wake()
+        return job
 
     return router

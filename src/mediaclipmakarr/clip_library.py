@@ -46,6 +46,7 @@ class ClipRecord(BaseModel):
     media_type: str
     duration_ms: int
     revision: int
+    parent_clip_id: str | None = None
     movie_title: str | None = None
     movie_year: int | None = None
     show_name: str | None = None
@@ -904,7 +905,12 @@ def thumbnail_is_current(row: dict[str, Any], source_stat: os.stat_result) -> bo
     )
 
 
-def embedded_revision_matches(path: Path, clip_id: str, revision: int) -> bool:
+def embedded_revision_matches(
+    path: Path,
+    clip_id: str,
+    revision: int,
+    render_plan_hash: str | None = None,
+) -> bool:
     """Inspect bounded MP4 regions for the current recovery envelope."""
     marker = b"MediaClipMakarr "
     try:
@@ -936,10 +942,20 @@ def embedded_revision_matches(path: Path, clip_id: str, revision: int) -> bool:
                 and isinstance(payload.get("schemaVersion"), int)
                 and payload.get("clipId") == clip_id
                 and payload.get("revision") == revision
+                and (
+                    render_plan_hash is None
+                    or payload.get("renderPlanHash") == render_plan_hash
+                )
             ):
                 return True
             start = chunk.find(marker, payload_start)
     return False
+
+
+def embedded_render_matches(
+    path: Path, clip_id: str, revision: int, render_plan_hash: str
+) -> bool:
+    return embedded_revision_matches(path, clip_id, revision, render_plan_hash)
 
 
 def _clean(value: object) -> str | None:

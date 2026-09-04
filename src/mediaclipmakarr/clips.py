@@ -210,6 +210,7 @@ async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
                 "(id, title, library, media_type, file_path, duration_ms, revision, "
                 "source_start_ms, source_end_ms, source_path, source_size_bytes, "
                 "source_modified_at, selected_audio_stream_index, render_plan_hash, "
+                "parent_clip_id, "
                 "created_at, updated_at, custom_title, automatic_title, movie_title, "
                 "movie_year, show_name, "
                 "episode_title, season_number, episode_number, clip_number, plex_username, "
@@ -217,7 +218,7 @@ async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
-                ":render_plan_hash, :created_at, :updated_at, :custom_title, "
+                ":render_plan_hash, :parent_clip_id, :created_at, :updated_at, :custom_title, "
                 ":automatic_title, :movie_title, "
                 ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
                 ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
@@ -235,6 +236,7 @@ async def insert_clip_if_missing(engine: AsyncEngine, clip: dict[str, object]) -
                 "(id, title, library, media_type, file_path, duration_ms, revision, "
                 "source_start_ms, source_end_ms, source_path, source_size_bytes, "
                 "source_modified_at, selected_audio_stream_index, render_plan_hash, "
+                "parent_clip_id, "
                 "created_at, updated_at, custom_title, automatic_title, movie_title, "
                 "movie_year, show_name, "
                 "episode_title, season_number, episode_number, clip_number, plex_username, "
@@ -242,7 +244,7 @@ async def insert_clip_if_missing(engine: AsyncEngine, clip: dict[str, object]) -
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
-                ":render_plan_hash, :created_at, :updated_at, :custom_title, "
+                ":render_plan_hash, :parent_clip_id, :created_at, :updated_at, :custom_title, "
                 ":automatic_title, :movie_title, "
                 ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
                 ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
@@ -265,6 +267,7 @@ def _insert_values(clip: dict[str, object]) -> dict[str, object]:
         "plex_username": None,
         "file_size_bytes": None,
         "file_modified_ns": None,
+        "parent_clip_id": None,
         **clip,
     }
 

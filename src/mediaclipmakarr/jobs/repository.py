@@ -628,6 +628,39 @@ async def create_pending_metadata_operation(
         )
 
 
+async def create_pending_replacement_operation(
+    engine: AsyncEngine,
+    *,
+    job_id: str,
+    plan: ClipRenderPlan,
+    rendered_path: Path,
+    source_path: Path,
+    clip: dict[str, Any],
+) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO pending_file_operations "
+                "(id, job_id, clip_id, operation_type, temp_path, source_path, target_path, "
+                "expected_revision, render_plan_hash, clip_json, created_at) "
+                "VALUES (:id, :job_id, :clip_id, 'replace_clip', :temp_path, :source_path, "
+                ":target_path, :expected_revision, :render_plan_hash, :clip_json, :created_at)"
+            ),
+            {
+                "id": f"pending-{uuid4()}",
+                "job_id": job_id,
+                "clip_id": plan.clip_id,
+                "temp_path": str(rendered_path),
+                "source_path": str(source_path),
+                "target_path": str(source_path),
+                "expected_revision": plan.expected_revision,
+                "render_plan_hash": plan.render_plan_hash,
+                "clip_json": _dump_json(clip),
+                "created_at": utc_now(),
+            },
+        )
+
+
 async def commit_metadata_edit(
     engine: AsyncEngine,
     clip: dict[str, Any],
@@ -690,6 +723,91 @@ async def commit_metadata_edit(
         )
         if result.rowcount != 1:
             raise ClipRevisionConflict("Clip revision changed before metadata finalization.")
+        await connection.execute(
+            text(
+                "INSERT OR IGNORE INTO clip_revisions "
+                "(clip_id, revision, metadata_json, file_path, created_at) "
+                "VALUES (:clip_id, :revision, :metadata_json, :file_path, :created_at)"
+            ),
+            {
+                "clip_id": clip["id"],
+                "revision": clip["revision"],
+                "metadata_json": _dump_json(clip),
+                "file_path": clip["file_path"],
+                "created_at": utc_now(),
+            },
+        )
+        await connection.execute(
+            text(
+                "DELETE FROM clip_revisions WHERE clip_id = :clip_id AND id NOT IN "
+                "(SELECT id FROM clip_revisions WHERE clip_id = :clip_id "
+                "ORDER BY revision DESC LIMIT 25)"
+            ),
+            {"clip_id": clip["id"]},
+        )
+
+
+async def commit_clip_replacement(
+    engine: AsyncEngine,
+    clip: dict[str, Any],
+    *,
+    expected_revision: int,
+) -> None:
+    """Commit a rendered replacement while retaining bounded revision history."""
+    async with engine.begin() as connection:
+        current = (
+            await connection.execute(
+                text("SELECT * FROM clips WHERE id = :id"), {"id": clip["id"]}
+            )
+        ).mappings().first()
+        if current is not None and int(current["revision"]) == int(clip["revision"]):
+            return
+        if current is None or int(current["revision"]) != expected_revision:
+            raise ClipRevisionConflict("Clip revision changed before replacement finalization.")
+        current_payload = dict(current)
+        await connection.execute(
+            text(
+                "INSERT OR IGNORE INTO clip_revisions "
+                "(clip_id, revision, metadata_json, file_path, created_at) "
+                "VALUES (:clip_id, :revision, :metadata_json, :file_path, :created_at)"
+            ),
+            {
+                "clip_id": current_payload["id"],
+                "revision": current_payload["revision"],
+                "metadata_json": _dump_json(current_payload),
+                "file_path": current_payload["file_path"],
+                "created_at": utc_now(),
+            },
+        )
+        fields = (
+            "duration_ms",
+            "revision",
+            "source_start_ms",
+            "source_end_ms",
+            "source_path",
+            "source_size_bytes",
+            "source_modified_at",
+            "selected_audio_stream_index",
+            "render_plan_hash",
+            "parent_clip_id",
+            "file_path",
+            "file_size_bytes",
+            "file_modified_ns",
+            "updated_at",
+            "thumbnail_path",
+            "thumbnail_source_size",
+            "thumbnail_source_modified_ns",
+        )
+        assignments = ", ".join(f"{field} = :{field}" for field in fields)
+        result = await connection.execute(
+            text(
+                f"UPDATE clips SET {assignments} "
+                "WHERE id = :id AND revision = :expected_revision"
+            ),
+            {**clip, "expected_revision": expected_revision},
+        )
+        if result.rowcount != 1:
+            raise ClipRevisionConflict("Clip revision changed before replacement finalization.")
         await connection.execute(
             text(
                 "INSERT OR IGNORE INTO clip_revisions "

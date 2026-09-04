@@ -1,7 +1,9 @@
 import AddLocationAltRounded from "@mui/icons-material/AddLocationAltRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
+import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
+import SaveRounded from "@mui/icons-material/SaveRounded";
 import {
   Alert,
   Box,
@@ -12,6 +14,7 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
+  LinearProgress,
   Stack,
   TextField,
   Tooltip,
@@ -19,13 +22,14 @@ import {
   useMediaQuery,
   useTheme,
 } from "@mui/material";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import { fetchClipTrimInfo } from "../../api";
+import { fetchClipTrimInfo, saveClipTrim } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import type { ClipRecord } from "../../types";
 import { EditTimeline } from "../editing/EditTimeline";
+import { useJobSnapshot } from "../make-clip/hooks";
 import {
   canShiftTimelineBoundary,
   shiftTimelineBoundary,
@@ -74,6 +78,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
   const videoRef = useRef<HTMLVideoElement>(null);
+  const queryClient = useQueryClient();
   const initializedRef = useRef(false);
   const [durationMs, setDurationMs] = useState(Math.max(1, clip.duration_ms));
   const [startMs, setStartMs] = useState(0);
@@ -88,6 +93,33 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const [activeBoundary, setActiveBoundary] = useState<"start" | "end" | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [expectedRevision, setExpectedRevision] = useState<number | null>(null);
+  const [submittedJob, setSubmittedJob] = useState<import("../../types").JobSnapshot | null>(null);
+  const [confirmingReplace, setConfirmingReplace] = useState(false);
+
+  const saveMutation = useMutation({
+    mutationFn: (mode: "new" | "replace") => {
+      if (expectedRevision === null) throw new Error("The opening clip revision is unavailable.");
+      return saveClipTrim(clip.id, {
+        start_ms: startMs,
+        end_ms: endMs,
+        expected_revision: expectedRevision,
+        mode,
+      });
+    },
+    onMutate: () => {
+      cancelPreview();
+      setSubmittedJob(null);
+    },
+    onSuccess: (job) => {
+      setConfirmingReplace(false);
+      setSubmittedJob(job);
+    },
+  });
+  const activeJob = useJobSnapshot(submittedJob);
+  const jobBusy = Boolean(
+    activeJob && ["QUEUED", "RUNNING", "FINALIZING"].includes(activeJob.state),
+  );
+  const saving = saveMutation.isPending || jobBusy;
 
   const info = useQuery({
     queryKey: ["clip-trim-info", clip.id, clip.revision],
@@ -143,6 +175,13 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   }, [durationMs, endMs, previewing, videoPlaying]);
 
   useEffect(() => () => videoRef.current?.pause(), []);
+
+  useEffect(() => {
+    if (activeJob?.state !== "SUCCEEDED") return;
+    void queryClient.invalidateQueries({ queryKey: ["clips"] });
+    void queryClient.invalidateQueries({ queryKey: ["clip", clip.id] });
+    void queryClient.invalidateQueries({ queryKey: ["clip-libraries"] });
+  }, [activeJob?.state, clip.id, queryClient]);
 
   const cancelPreview = () => {
     videoRef.current?.pause();
@@ -223,6 +262,10 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     frameStepMs
     && canShiftTimelineBoundary(selectionRange, editableRange, boundary, direction * frameStepMs),
   );
+  const selectionChanged = startMs > 0 || endMs < durationMs;
+  const saveDisabled = !trimInfo || expectedRevision === null
+    || Boolean(startError || endError) || !selectionChanged || saving
+    || activeJob?.state === "SUCCEEDED";
 
   return (
     <Dialog open onClose={onClose} fullScreen={fullScreen} fullWidth maxWidth="lg" aria-labelledby="trim-dialog-title">
@@ -401,18 +444,71 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
               Selected duration {formatTimestampMs(endMs - startMs)} · Playhead {formatTimestampMs(playheadMs)}
             </Typography>
             {playbackError && <Alert severity="error">{playbackError}</Alert>}
+            {confirmingReplace && (
+              <Alert
+                severity="warning"
+                action={(
+                  <Stack direction="row" spacing={1}>
+                    <Button color="inherit" size="small" onClick={() => setConfirmingReplace(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      color="error"
+                      variant="contained"
+                      size="small"
+                      onClick={() => saveMutation.mutate("replace")}
+                    >
+                      Confirm Replace
+                    </Button>
+                  </Stack>
+                )}
+              >
+                Replace the existing clip only after the new render passes validation. The clip
+                keeps its identity and advances to the next revision.
+              </Alert>
+            )}
+            {activeJob && (
+              <Alert severity={activeJob.state === "FAILED" ? "error" : activeJob.state === "SUCCEEDED" ? "success" : "info"}>
+                {activeJob.error?.message ?? activeJob.message}
+              </Alert>
+            )}
+            {saveMutation.error && <Alert severity="error">{saveMutation.error.message}</Alert>}
+            {jobBusy && (
+              <LinearProgress
+                variant="determinate"
+                value={Math.round((activeJob?.progress ?? 0) * 100)}
+                aria-label="Trim save progress"
+              />
+            )}
           </Stack>
         ) : null}
       </DialogContent>
-      <DialogActions sx={{ px: 3, py: 2 }}>
+      <DialogActions sx={{ px: 3, py: 2, flexWrap: "wrap", gap: 1 }}>
         <Button onClick={onClose}>Close</Button>
         <Button
-          variant="contained"
+          variant="outlined"
           startIcon={<PlayArrowRounded />}
-          disabled={!trimInfo || Boolean(startError || endError)}
+          disabled={!trimInfo || Boolean(startError || endError) || saving}
           onClick={() => void previewSelection()}
         >
           {previewing ? "Restart Preview" : "Preview Selection"}
+        </Button>
+        <Button
+          variant="contained"
+          startIcon={<ContentCopyRounded />}
+          disabled={saveDisabled}
+          onClick={() => saveMutation.mutate("new")}
+        >
+          Save as New
+        </Button>
+        <Button
+          color="error"
+          variant="outlined"
+          startIcon={<SaveRounded />}
+          disabled={saveDisabled}
+          onClick={() => setConfirmingReplace(true)}
+        >
+          Replace Existing
         </Button>
       </DialogActions>
     </Dialog>

@@ -5,6 +5,7 @@ import type {
   ClipMetadataUpdate,
   ClipPage,
   ClipRecord,
+  ClipTrimSaveRequest,
   ClipDeleteResult,
   ClipFilterOptions,
   HealthResponse,
@@ -231,6 +232,18 @@ export async function fetchClipTrimInfo(
     headers: { Accept: "application/json" },
   });
   return parseResponse<import("./types").ClipTrimInfo>(response, "Clip trim information request");
+}
+
+export async function saveClipTrim(
+  clipId: string,
+  trim: ClipTrimSaveRequest,
+): Promise<JobSnapshot> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/trim`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(trim),
+  });
+  return parseResponse<JobSnapshot>(response, "Trim save request");
 }
 
 export async function fetchClipLibraries(): Promise<string[]> {

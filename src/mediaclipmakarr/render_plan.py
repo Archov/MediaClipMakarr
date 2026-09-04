@@ -36,7 +36,7 @@ _RESERVED_NAMES = {
 class ClipRenderPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 2
+    schema_version: int = 3
     job_id: str
     clip_id: str
     revision: int = 1
@@ -70,6 +70,17 @@ class ClipRenderPlan(BaseModel):
     x264_preset: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
+    operation: Literal["create", "trim_new", "trim_replace"] = "create"
+    parent_clip_id: str | None = None
+    expected_revision: int | None = None
+    render_source_modified_ns: int | None = None
+    provenance_source_path: str | None = None
+    provenance_source_size_bytes: int | None = None
+    provenance_source_modified_at: datetime | None = None
+    provenance_start_ms: int | None = None
+    provenance_end_ms: int | None = None
+    provenance_audio_stream_index: int | None = None
+    clip_created_at: datetime | None = None
 
     @model_validator(mode="before")
     @classmethod

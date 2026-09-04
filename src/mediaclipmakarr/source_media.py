@@ -335,6 +335,93 @@ async def resolve_media_capabilities(
     )
 
 
+async def probe_managed_media_file(
+    path: Path,
+    settings: Settings,
+    *,
+    run_blocking: BlockingRunner,
+    runner: CommandRunner = run_command,
+) -> ResolvedSourceMedia:
+    """Probe an already-managed clip for use as an edit render input.
+
+    This deliberately describes only the managed MP4 used for decoding. Original
+    Plex provenance remains a separate concern on the edit render plan.
+    """
+    try:
+        stat = await run_blocking(path.stat)
+    except OSError as error:
+        raise SourceMediaError(
+            "SOURCE_PATH_MISSING",
+            "The managed clip is no longer available.",
+            retryable=True,
+        ) from error
+    probe = await _probe_source(path, settings, runner=runner)
+    video_streams = _video_streams(probe)
+    audio_streams = _audio_streams(probe)
+    if not video_streams:
+        raise SourceMediaError(
+            "VIDEO_STREAM_UNAVAILABLE",
+            "The managed clip does not contain a usable video stream.",
+        )
+    if not audio_streams:
+        raise SourceMediaError(
+            "AUDIO_STREAM_UNAVAILABLE",
+            "The managed clip does not contain a usable audio stream.",
+        )
+    video = video_streams[0]
+    selected_audio = _stream_identity(audio_streams[0])
+    hdr = classify_hdr(video)
+    return ResolvedSourceMedia(
+        plex_path=str(path),
+        local_path=str(path),
+        fingerprint=SourceFingerprint(
+            size_bytes=stat.st_size,
+            modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
+        ),
+        duration_ms=_duration_ms(probe),
+        video_streams=[
+            VideoStreamIdentity(
+                stream_index=stream.index,
+                codec_type=stream.codec_type,
+                codec_name=stream.codec_name,
+                language=_stream_language(stream),
+                title=_stream_title(stream),
+                width=stream.width,
+                height=stream.height,
+                color=VideoColorMetadata(
+                    color_space=stream.color_space,
+                    color_transfer=stream.color_transfer,
+                    color_primaries=stream.color_primaries,
+                    color_range=stream.color_range,
+                ),
+            )
+            for stream in video_streams
+        ],
+        audio_streams=[_stream_identity(stream) for stream in audio_streams],
+        subtitle_streams=[],
+        capabilities=MediaCapabilities(
+            duration_ms=_duration_ms(probe),
+            frame_rate=_video_frame_rate(video),
+            video_tracks=[
+                _track_descriptor(stream, kind="video", selected=stream == video)
+                for stream in video_streams
+            ],
+            audio_tracks=[
+                _track_descriptor(stream, kind="audio", selected=stream == audio_streams[0])
+                for stream in audio_streams
+            ],
+            subtitle_tracks=[],
+            attachment_tracks=[],
+            default_audio_stream_index=selected_audio.stream_index,
+            subtitles_forced_off=True,
+            hdr=hdr,
+        ),
+        selected_audio_stream=selected_audio,
+        selected_subtitle=SubtitleSelection(),
+        subtitles_forced_off=True,
+    )
+
+
 async def _probe_source(
     path: Path,
     settings: Settings,

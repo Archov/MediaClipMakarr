@@ -351,6 +351,7 @@ export interface ClipRecord {
   media_type: string;
   duration_ms: number;
   revision: number;
+  parent_clip_id: string | null;
   movie_title: string | null;
   movie_year: number | null;
   show_name: string | null;
@@ -385,6 +386,13 @@ export interface ClipTrimInfo {
   revision: number;
   play_url: string;
   frame_rate: number | null;
+}
+
+export interface ClipTrimSaveRequest {
+  start_ms: number;
+  end_ms: number;
+  expected_revision: number;
+  mode: "new" | "replace";
 }
 
 export interface ClipFilterOptions {
