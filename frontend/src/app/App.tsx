@@ -1,11 +1,9 @@
 import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import VideoLibraryRounded from "@mui/icons-material/VideoLibraryRounded";
-import { AppBar, Box, Button, Chip, Container, CssBaseline, Stack, ThemeProvider, Toolbar, Typography } from "@mui/material";
-import { useQuery } from "@tanstack/react-query";
+import { AppBar, Box, Button, Container, CssBaseline, Stack, ThemeProvider, Toolbar, Typography } from "@mui/material";
 import { useEffect, useState } from "react";
 
-import { fetchHealth } from "../api";
 import { MakeClipScreen } from "../features/make-clip/MakeClipScreen";
 import { LibraryScreen } from "../features/library/LibraryScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
@@ -24,16 +22,6 @@ export function App() {
     window.addEventListener("popstate", navigate);
     return () => window.removeEventListener("popstate", navigate);
   }, []);
-  const health = useQuery({
-    queryKey: ["health"],
-    queryFn: fetchHealth,
-    refetchInterval: 10_000,
-  });
-  const healthColor = health.data?.status === "ok"
-    ? "success"
-    : health.data?.status === "degraded"
-      ? "warning"
-      : "error";
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -76,12 +64,14 @@ export function App() {
             <Button color={page === "library" ? "primary" : "inherit"} startIcon={<VideoLibraryRounded />} variant={page === "library" ? "outlined" : "text"} onClick={() => setPage("library")}>Library</Button>
             <Button color={page === "settings" ? "primary" : "inherit"} startIcon={<SettingsRounded />} variant={page === "settings" ? "outlined" : "text"} onClick={() => setPage("settings")}>Settings</Button>
           </Stack>
-          <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }}>
-            {health.data && <Chip label={health.data.status.toUpperCase()} color={healthColor} size="small" />}
-          </Stack>
+          <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }} />
+
         </Toolbar>
       </AppBar>
-      <Container maxWidth={page === "library" ? "xl" : "md"} sx={{ py: page === "library" ? { xs: 1.5, md: 2.5 } : { xs: 4, md: 7 } }}>
+      <Container
+        maxWidth={page === "library" || page === "settings" ? "xl" : "md"}
+        sx={{ py: page === "library" ? { xs: 1.5, md: 2.5 } : { xs: 4, md: 7 } }}
+      >
         <Box>{page === "make-clip" ? <MakeClipScreen /> : page === "library" ? <LibraryScreen /> : <SettingsScreen />}</Box>
       </Container>
     </ThemeProvider>

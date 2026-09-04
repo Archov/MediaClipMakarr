@@ -15,6 +15,7 @@ from mediaclipmakarr.application_settings import (
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import MediaToolInspection
+from mediaclipmakarr.immich import ImmichConnectionResult
 from mediaclipmakarr.plex import PlexConnectionResult
 
 
@@ -36,6 +37,29 @@ def test_windows_timezone_separator_is_normalized() -> None:
     update = ApplicationSettingsUpdate(timezone=r"America\Chicago")
 
     assert update.timezone == "America/Chicago"
+
+
+@pytest.mark.parametrize("field", ["plex_url", "immich_url"])
+@pytest.mark.parametrize(
+    "host",
+    ["169.254.169.254", "169.254.0.1", "[fe80::1]"],
+)
+def test_link_local_urls_are_rejected(field: str, host: str) -> None:
+    with pytest.raises(ValueError, match="link-local"):
+        ApplicationSettingsUpdate(**{field: f"http://{host}"})
+
+
+@pytest.mark.parametrize("field", ["plex_url", "immich_url"])
+@pytest.mark.parametrize(
+    "host",
+    ["192.168.1.20:32400", "10.0.0.5", "127.0.0.1:2283", "plex.example.com"],
+)
+def test_ordinary_and_private_hosts_are_still_allowed(field: str, host: str) -> None:
+    # Most self-hosted Plex/Immich servers live on exactly these kinds of addresses —
+    # only the link-local cloud-metadata range is blocked, not private ranges broadly.
+    update = ApplicationSettingsUpdate(**{field: f"http://{host}"})
+
+    assert getattr(update, field) is not None
 
 
 @pytest.mark.asyncio
@@ -90,6 +114,14 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
                 ),
                 "timezone": "Europe/London",
                 "x264_preset": "slow",
+                "immich_url": "http://database-immich:2283",
+                "immich_api_key": "database-immich-secret",
+                "immich_default_tag": "database-tag",
+                "immich_auto_upload": "true",
+                "immich_manage_remote": "true",
+                "immich_tag_library": "false",
+                "immich_tag_show": "false",
+                "immich_tag_episode": "false",
             },
         )
         bootstrap = Settings(
@@ -101,6 +133,14 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
             ),
             timezone="America/Chicago",
             x264_preset="fast",
+            immich_url="http://environment-immich:2283/",
+            immich_api_key="environment-immich-secret",
+            immich_default_tag="environment-tag",
+            immich_auto_upload=False,
+            immich_manage_remote=False,
+            immich_tag_library=True,
+            immich_tag_show=True,
+            immich_tag_episode=True,
         )
 
         effective = await get_effective_application_settings(engine, bootstrap)
@@ -113,6 +153,9 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
                 source_path_mappings="",
                 timezone=" ",
                 x264_preset="",
+                immich_url=" ",
+                immich_api_key="",
+                immich_default_tag=" ",
             ),
         )
     finally:
@@ -123,10 +166,26 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert effective.source_path_mappings[0].plex_prefix == "D:/Media"
     assert effective.timezone == "America/Chicago"
     assert effective.x264_preset == "fast"
+    assert effective.immich_url == "http://environment-immich:2283"
+    assert effective.immich_api_key == "environment-immich-secret"
+    assert effective.immich_default_tag == "environment-tag"
+    assert effective.immich_auto_upload is False
+    assert effective.immich_manage_remote is False
+    assert effective.immich_tag_library is True
+    assert effective.immich_tag_show is True
+    assert effective.immich_tag_episode is True
     assert all(effective.environment_managed.values())
     assert empty_overrides.plex_url == "http://database-plex:32400"
     assert empty_overrides.plex_token == "database-secret"
     assert empty_overrides.x264_preset == "slow"
+    assert empty_overrides.immich_url == "http://database-immich:2283"
+    assert empty_overrides.immich_api_key == "database-immich-secret"
+    assert empty_overrides.immich_default_tag == "database-tag"
+    assert empty_overrides.immich_auto_upload is True
+    assert empty_overrides.immich_manage_remote is True
+    assert empty_overrides.immich_tag_library is False
+    assert empty_overrides.immich_tag_show is False
+    assert empty_overrides.immich_tag_episode is False
     assert not any(empty_overrides.environment_managed.values())
 
 
@@ -189,6 +248,10 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
             json={"plex_token": validation_secret, "clear_plex_token": True},
         )
         cleared = client.put("/api/settings", json={"clear_plex_token": True})
+        url_change_after_clear = client.put(
+            "/api/settings",
+            json={"plex_url": "http://untrusted.example:32400"},
+        )
 
     assert created.status_code == 200
     assert replaced.status_code == 200
@@ -210,6 +273,8 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
         ("", replacement_secret),
     ]
     assert cleared.json()["plex_token_configured"] is False
+    assert url_change_after_clear.status_code == 200
+    assert url_change_after_clear.json()["plex_url"] == "http://untrusted.example:32400"
     serialized_responses = (
         created.text
         + replaced.text
@@ -225,6 +290,107 @@ def test_settings_api_redacts_preserves_and_explicitly_clears_token(
     assert validation_secret not in serialized_responses
     assert partial_candidate_secret not in serialized_responses
     assert "plex_token" not in fetched.json()
+
+
+def test_settings_api_redacts_preserves_and_explicitly_clears_immich_api_key(
+    tmp_path, monkeypatch
+) -> None:
+    observed_connections: list[tuple[str, str | None]] = []
+
+    async def healthy_media_tools(_settings):
+        return MediaToolInspection(
+            status="ok",
+            message="Media tools are ready.",
+            details={"identity_ok": True, "libx264": True, "aac": True},
+        )
+
+    async def capture_connection_key(immich_url, immich_api_key):
+        observed_connections.append((immich_url, immich_api_key))
+        return ImmichConnectionResult(
+            connected=True,
+            code="IMMICH_CONNECTED",
+            message="Connected to Immich successfully.",
+        )
+
+    monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    monkeypatch.setattr(settings_api, "test_immich_connection", capture_connection_key)
+    settings = api_settings(tmp_path)
+    secret = "must-not-appear-in-a-response"
+    replacement_secret = "replacement-must-also-stay-secret"
+    candidate_secret = "unsaved-candidate-secret"
+    validation_secret = "validation-secret-must-not-leak"
+    partial_candidate_secret = "partial-candidate-secret-must-not-leak"
+
+    with TestClient(main_module.create_app(settings)) as client:
+        created = client.put("/api/settings", json={"immich_api_key": secret})
+        replaced = client.put("/api/settings", json={"immich_api_key": replacement_secret})
+        preserved = client.put("/api/settings", json={"immich_api_key": ""})
+        fetched = client.get("/api/settings")
+        candidate_connection = client.post(
+            "/api/settings/immich/test",
+            json={
+                "immich_url": "http://candidate-immich:2283",
+                "immich_api_key": candidate_secret,
+            },
+        )
+        blocked_url_change = client.put(
+            "/api/settings",
+            json={"immich_url": "http://untrusted.example:2283"},
+        )
+        saved_connection = client.post("/api/settings/immich/test")
+        url_only_connection = client.post(
+            "/api/settings/immich/test",
+            json={"immich_url": "http://untrusted.example:2283"},
+        )
+        key_only_connection = client.post(
+            "/api/settings/immich/test",
+            json={"immich_api_key": partial_candidate_secret},
+        )
+        conflicting_update = client.put(
+            "/api/settings",
+            json={"immich_api_key": validation_secret, "clear_immich_api_key": True},
+        )
+        cleared = client.put("/api/settings", json={"clear_immich_api_key": True})
+        url_change_after_clear = client.put(
+            "/api/settings",
+            json={"immich_url": "http://untrusted.example:2283"},
+        )
+
+    assert created.status_code == 200
+    assert replaced.status_code == 200
+    assert created.json()["immich_api_key_configured"] is True
+    assert replaced.json()["immich_api_key_configured"] is True
+    assert preserved.json()["immich_api_key_configured"] is True
+    assert fetched.json()["immich_api_key_configured"] is True
+    assert candidate_connection.json()["connected"] is True
+    assert blocked_url_change.status_code == 409
+    assert blocked_url_change.json()["detail"]["code"] == "IMMICH_CREDENTIALS_REQUIRED"
+    assert saved_connection.json()["connected"] is True
+    assert url_only_connection.status_code == 422
+    assert key_only_connection.status_code == 422
+    assert conflicting_update.status_code == 422
+    assert observed_connections == [
+        ("http://candidate-immich:2283", candidate_secret),
+        ("", replacement_secret),
+    ]
+    assert cleared.json()["immich_api_key_configured"] is False
+    assert url_change_after_clear.status_code == 200
+    assert url_change_after_clear.json()["immich_url"] == "http://untrusted.example:2283"
+    serialized_responses = (
+        created.text
+        + replaced.text
+        + preserved.text
+        + fetched.text
+        + key_only_connection.text
+        + conflicting_update.text
+        + cleared.text
+    )
+    assert secret not in serialized_responses
+    assert replacement_secret not in serialized_responses
+    assert candidate_secret not in serialized_responses
+    assert validation_secret not in serialized_responses
+    assert partial_candidate_secret not in serialized_responses
+    assert "immich_api_key" not in fetched.json()
 
 
 def test_environment_managed_setting_cannot_be_updated_through_api(
@@ -248,6 +414,29 @@ def test_environment_managed_setting_cannot_be_updated_through_api(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "ENVIRONMENT_MANAGED_SETTING"
     assert response.json()["detail"]["fields"] == ["plex_url"]
+
+
+def test_environment_managed_immich_setting_cannot_be_updated_through_api(
+    tmp_path, monkeypatch
+) -> None:
+    async def healthy_media_tools(_settings):
+        return MediaToolInspection(
+            status="ok",
+            message="Media tools are ready.",
+            details={"identity_ok": True, "libx264": True, "aac": True},
+        )
+
+    monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    settings = api_settings(tmp_path, immich_url="http://environment-immich:2283")
+
+    with TestClient(main_module.create_app(settings)) as client:
+        fetched = client.get("/api/settings")
+        response = client.put("/api/settings", json={"immich_url": "http://other:2283"})
+
+    assert fetched.json()["environment_managed"]["immich_url"] is True
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "ENVIRONMENT_MANAGED_SETTING"
+    assert response.json()["detail"]["fields"] == ["immich_url"]
 
 
 def test_effective_settings_are_cached_until_settings_update(tmp_path, monkeypatch) -> None:

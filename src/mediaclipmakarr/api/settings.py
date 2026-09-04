@@ -11,6 +11,11 @@ from mediaclipmakarr.application_settings import (
     serialize_update,
 )
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.immich import (
+    ImmichConnectionRequest,
+    ImmichConnectionResult,
+    test_immich_connection,
+)
 from mediaclipmakarr.plex import (
     PlexConnectionRequest,
     PlexConnectionResult,
@@ -41,6 +46,12 @@ def build_router(application_settings: Settings) -> APIRouter:
                 },
             )
 
+        # Retargeting a service URL while its credential stays configured would let a
+        # mistyped or malicious URL silently inherit the saved secret — background
+        # processes (the Plex session poller, the Immich auto-connection-check on
+        # settings load) would then send that credential to whatever the URL now
+        # points at, before anyone verifies it belongs there. Require either a fresh
+        # credential in the same request or an explicit clear first.
         changes_plex_url = update.plex_url is not None and update.plex_url != effective.plex_url
         supplies_plex_token = bool(update.plex_token and update.plex_token.strip())
         if (
@@ -54,6 +65,26 @@ def build_router(application_settings: Settings) -> APIRouter:
                 detail={
                     "code": "PLEX_CREDENTIALS_REQUIRED",
                     "message": "Enter the Plex token again when changing the Plex server URL.",
+                },
+            )
+
+        changes_immich_url = (
+            update.immich_url is not None and update.immich_url != effective.immich_url
+        )
+        supplies_immich_api_key = bool(update.immich_api_key and update.immich_api_key.strip())
+        if (
+            changes_immich_url
+            and effective.immich_api_key
+            and not supplies_immich_api_key
+            and not update.clear_immich_api_key
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_CREDENTIALS_REQUIRED",
+                    "message": (
+                        "Enter the Immich API key again when changing the Immich server URL."
+                    ),
                 },
             )
 
@@ -80,5 +111,18 @@ def build_router(application_settings: Settings) -> APIRouter:
             candidate_url = connection.plex_url
             candidate_token = connection.plex_token.get_secret_value().strip()
         return await test_plex_connection(candidate_url, candidate_token)
+
+    @router.post("/api/settings/immich/test", response_model=ImmichConnectionResult)
+    async def test_current_immich_connection(
+        request: Request, connection: ImmichConnectionRequest | None = None
+    ) -> ImmichConnectionResult:
+        effective = request.app.state.effective_application_settings
+        if connection is None or connection.immich_url is None or connection.immich_api_key is None:
+            candidate_url = effective.immich_url
+            candidate_key = effective.immich_api_key
+        else:
+            candidate_url = connection.immich_url
+            candidate_key = connection.immich_api_key.get_secret_value().strip()
+        return await test_immich_connection(candidate_url, candidate_key)
 
     return router

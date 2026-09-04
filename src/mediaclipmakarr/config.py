@@ -53,9 +53,30 @@ class Settings(BaseSettings):
     source_path_mappings: str | None = None
     timezone: str | None = None
     x264_preset: str | None = None
+    immich_url: str | None = None
+    immich_api_key: str | None = None
+    immich_default_tag: str | None = None
+    immich_auto_upload: bool | None = None
+    immich_manage_remote: bool | None = None
+    immich_tag_library: bool | None = None
+    immich_tag_show: bool | None = None
+    immich_tag_episode: bool | None = None
 
     @field_validator(
-        "plex_url", "plex_token", "source_path_mappings", "timezone", "x264_preset", mode="before"
+        "plex_url",
+        "plex_token",
+        "source_path_mappings",
+        "timezone",
+        "x264_preset",
+        "immich_url",
+        "immich_api_key",
+        "immich_default_tag",
+        "immich_auto_upload",
+        "immich_manage_remote",
+        "immich_tag_library",
+        "immich_tag_show",
+        "immich_tag_episode",
+        mode="before",
     )
     @classmethod
     def ignore_empty_application_override(cls, value: object) -> object:

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mediaclipmakarr-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["launch.py"],
+      "port": 5173
+    }
+  ]
+}
