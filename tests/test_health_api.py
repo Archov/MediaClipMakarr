@@ -43,7 +43,7 @@ def test_health_reports_bootstrap_state_without_paths(tmp_path, monkeypatch) -> 
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["database"]["details"]["schema_revision"] == (
-        "0008_immich_tag_ids"
+        "0009_bulk_immich_upload_active_unique"
     )
     assert payload["application"]["details"]["exclusive_lock"] is True
     serialized = response.text

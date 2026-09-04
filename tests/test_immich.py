@@ -185,6 +185,44 @@ def test_upload_immich_asset_returns_asset_id_on_success(tmp_path) -> None:
     assert asset_id == "asset-123"
 
 
+def test_upload_immich_asset_sends_timestamps_in_the_configured_local_timezone(tmp_path) -> None:
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake mp4 bytes")
+
+    sent: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Immich shows a video's "Details" date as given, with no EXIF/GPS to
+        # derive a local offset from — so it must be sent in the timezone the
+        # clip was actually experienced in, the same way a photo app shows a
+        # vacation photo's timestamp in the timezone it was taken, not UTC.
+        body = request.content.decode("utf-8", errors="ignore")
+        for field in ("fileCreatedAt", "fileModifiedAt"):
+            start = body.index(f'name="{field}"')
+            value_start = body.index("\r\n\r\n", start) + 4
+            value_end = body.index("\r\n", value_start)
+            sent[field] = body[value_start:value_end]
+        return httpx.Response(201, json={"id": "asset-123", "duplicate": False})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        upload_immich_asset_sync(
+            clip_path,
+            "http://immich.example:2283",
+            "valid-key",
+            file_created_at=datetime(2026, 1, 1, 6, tzinfo=UTC),
+            file_modified_at=datetime(2026, 1, 2, 6, tzinfo=UTC),
+            local_timezone="US/Central",
+            client=client,
+        )
+
+    # 06:00 UTC on Jan 1 is 00:00 CST (UTC-6, no DST in January) — same instant,
+    # expressed with the local offset instead of a bare "+00:00".
+    assert sent["fileCreatedAt"].startswith("2026-01-01T00:00:00")
+    assert sent["fileCreatedAt"].endswith("-06:00")
+    assert sent["fileModifiedAt"].startswith("2026-01-02T00:00:00")
+    assert sent["fileModifiedAt"].endswith("-06:00")
+
+
 def test_upload_immich_asset_treats_duplicate_response_as_success(tmp_path) -> None:
     clip_path = tmp_path / "clip.mp4"
     clip_path.write_bytes(b"fake mp4 bytes")
@@ -456,6 +494,20 @@ async def test_tag_immich_assets_raises_on_a_per_asset_failure_despite_http_200(
 
 
 @pytest.mark.asyncio
+async def test_tag_immich_assets_accepts_a_count_summary_response() -> None:
+    # Confirmed against a live Immich 3.1.0 server: PUT /api/tags/assets returns
+    # a plain {"count": N} summary, not the per-asset array — no per-asset detail
+    # is available to check, so any well-formed count response is a success.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"count": 0})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await tag_immich_assets(
+            "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
 async def test_tag_immich_assets_raises_when_the_asset_is_missing_from_the_response() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[{"id": "some-other-asset", "success": True}])
@@ -501,6 +553,19 @@ async def test_untag_immich_assets_treats_not_found_as_success() -> None:
         return httpx.Response(
             200, json=[{"id": "asset-123", "success": False, "error": "not_found"}]
         )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await untag_immich_assets(
+            "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_accepts_a_count_summary_response() -> None:
+    # Confirmed against a live Immich 3.1.0 server: DELETE /api/tags/{id}/assets
+    # also returns a plain {"count": N} summary, not the per-asset array.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"count": 1})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await untag_immich_assets(

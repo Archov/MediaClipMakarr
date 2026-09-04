@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
@@ -223,6 +224,7 @@ def upload_immich_asset_sync(
     *,
     file_created_at: datetime,
     file_modified_at: datetime,
+    local_timezone: str = "UTC",
     timeout: httpx.Timeout = IMMICH_UPLOAD_TIMEOUT,
     client: httpx.Client | None = None,
 ) -> str:
@@ -237,8 +239,17 @@ def upload_immich_asset_sync(
     already stored the file even though the response never arrived. Retrying the
     same, unchanged file relies on Immich's own checksum-based dedup (a "duplicate"
     upload returns the same asset id) rather than any reconciliation performed here.
+
+    `file_created_at`/`file_modified_at` are sent expressed in `local_timezone`
+    (the app's configured timezone), not forced to UTC — Immich displays a video's
+    "Details" date as given, with no EXIF/GPS to derive a local offset from on its
+    own, so a bare UTC offset here would misrepresent what day/time was actually
+    experienced when the clip's source aired or was captured (the same reason a
+    photo app shows a vacation photo's timestamp in the timezone it was taken, not
+    in UTC).
     """
     normalized_url = normalize_immich_url(immich_url)
+    zone = ZoneInfo(local_timezone)
     owns_client = client is None
     active_client = client or httpx.Client(timeout=timeout)
     try:
@@ -248,8 +259,8 @@ def upload_immich_asset_sync(
                     f"{normalized_url}/api/assets",
                     headers={"x-api-key": immich_api_key},
                     data={
-                        "fileCreatedAt": file_created_at.astimezone(UTC).isoformat(),
-                        "fileModifiedAt": file_modified_at.astimezone(UTC).isoformat(),
+                        "fileCreatedAt": file_created_at.astimezone(zone).isoformat(),
+                        "fileModifiedAt": file_modified_at.astimezone(zone).isoformat(),
                         "filename": file_path.name,
                     },
                     files={"assetData": (file_path.name, handle, "video/mp4")},
@@ -288,17 +299,29 @@ async def set_immich_asset_description(
     immich_url: str,
     immich_api_key: str,
     *,
+    date_time_original: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> None:
+    """Set an asset's description and, when validating/re-syncing an existing
+    upload, its capture date/time (`date_time_original`, an ISO 8601 string with
+    an explicit offset — confirmed accepted via a live probe of `PATCH
+    /api/assets/{id}`, which echoes it back on `exifInfo.dateTimeOriginal`).
+    Both are the same "asset.update" call, sent together to avoid a second round
+    trip; omit `date_time_original` on a fresh upload, where Immich already
+    derived it correctly from the upload's own `fileCreatedAt`.
+    """
     normalized_url = normalize_immich_url(immich_url)
     owns_client = client is None
     active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
     try:
+        payload: dict[str, str] = {"description": description}
+        if date_time_original is not None:
+            payload["dateTimeOriginal"] = date_time_original
         try:
             response = await active_client.patch(
                 f"{normalized_url}/api/assets/{asset_id}",
                 headers={"x-api-key": immich_api_key, "Content-Type": "application/json"},
-                json={"description": description},
+                json=payload,
             )
         except httpx.RequestError as error:
             raise ImmichUnreachableError(
@@ -386,28 +409,35 @@ async def upsert_immich_tags(
 def _require_bulk_success(
     payload: object, asset_id: str, *, acceptable_errors: set[str], action: str
 ) -> None:
-    """Check one asset's entry in a bulk tag/untag response array.
+    """Confirm a bulk tag-assets/untag-assets call actually took effect.
 
-    HTTP 200 from these endpoints only means the request was well-formed — each
-    asset gets its own `{id, success, error?}` result, and a `success: false`
-    entry (e.g. `no_permission`, `validation`) must not be treated as done just
-    because the surrounding request succeeded.
+    Immich's response shape for these two endpoints has been observed to differ
+    by server version: a live 3.1.0 server returns a plain `{"count": N}`
+    summary with no per-asset detail (`N` is how many assets were newly
+    affected — 0 for an already-tagged/already-untagged asset, still a success),
+    while other versions are documented to return a per-asset
+    `[{id, success, error?}, ...]` array. HTTP 200 alone only means the request
+    was well-formed, so the array shape (when present) is still checked for an
+    explicit per-asset failure — a `count` response gives no such granularity to
+    check.
     """
-    if not isinstance(payload, list):
-        raise ImmichInvalidResponseError(f"Immich did not return a result list while {action}.")
-    entry = next(
-        (item for item in payload if isinstance(item, dict) and item.get("id") == asset_id),
-        None,
-    )
-    if entry is None:
-        raise ImmichInvalidResponseError(
-            f"Immich did not report a result for the asset while {action}."
-        )
-    if entry.get("success") is True or entry.get("error") in acceptable_errors:
+    if isinstance(payload, dict) and isinstance(payload.get("count"), int):
         return
-    raise ImmichInvalidResponseError(
-        f"Immich reported failure ({entry.get('error') or 'unknown'}) while {action}."
-    )
+    if isinstance(payload, list):
+        entry = next(
+            (item for item in payload if isinstance(item, dict) and item.get("id") == asset_id),
+            None,
+        )
+        if entry is None:
+            raise ImmichInvalidResponseError(
+                f"Immich did not report a result for the asset while {action}."
+            )
+        if entry.get("success") is True or entry.get("error") in acceptable_errors:
+            return
+        raise ImmichInvalidResponseError(
+            f"Immich reported failure ({entry.get('error') or 'unknown'}) while {action}."
+        )
+    raise ImmichInvalidResponseError(f"Immich did not return a recognized result while {action}.")
 
 
 async def tag_immich_assets(
@@ -504,6 +534,111 @@ async def untag_immich_assets(
                 acceptable_errors={"not_found", "duplicate"},
                 action="removing a tag",
             )
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+async def read_immich_asset(
+    asset_id: str,
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Fetch an asset's current record — used to confirm it still exists (a
+    stored `immich_asset_id` can go stale if the asset was deleted directly in
+    Immich) and, after a fresh upload, to verify it actually landed.
+
+    Raises `ImmichAssetNotFoundError` on a missing asset. Like the deprecated
+    single-asset update endpoint, `GET /api/assets/{id}` reports a missing or
+    inaccessible asset as HTTP 400, not 404 (confirmed against a live server).
+    """
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.get(
+                f"{normalized_url}/api/assets/{asset_id}",
+                headers={"Accept": "application/json", "x-api-key": immich_api_key},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while reading the asset: {error}"
+            ) from error
+        if response.status_code in {400, 404}:
+            raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError(
+                "Immich rejected the configured API key while reading the asset."
+            )
+        if response.status_code != 200:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while reading the asset."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while reading the asset."
+            ) from error
+        if not isinstance(payload, dict) or not payload.get("id"):
+            raise ImmichInvalidResponseError(
+                "Immich did not return an asset record while reading the asset."
+            )
+        return payload
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+async def fetch_immich_api_key_permissions(
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[str]:
+    """Return the configured API key's currently granted permission scopes.
+
+    A leaner, independently-mockable counterpart to `test_immich_connection`
+    (which also pings the server and fetches its version) — used by the bulk
+    upload job's own preflight, run fresh at execution time since a permission
+    change since the Settings page's last "Test connection" wouldn't otherwise
+    be visible.
+    """
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.get(
+                f"{normalized_url}/api/api-keys/me",
+                headers={"Accept": "application/json", "x-api-key": immich_api_key},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while checking API key "
+                f"permissions: {error}"
+            ) from error
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError("Immich rejected the configured API key.")
+        if response.status_code != 200:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while checking API key "
+                "permissions."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while checking API key "
+                "permissions."
+            ) from error
+        permissions = payload.get("permissions") if isinstance(payload, dict) else None
+        if not isinstance(permissions, list):
+            raise ImmichInvalidResponseError("Immich did not return a permissions list.")
+        return [str(scope) for scope in permissions]
     finally:
         if owns_client:
             await active_client.aclose()

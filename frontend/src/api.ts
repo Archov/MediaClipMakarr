@@ -256,6 +256,14 @@ export async function uploadClipToImmich(clipId: string): Promise<JobSnapshot> {
   return parseResponse<JobSnapshot>(response, "Immich upload request");
 }
 
+export async function bulkUploadClipsToImmich(): Promise<JobSnapshot> {
+  const response = await apiFetch("/api/clips/immich-upload/bulk", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<JobSnapshot>(response, "Bulk Immich upload request");
+}
+
 export async function deleteClip(
   clipId: string,
   expectedRevision: number,

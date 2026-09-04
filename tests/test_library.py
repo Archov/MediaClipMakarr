@@ -20,8 +20,9 @@ from mediaclipmakarr.clip_library import (
     embedded_revision_matches,
     list_clips,
     list_filter_options,
+    list_unlinked_clip_ids,
 )
-from mediaclipmakarr.clips import get_clip, insert_clip
+from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import MediaToolInspection
@@ -189,6 +190,46 @@ async def test_library_queries_search_filter_sort_and_paginate(tmp_path) -> None
     assert options.episodes[0].title == "Pilot"
     assert options.episodes[0].season_number == 1
     assert options.episodes[0].episode_number == 1
+
+
+@pytest.mark.asyncio
+async def test_list_unlinked_clip_ids_includes_stale_server_but_excludes_current_server(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    unlinked = clip_root / "TV Shows" / "Unlinked.mp4"
+    stale = clip_root / "TV Shows" / "Stale.mp4"
+    current = clip_root / "TV Shows" / "Current.mp4"
+    unlinked.parent.mkdir(parents=True)
+    unlinked.write_bytes(b"a")
+    stale.write_bytes(b"b")
+    current.write_bytes(b"c")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        await insert_clip(engine, clip_payload(unlinked, clip_id="clip-unlinked"))
+        await insert_clip(
+            engine, clip_payload(stale, clip_id="clip-stale", title="Stale")
+        )
+        await insert_clip(
+            engine, clip_payload(current, clip_id="clip-current", title="Current")
+        )
+        await set_clip_immich_asset_id(
+            engine, "clip-stale", "asset-old", "http://old-immich.example:2283"
+        )
+        await set_clip_immich_asset_id(
+            engine, "clip-current", "asset-new", "http://immich.example:2283"
+        )
+
+        unlinked_ids = await list_unlinked_clip_ids(
+            engine, "http://immich.example:2283"
+        )
+    finally:
+        await engine.dispose()
+
+    assert set(unlinked_ids) == {"clip-unlinked", "clip-stale"}
+    assert "clip-current" not in unlinked_ids
 
 
 @pytest.mark.asyncio

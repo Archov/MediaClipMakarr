@@ -17,10 +17,12 @@ from mediaclipmakarr.clip_library import (
     ClipPage,
     ClipRecord,
     ClipRevisionConflict,
+    build_bulk_immich_upload_plan,
     build_immich_upload_plan,
     build_metadata_edit_plan,
     build_thumbnail_job_plan,
     delete_clip,
+    list_all_clip_ids,
     list_clips,
     list_filter_options,
     list_libraries,
@@ -36,6 +38,7 @@ from mediaclipmakarr.clips import (
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.jobs import (
     JobSnapshot,
+    enqueue_bulk_immich_upload_job,
     enqueue_clip_create_job,
     enqueue_immich_upload_job,
     enqueue_metadata_edit_job,
@@ -191,6 +194,24 @@ def build_router(application_settings: Settings) -> APIRouter:
             )
         plan = build_immich_upload_plan(clip)
         job = await enqueue_immich_upload_job(request.app.state.database_engine, plan)
+        await request.app.state.job_events.publish(job.id, job)
+        request.app.state.job_runner.wake()
+        return job
+
+    @router.post("/api/clips/immich-upload/bulk", response_model=JobSnapshot)
+    async def bulk_upload_clips_to_immich(request: Request) -> JobSnapshot:
+        effective = request.app.state.effective_application_settings
+        if not effective.immich_url or not effective.immich_api_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_CONFIGURED",
+                    "message": "Configure Immich in Settings before uploading.",
+                },
+            )
+        clip_ids = await list_all_clip_ids(request.app.state.database_engine)
+        plan = build_bulk_immich_upload_plan(clip_ids)
+        job = await enqueue_bulk_immich_upload_job(request.app.state.database_engine, plan)
         await request.app.state.job_events.publish(job.id, job)
         request.app.state.job_runner.wake()
         return job
