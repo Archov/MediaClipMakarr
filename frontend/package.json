@@ -13,8 +13,9 @@
     "test:timestamps": "npm run test:node-version && node --experimental-strip-types tests/timestamps.test.ts",
     "test:track-selection": "npm run test:node-version && node --experimental-strip-types --test tests/trackSelection.test.ts",
     "test:session-frames": "npm run test:node-version && node --experimental-strip-types tests/sessionFrames.test.ts",
+    "test:edit-timeline": "npm run test:node-version && node --experimental-strip-types tests/editTimeline.test.ts",
     "test:trim-selection": "npm run test:node-version && node --experimental-strip-types tests/trimSelection.test.ts",
-    "test": "npm run test:timestamps && npm run test:track-selection && npm run test:session-frames && npm run test:trim-selection",
+    "test": "npm run test:timestamps && npm run test:track-selection && npm run test:session-frames && npm run test:edit-timeline && npm run test:trim-selection",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

@@ -12,7 +12,6 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
-  Slider,
   Stack,
   TextField,
   Tooltip,
@@ -26,12 +25,43 @@ import { useEffect, useRef, useState } from "react";
 import { fetchClipTrimInfo } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import type { ClipRecord } from "../../types";
-import { BoundaryNudgeControls } from "../make-clip/BoundaryNudgeControls";
+import { EditTimeline } from "../editing/EditTimeline";
+import {
+  canShiftTimelineBoundary,
+  shiftTimelineBoundary,
+  type TimelineRange,
+} from "../editing/timelineMath";
 import { clampTrimRange, shouldStopPreview, validateTrimValue } from "./trimSelection";
 
 interface TrimClipDialogProps {
   clip: ClipRecord;
   onClose: () => void;
+}
+
+interface FrameNudgeButtonProps {
+  boundary: "Start" | "End";
+  direction: "backward" | "forward";
+  disabled: boolean;
+  onClick: () => void;
+}
+
+function FrameNudgeButton({ boundary, direction, disabled, onClick }: FrameNudgeButtonProps) {
+  const backward = direction === "backward";
+  return (
+    <Tooltip title={`Move ${boundary} ${direction} one nominal frame`}>
+      <span>
+        <Button
+          aria-label={`Move ${boundary} ${direction} one frame`}
+          disabled={disabled}
+          variant="outlined"
+          onClick={onClick}
+          sx={{ minWidth: 44, width: 44, height: 56, px: 0.5, fontVariantNumeric: "tabular-nums" }}
+        >
+          {backward ? "−1f" : "+1f"}
+        </Button>
+      </span>
+    </Tooltip>
+  );
 }
 
 export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
@@ -48,6 +78,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const [endError, setEndError] = useState<string | null>(null);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [previewing, setPreviewing] = useState(false);
+  const [videoPlaying, setVideoPlaying] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [expectedRevision, setExpectedRevision] = useState<number | null>(null);
 
@@ -73,22 +104,23 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !previewing) return;
+    if (!video || !videoPlaying) return;
     let frameCallback: number | null = null;
     const stopAtEnd = () => {
       video.pause();
       video.currentTime = endMs / 1_000;
       setPlayheadMs(endMs);
       setPreviewing(false);
+      setVideoPlaying(false);
     };
-    const checkCurrentTime = () => {
-      if (shouldStopPreview(video.currentTime, endMs)) stopAtEnd();
+    const updateFromMediaTime = (mediaTimeSeconds: number) => {
+      setPlayheadMs(Math.min(durationMs, Math.round(mediaTimeSeconds * 1_000)));
+      if (previewing && shouldStopPreview(mediaTimeSeconds, endMs)) stopAtEnd();
     };
+    const checkCurrentTime = () => updateFromMediaTime(video.currentTime);
     const checkVideoFrame: VideoFrameRequestCallback = (_now, metadata) => {
-      if (shouldStopPreview(metadata.mediaTime, endMs)) {
-        stopAtEnd();
-        return;
-      }
+      updateFromMediaTime(metadata.mediaTime);
+      if (previewing && shouldStopPreview(metadata.mediaTime, endMs)) return;
       frameCallback = video.requestVideoFrameCallback(checkVideoFrame);
     };
     video.addEventListener("timeupdate", checkCurrentTime);
@@ -101,13 +133,21 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
         video.cancelVideoFrameCallback(frameCallback);
       }
     };
-  }, [endMs, previewing]);
+  }, [durationMs, endMs, previewing, videoPlaying]);
 
   useEffect(() => () => videoRef.current?.pause(), []);
 
   const cancelPreview = () => {
     videoRef.current?.pause();
     setPreviewing(false);
+    setVideoPlaying(false);
+  };
+
+  const seekPlayhead = (valueMs: number) => {
+    const nextPlayhead = Math.min(durationMs, Math.max(0, Math.round(valueMs)));
+    cancelPreview();
+    if (videoRef.current) videoRef.current.currentTime = nextPlayhead / 1_000;
+    setPlayheadMs(nextPlayhead);
   };
 
   const commitRange = (nextStart: number, nextEnd: number, active: "start" | "end") => {
@@ -157,6 +197,24 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
 
   const resetRange = () => commitRange(0, durationMs, "end");
   const trimInfo = info.data;
+  const frameStepMs = trimInfo?.frame_rate
+    ? Math.max(1, Math.round(1_000 / trimInfo.frame_rate))
+    : undefined;
+  const selectionRange: TimelineRange = { startMs, endMs };
+  const editableRange: TimelineRange = { startMs: 0, endMs: durationMs };
+
+  const nudgeBoundaryOneFrame = (boundary: "start" | "end", direction: -1 | 1) => {
+    if (!frameStepMs) return;
+    const next = shiftTimelineBoundary(selectionRange, editableRange, boundary, direction * frameStepMs);
+    if (next === selectionRange) return;
+    commitRange(next.startMs, next.endMs, boundary);
+    seekPlayhead(boundary === "start" ? next.startMs : next.endMs);
+  };
+
+  const canNudgeBoundary = (boundary: "start" | "end", direction: -1 | 1) => Boolean(
+    frameStepMs
+    && canShiftTimelineBoundary(selectionRange, editableRange, boundary, direction * frameStepMs),
+  );
 
   return (
     <Dialog open onClose={onClose} fullScreen={fullScreen} fullWidth maxWidth="lg" aria-labelledby="trim-dialog-title">
@@ -187,34 +245,39 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                 playsInline
                 onTimeUpdate={(event) => setPlayheadMs(Math.min(durationMs, Math.round(event.currentTarget.currentTime * 1_000)))}
                 onSeeked={(event) => setPlayheadMs(Math.min(durationMs, Math.round(event.currentTarget.currentTime * 1_000)))}
-                onPause={() => setPreviewing(false)}
+                onPlay={() => setVideoPlaying(true)}
+                onPause={() => {
+                  setVideoPlaying(false);
+                  setPreviewing(false);
+                }}
                 sx={{ display: "block", width: "100%", maxHeight: "52dvh", objectFit: "contain" }}
               />
             </Box>
 
-            <Stack spacing={0.5}>
-              <Slider
-                value={[startMs, endMs]}
-                min={0}
-                max={durationMs}
-                step={1}
-                disableSwap
-                valueLabelDisplay="auto"
-                valueLabelFormat={(value) => formatTimestampMs(value)}
-                getAriaLabel={(index) => index === 0 ? "Trim start" : "Trim end"}
-                onChange={(_event, value, activeThumb) => {
-                  const [nextStart, nextEnd] = value as number[];
-                  commitRange(nextStart, nextEnd, activeThumb === 0 ? "start" : "end");
-                }}
-              />
-              <Stack direction="row" justifyContent="space-between">
-                <Typography variant="caption" color="text.secondary">00:00:00.000</Typography>
-                <Typography variant="caption" color="text.secondary">{formatTimestampMs(durationMs)}</Typography>
-              </Stack>
-            </Stack>
+            <EditTimeline
+              viewportRange={editableRange}
+              editableRange={editableRange}
+              referenceRange={editableRange}
+              selectionRange={selectionRange}
+              playheadMs={playheadMs}
+              stepMs={frameStepMs}
+              onInteractionStart={cancelPreview}
+              onSelectionChange={(range, activeBoundary) => {
+                commitRange(range.startMs, range.endMs, activeBoundary);
+              }}
+              onPlayheadChange={seekPlayhead}
+            />
 
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2} justifyContent="center">
-              <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
+              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
+                {frameStepMs && (
+                  <FrameNudgeButton
+                    boundary="Start"
+                    direction="backward"
+                    disabled={!canNudgeBoundary("start", -1)}
+                    onClick={() => nudgeBoundaryOneFrame("start", -1)}
+                  />
+                )}
                 <TextField
                   label="Start"
                   value={startInput}
@@ -229,6 +292,14 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   }}
                   sx={{ width: "17ch" }}
                 />
+                {frameStepMs && (
+                  <FrameNudgeButton
+                    boundary="Start"
+                    direction="forward"
+                    disabled={!canNudgeBoundary("start", 1)}
+                    onClick={() => nudgeBoundaryOneFrame("start", 1)}
+                  />
+                )}
                 <Tooltip title="Set Start to playhead">
                   <span>
                     <IconButton
@@ -242,7 +313,15 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   </span>
                 </Tooltip>
               </Stack>
-              <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
+              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
+                {frameStepMs && (
+                  <FrameNudgeButton
+                    boundary="End"
+                    direction="backward"
+                    disabled={!canNudgeBoundary("end", -1)}
+                    onClick={() => nudgeBoundaryOneFrame("end", -1)}
+                  />
+                )}
                 <TextField
                   label="End"
                   value={endInput}
@@ -257,6 +336,14 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   }}
                   sx={{ width: "17ch" }}
                 />
+                {frameStepMs && (
+                  <FrameNudgeButton
+                    boundary="End"
+                    direction="forward"
+                    disabled={!canNudgeBoundary("end", 1)}
+                    onClick={() => nudgeBoundaryOneFrame("end", 1)}
+                  />
+                )}
                 <Tooltip title="Set End to playhead">
                   <span>
                     <IconButton
@@ -274,24 +361,14 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
 
             {!trimInfo.frame_rate && (
               <Alert severity="warning">
-                The clip's frame rate is unavailable. Nudge controls default to seconds instead of nominal frame durations.
+                The clip's frame rate is unavailable, so nominal one-frame nudging is disabled.
               </Alert>
             )}
-            <BoundaryNudgeControls
-              startMs={startMs}
-              endMs={endMs}
-              maximumMs={durationMs}
-              frameRate={trimInfo.frame_rate}
-              defaultUnit="frames"
-              defaultValue={5}
-              onStartChange={(value) => commitRange(value, endMs, "start")}
-              onEndChange={(value) => commitRange(startMs, value, "end")}
-              extraAction={(
-                <Button startIcon={<RestartAltRounded />} variant="outlined" onClick={resetRange}>
-                  Reset
-                </Button>
-              )}
-            />
+            <Box sx={{ textAlign: "center" }}>
+              <Button startIcon={<RestartAltRounded />} variant="outlined" onClick={resetRange}>
+                Reset
+              </Button>
+            </Box>
             {trimInfo.frame_rate && (
               <Typography variant="caption" color="text.secondary" sx={{ textAlign: "center" }}>
                 Frame nudges use a nominal {trimInfo.frame_rate.toFixed(3)} fps duration; decoded frame boundaries may vary for VFR media.
