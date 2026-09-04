@@ -20,6 +20,7 @@ import {
   fetchClip,
   fetchJob,
   fetchSettings,
+  retryImmichAssetDelete,
   reuploadClipToImmich,
   updateClipMetadata,
   uploadClipToImmich,
@@ -34,6 +35,7 @@ import type {
 import {
   DeleteClipDialog,
   ImmichAssetMissingDialog,
+  ImmichDeletePermissionDialog,
   ImmichPermissionDialog,
   MetadataDialog,
 } from "../library/ClipDialogs";
@@ -108,6 +110,25 @@ export function JobStatus({
       void queryClient.invalidateQueries({ queryKey: ["clips"] });
       void queryClient.invalidateQueries({ queryKey: ["clip-libraries"] });
       void queryClient.removeQueries({ queryKey: ["clip", result.id] });
+      if (result.immich_delete_missing_permission) {
+        setImmichDeleteIssue({
+          assetId: result.immich_delete_missing_permission.asset_id,
+          settingsUrl: result.immich_delete_missing_permission.settings_url,
+        });
+      }
+    },
+  });
+  const [immichDeleteIssue, setImmichDeleteIssue] = useState<
+    { assetId: string; settingsUrl: string } | null
+  >(null);
+  const retryImmichDeleteMutation = useMutation({
+    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
+    onSuccess: (result, assetId) => {
+      if (result.status === "ok") {
+        setImmichDeleteIssue(null);
+        return;
+      }
+      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
     },
   });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -321,6 +342,18 @@ export function JobStatus({
         busy={reuploadMutation.isPending}
         onClose={() => setImmichIssue(null)}
         onReupload={() => reuploadMutation.mutate(displayedClip)}
+      />
+    )}
+    {immichDeleteIssue && (
+      <ImmichDeletePermissionDialog
+        settingsUrl={immichDeleteIssue.settingsUrl}
+        busy={retryImmichDeleteMutation.isPending}
+        error={retryImmichDeleteMutation.error?.message ?? null}
+        onClose={() => {
+          retryImmichDeleteMutation.reset();
+          setImmichDeleteIssue(null);
+        }}
+        onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
       />
     )}
   </Stack>;

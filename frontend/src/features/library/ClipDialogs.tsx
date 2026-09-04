@@ -173,6 +173,51 @@ export function ImmichAssetMissingDialog({
   );
 }
 
+export function ImmichDeletePermissionDialog({
+  settingsUrl,
+  busy,
+  error,
+  onClose,
+  onRetry,
+}: {
+  settingsUrl: string;
+  busy: boolean;
+  error: string | null;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <Dialog open onClose={busy ? undefined : onClose} fullWidth maxWidth="xs">
+      <DialogTitle>Missing Immich permission</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2}>
+          <Alert severity="warning">
+            The clip was deleted, but the configured API key does not have the{" "}
+            <code>asset.delete</code> permission, so the Immich asset could not be removed.
+            Update the permissions, then retry.
+          </Alert>
+          {error && <Alert severity="error">{error}</Alert>}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={busy}>Dismiss</Button>
+        <Button
+          component="a"
+          href={settingsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          disabled={busy}
+        >
+          Open API Key Settings
+        </Button>
+        <Button variant="contained" disabled={busy} onClick={onRetry}>
+          {busy ? "Retrying…" : "Retry Delete"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 export function MetadataDialog({
   clip,
   busy,

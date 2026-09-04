@@ -19,6 +19,8 @@ from mediaclipmakarr.clip_library import (
     ClipRecord,
     ClipRevisionConflict,
     ImmichAssetCheckResult,
+    ImmichAssetDeleteResult,
+    ImmichDeleteMissingPermission,
     build_bulk_immich_upload_plan,
     build_immich_upload_plan,
     build_metadata_edit_plan,
@@ -313,6 +315,68 @@ def build_router(application_settings: Settings) -> APIRouter:
         request.app.state.job_runner.wake()
         return job
 
+    @router.post(
+        "/api/immich/assets/{asset_id}/delete-retry", response_model=ImmichAssetDeleteResult
+    )
+    async def retry_immich_asset_delete(asset_id: str, request: Request) -> ImmichAssetDeleteResult:
+        # Not scoped under /api/clips/{clip_id} — by the time a retry is
+        # offered, the local clip is already deleted (see remove_clip), so
+        # this is keyed purely on the Immich asset id the earlier delete
+        # attempt reported back.
+        effective = request.app.state.effective_application_settings
+        if not effective.immich_url or not effective.immich_api_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_CONFIGURED",
+                    "message": "Configure Immich in Settings before retrying this delete.",
+                },
+            )
+        normalized_url = normalize_immich_url(effective.immich_url)
+        try:
+            await delete_immich_asset(asset_id, effective.immich_url, effective.immich_api_key)
+        except ImmichAssetNotFoundError:
+            pass
+        except ImmichAuthError as auth_error:
+            try:
+                permissions = set(
+                    await fetch_immich_api_key_permissions(
+                        normalized_url, effective.immich_api_key
+                    )
+                )
+            except ImmichApiError as error:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": error.job_error_code,
+                        "message": str(error),
+                        "retryable": error.job_retryable,
+                    },
+                ) from error
+            if "all" in permissions or "asset.delete" in permissions:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "IMMICH_AUTH_FAILED",
+                        "message": str(auth_error),
+                        "retryable": True,
+                    },
+                ) from auth_error
+            return ImmichAssetDeleteResult(
+                status="missing_permission",
+                settings_url=build_immich_api_key_settings_url(normalized_url),
+            )
+        except ImmichApiError as error:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": error.job_error_code,
+                    "message": str(error),
+                    "retryable": error.job_retryable,
+                },
+            ) from error
+        return ImmichAssetDeleteResult(status="ok")
+
     @router.post("/api/clips/immich-upload/bulk", response_model=JobSnapshot)
     async def bulk_upload_clips_to_immich(request: Request) -> JobSnapshot:
         effective = request.app.state.effective_application_settings
@@ -431,6 +495,31 @@ def build_router(application_settings: Settings) -> APIRouter:
                 )
             except ImmichAssetNotFoundError:
                 pass
+            except ImmichAuthError as error:
+                # A missing `asset.delete` scope specifically gets a targeted
+                # fix-and-retry dialog instead of a plain warning — the same
+                # disambiguation `check_immich_asset` runs for `asset.read`.
+                missing_permission = False
+                try:
+                    permissions = set(
+                        await fetch_immich_api_key_permissions(
+                            normalize_immich_url(effective.immich_url), effective.immich_api_key
+                        )
+                    )
+                    missing_permission = not ({"all", "asset.delete"} & permissions)
+                except ImmichApiError:
+                    pass
+                if missing_permission:
+                    result.immich_delete_missing_permission = ImmichDeleteMissingPermission(
+                        asset_id=immich_asset_id,
+                        settings_url=build_immich_api_key_settings_url(
+                            normalize_immich_url(effective.immich_url)
+                        ),
+                    )
+                else:
+                    result.cleanup_warnings.append(
+                        f"The clip was deleted, but the Immich asset could not be removed: {error}"
+                    )
             except ImmichApiError as error:
                 result.cleanup_warnings.append(
                     f"The clip was deleted, but the Immich asset could not be removed: {error}"

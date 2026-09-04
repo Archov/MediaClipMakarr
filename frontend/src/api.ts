@@ -9,6 +9,7 @@ import type {
   ClipFilterOptions,
   HealthResponse,
   ImmichAssetCheckResult,
+  ImmichAssetDeleteResult,
   ImmichConnectionRequest,
   ImmichConnectionResult,
   JobSnapshot,
@@ -295,4 +296,12 @@ export async function reuploadClipToImmich(clipId: string): Promise<JobSnapshot>
     headers: { Accept: "application/json", "Content-Type": "application/json" },
   });
   return parseResponse<JobSnapshot>(response, "Immich reupload request");
+}
+
+export async function retryImmichAssetDelete(assetId: string): Promise<ImmichAssetDeleteResult> {
+  const response = await apiFetch(`/api/immich/assets/${encodeURIComponent(assetId)}/delete-retry`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<ImmichAssetDeleteResult>(response, "Immich asset delete retry");
 }

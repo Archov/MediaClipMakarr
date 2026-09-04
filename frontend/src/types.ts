@@ -403,15 +403,26 @@ export interface ClipMetadataUpdate {
   episode_number?: number | null;
 }
 
+export interface ImmichDeleteMissingPermission {
+  asset_id: string;
+  settings_url: string;
+}
+
 export interface ClipDeleteResult {
   id: string;
   title: string;
   deleted: boolean;
   cleanup_warnings: string[];
+  immich_delete_missing_permission: ImmichDeleteMissingPermission | null;
 }
 
 export interface ImmichAssetCheckResult {
   status: "ok" | "missing_permission" | "asset_missing";
   open_url: string | null;
+  settings_url: string | null;
+}
+
+export interface ImmichAssetDeleteResult {
+  status: "ok" | "missing_permission";
   settings_url: string | null;
 }

@@ -511,6 +511,125 @@ def test_remove_clip_reports_a_warning_when_remote_delete_fails(
     assert asyncio.run(get_clip(engine, "clip-one", clip_root)) is None
 
 
+def test_remove_clip_reports_missing_permission_when_asset_delete_scope_absent(
+    tmp_path, monkeypatch
+) -> None:
+    engine, clip_root = _seed_clip(tmp_path)
+    asyncio.run(set_clip_immich_asset_id(engine, "clip-one", "asset-1", IMMICH_URL))
+    settings = Settings(_env_file=None, clip_dir=clip_root)
+
+    async def fake_delete(asset_id, url, api_key):
+        raise ImmichAuthError("Immich rejected the configured API key while deleting the asset.")
+
+    async def fake_permissions(url, api_key):
+        return ["asset.read", "asset.upload"]
+
+    monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
+    monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
+    app = _build_clips_app(settings, engine, _effective_settings())
+    with TestClient(app) as client:
+        response = client.request(
+            "DELETE",
+            "/api/clips/clip-one",
+            json={"expected_revision": 1, "delete_from_immich": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] is True
+    # The dedicated dialog covers this — no redundant plain-text warning too.
+    assert body["cleanup_warnings"] == []
+    assert body["immich_delete_missing_permission"] == {
+        "asset_id": "asset-1",
+        "settings_url": f"{IMMICH_URL}/user-settings?isOpen=api-keys",
+    }
+
+
+def test_remove_clip_reports_a_warning_when_auth_error_but_permission_present(
+    tmp_path, monkeypatch
+) -> None:
+    engine, clip_root = _seed_clip(tmp_path)
+    asyncio.run(set_clip_immich_asset_id(engine, "clip-one", "asset-1", IMMICH_URL))
+    settings = Settings(_env_file=None, clip_dir=clip_root)
+
+    async def fake_delete(asset_id, url, api_key):
+        raise ImmichAuthError("Immich rejected the configured API key while deleting the asset.")
+
+    async def fake_permissions(url, api_key):
+        return ["asset.delete"]
+
+    monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
+    monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
+    app = _build_clips_app(settings, engine, _effective_settings())
+    with TestClient(app) as client:
+        response = client.request(
+            "DELETE",
+            "/api/clips/clip-one",
+            json={"expected_revision": 1, "delete_from_immich": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["immich_delete_missing_permission"] is None
+    assert any("Immich" in warning for warning in body["cleanup_warnings"])
+
+
+def _engine_only(tmp_path: Path):
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    return create_database_engine(database_path)
+
+
+def test_retry_immich_asset_delete_succeeds(tmp_path, monkeypatch) -> None:
+    settings = Settings(_env_file=None, clip_dir=tmp_path / "clips")
+    calls: list[str] = []
+
+    async def fake_delete(asset_id, url, api_key):
+        calls.append(asset_id)
+
+    monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
+    app = _build_clips_app(settings, _engine_only(tmp_path), _effective_settings())
+    with TestClient(app) as client:
+        response = client.post("/api/immich/assets/asset-1/delete-retry")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "settings_url": None}
+    assert calls == ["asset-1"]
+
+
+def test_retry_immich_asset_delete_still_missing_permission(tmp_path, monkeypatch) -> None:
+    settings = Settings(_env_file=None, clip_dir=tmp_path / "clips")
+
+    async def fake_delete(asset_id, url, api_key):
+        raise ImmichAuthError("Immich rejected the configured API key while deleting the asset.")
+
+    async def fake_permissions(url, api_key):
+        return ["asset.read"]
+
+    monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
+    monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
+    app = _build_clips_app(settings, _engine_only(tmp_path), _effective_settings())
+    with TestClient(app) as client:
+        response = client.post("/api/immich/assets/asset-1/delete-retry")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "missing_permission"
+    assert body["settings_url"] == f"{IMMICH_URL}/user-settings?isOpen=api-keys"
+
+
+def test_retry_immich_asset_delete_requires_immich_configured(tmp_path) -> None:
+    settings = Settings(_env_file=None, clip_dir=tmp_path / "clips")
+    app = _build_clips_app(
+        settings, _engine_only(tmp_path), _effective_settings(immich_url="", immich_api_key=None)
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/immich/assets/asset-1/delete-retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "IMMICH_NOT_CONFIGURED"
+
+
 def test_remove_clip_reports_no_warning_when_remote_asset_is_already_gone(
     tmp_path, monkeypatch
 ) -> None:

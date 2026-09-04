@@ -48,12 +48,19 @@ import {
   fetchClips,
   fetchJob,
   fetchSettings,
+  retryImmichAssetDelete,
   reuploadClipToImmich,
   updateClipMetadata,
   uploadClipToImmich,
 } from "../../api";
 import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
-import { DeleteClipDialog, ImmichAssetMissingDialog, ImmichPermissionDialog, MetadataDialog } from "./ClipDialogs";
+import {
+  DeleteClipDialog,
+  ImmichAssetMissingDialog,
+  ImmichDeletePermissionDialog,
+  ImmichPermissionDialog,
+  MetadataDialog,
+} from "./ClipDialogs";
 
 const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 
@@ -348,6 +355,25 @@ export function LibraryScreen() {
       setExpandedClipId(null);
       setDeleting(null);
       setDeleteNotice(result.cleanup_warnings.length ? result.cleanup_warnings.join(" ") : null);
+      if (result.immich_delete_missing_permission) {
+        setImmichDeleteIssue({
+          assetId: result.immich_delete_missing_permission.asset_id,
+          settingsUrl: result.immich_delete_missing_permission.settings_url,
+        });
+      }
+    },
+  });
+  const [immichDeleteIssue, setImmichDeleteIssue] = useState<
+    { assetId: string; settingsUrl: string } | null
+  >(null);
+  const retryImmichDeleteMutation = useMutation({
+    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
+    onSuccess: (result, assetId) => {
+      if (result.status === "ok") {
+        setImmichDeleteIssue(null);
+        return;
+      }
+      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
     },
   });
   const [immichIssue, setImmichIssue] = useState<
@@ -664,6 +690,18 @@ export function LibraryScreen() {
           busy={reuploadMutation.isPending}
           onClose={() => setImmichIssue(null)}
           onReupload={() => reuploadMutation.mutate(immichIssue.clip)}
+        />
+      )}
+      {immichDeleteIssue && (
+        <ImmichDeletePermissionDialog
+          settingsUrl={immichDeleteIssue.settingsUrl}
+          busy={retryImmichDeleteMutation.isPending}
+          error={retryImmichDeleteMutation.error?.message ?? null}
+          onClose={() => {
+            retryImmichDeleteMutation.reset();
+            setImmichDeleteIssue(null);
+          }}
+          onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
         />
       )}
     </Stack>
