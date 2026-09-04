@@ -116,6 +116,19 @@ class ClipDeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_revision: int = Field(ge=1)
+    delete_from_immich: bool = False
+
+
+class ImmichDeleteMissingPermission(BaseModel):
+    """Populated on `ClipDeleteResult` when a requested remote delete failed
+    specifically because the API key lacks `asset.delete` — distinguished from
+    other remote-delete failures (which stay a plain `cleanup_warnings` entry)
+    so the frontend can offer a targeted fix-and-retry flow instead of just a
+    warning banner. The local clip is already gone by this point, so a retry
+    is keyed on `asset_id` alone via `POST /api/immich/assets/{asset_id}/delete-retry`."""
+
+    asset_id: str
+    settings_url: str
 
 
 class ClipDeleteResult(BaseModel):
@@ -123,6 +136,24 @@ class ClipDeleteResult(BaseModel):
     title: str
     deleted: bool = True
     cleanup_warnings: list[str] = Field(default_factory=list)
+    immich_delete_missing_permission: ImmichDeleteMissingPermission | None = None
+
+
+class ImmichAssetCheckResult(BaseModel):
+    """The outcome of a read-before-open check against a clip's linked Immich
+    asset — see the "Open in Immich" flow in `api/clips.py`."""
+
+    status: Literal["ok", "missing_permission", "asset_missing"]
+    open_url: str | None = None
+    settings_url: str | None = None
+
+
+class ImmichAssetDeleteResult(BaseModel):
+    """The outcome of a standalone Immich asset delete (retry) attempt — see
+    `POST /api/immich/assets/{asset_id}/delete-retry` in `api/clips.py`."""
+
+    status: Literal["ok", "missing_permission"]
+    settings_url: str | None = None
 
 
 class MetadataEditJobPlan(BaseModel):

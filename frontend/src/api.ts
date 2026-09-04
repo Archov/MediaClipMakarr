@@ -8,6 +8,8 @@ import type {
   ClipDeleteResult,
   ClipFilterOptions,
   HealthResponse,
+  ImmichAssetCheckResult,
+  ImmichAssetDeleteResult,
   ImmichConnectionRequest,
   ImmichConnectionResult,
   JobSnapshot,
@@ -267,11 +269,39 @@ export async function bulkUploadClipsToImmich(): Promise<JobSnapshot> {
 export async function deleteClip(
   clipId: string,
   expectedRevision: number,
+  deleteFromImmich = false,
 ): Promise<ClipDeleteResult> {
   const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}`, {
     method: "DELETE",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_revision: expectedRevision }),
+    body: JSON.stringify({
+      expected_revision: expectedRevision,
+      delete_from_immich: deleteFromImmich,
+    }),
   });
   return parseResponse<ClipDeleteResult>(response, "Clip deletion");
+}
+
+export async function checkImmichAsset(clipId: string): Promise<ImmichAssetCheckResult> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/immich-check`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<ImmichAssetCheckResult>(response, "Immich asset check");
+}
+
+export async function reuploadClipToImmich(clipId: string): Promise<JobSnapshot> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/immich-reupload`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<JobSnapshot>(response, "Immich reupload request");
+}
+
+export async function retryImmichAssetDelete(assetId: string): Promise<ImmichAssetDeleteResult> {
+  const response = await apiFetch(`/api/immich/assets/${encodeURIComponent(assetId)}/delete-retry`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<ImmichAssetDeleteResult>(response, "Immich asset delete retry");
 }

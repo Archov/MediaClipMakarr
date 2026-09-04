@@ -539,6 +539,61 @@ async def untag_immich_assets(
             await active_client.aclose()
 
 
+async def delete_immich_asset(
+    asset_id: str,
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Remove an asset from Immich, moved to Immich's own trash rather than
+    permanently purged (`force: False`) — a mistaken delete-alongside-local-clip
+    stays recoverable from Immich's own UI.
+
+    Raises `ImmichAssetNotFoundError` on a 404; it's the caller's call whether an
+    already-gone asset counts as success (it usually does — the goal was "make
+    sure it's not there", which is already true).
+    """
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.request(
+                "DELETE",
+                f"{normalized_url}/api/assets",
+                headers={"x-api-key": immich_api_key, "Content-Type": "application/json"},
+                json={"ids": [asset_id], "force": False},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while deleting the asset: {error}"
+            ) from error
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError(
+                "Immich rejected the configured API key while deleting the asset."
+            )
+        if response.status_code == 404:
+            raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+        if response.status_code not in {200, 204}:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while deleting the asset."
+            )
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+def build_immich_asset_url(immich_url: str, asset_id: str) -> str:
+    """The Immich web UI's viewer URL for a given asset."""
+    return f"{normalize_immich_url(immich_url)}/photos/{asset_id}"
+
+
+def build_immich_api_key_settings_url(immich_url: str) -> str:
+    """The Immich web UI's API-key settings page, with the API keys panel open."""
+    return f"{normalize_immich_url(immich_url)}/user-settings?isOpen=api-keys"
+
+
 async def read_immich_asset(
     asset_id: str,
     immich_url: str,

@@ -15,10 +15,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import {
+  checkImmichAsset,
   deleteClip,
   fetchClip,
   fetchJob,
   fetchSettings,
+  retryImmichAssetDelete,
+  reuploadClipToImmich,
   updateClipMetadata,
   uploadClipToImmich,
 } from "../../api";
@@ -29,7 +32,13 @@ import type {
   JobSnapshot,
   JobState,
 } from "../../types";
-import { DeleteClipDialog, MetadataDialog } from "../library/ClipDialogs";
+import {
+  DeleteClipDialog,
+  ImmichAssetMissingDialog,
+  ImmichDeletePermissionDialog,
+  ImmichPermissionDialog,
+  MetadataDialog,
+} from "../library/ClipDialogs";
 import { ImmichIcon } from "../library/LibraryScreen";
 import { MediaErrorAlert } from "./MediaErrorAlert";
 
@@ -92,7 +101,8 @@ export function JobStatus({
     onSuccess: (submitted) => setEditJobId(submitted.id),
   });
   const deleteMutation = useMutation({
-    mutationFn: (target: ClipRecord) => deleteClip(target.id, target.revision),
+    mutationFn: ({ target, deleteFromImmich }: { target: ClipRecord; deleteFromImmich: boolean }) =>
+      deleteClip(target.id, target.revision, deleteFromImmich),
     onSuccess: (result) => {
       setDeleting(false);
       setDeleted(true);
@@ -100,6 +110,25 @@ export function JobStatus({
       void queryClient.invalidateQueries({ queryKey: ["clips"] });
       void queryClient.invalidateQueries({ queryKey: ["clip-libraries"] });
       void queryClient.removeQueries({ queryKey: ["clip", result.id] });
+      if (result.immich_delete_missing_permission) {
+        setImmichDeleteIssue({
+          assetId: result.immich_delete_missing_permission.asset_id,
+          settingsUrl: result.immich_delete_missing_permission.settings_url,
+        });
+      }
+    },
+  });
+  const [immichDeleteIssue, setImmichDeleteIssue] = useState<
+    { assetId: string; settingsUrl: string } | null
+  >(null);
+  const retryImmichDeleteMutation = useMutation({
+    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
+    onSuccess: (result, assetId) => {
+      if (result.status === "ok") {
+        setImmichDeleteIssue(null);
+        return;
+      }
+      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
     },
   });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -115,6 +144,36 @@ export function JobStatus({
       // "newest clip" list query depending on whether a render job is active.
       void queryClient.invalidateQueries({ queryKey: ["clip", clipId] });
       void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
+    },
+  });
+  const [immichIssue, setImmichIssue] = useState<
+    "missing_permission" | "asset_missing" | null
+  >(null);
+  const [immichSettingsUrl, setImmichSettingsUrl] = useState<string | null>(null);
+  const checkImmichMutation = useMutation({
+    mutationFn: (target: ClipRecord) => checkImmichAsset(target.id),
+    onSuccess: (result) => {
+      if (result.status === "ok") {
+        if (result.open_url) window.open(result.open_url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (result.status === "asset_missing") {
+        // The backend already cleared the stale association the moment it
+        // confirmed the asset was gone — refetch immediately so the icon
+        // reverts without waiting on the user to dismiss the dialog.
+        void queryClient.invalidateQueries({ queryKey: ["clip", clipId] });
+        void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
+      }
+      setImmichIssue(result.status);
+      setImmichSettingsUrl(result.settings_url);
+    },
+  });
+  const reuploadMutation = useMutation({
+    mutationFn: (target: ClipRecord) => reuploadClipToImmich(target.id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["clip", clipId] });
+      void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
+      setImmichIssue(null);
     },
   });
 
@@ -152,17 +211,18 @@ export function JobStatus({
   );
   const uploadJob = displayedClip?.immich_upload_job;
   const uploading = Boolean(uploadJob && NONTERMINAL_JOB_STATES.has(uploadJob.state));
+  const needsRetry = uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED";
+  const isLinked = Boolean(displayedClip?.immich_asset_id);
   const uploadLabel = uploading
     ? "Uploading to Immich…"
-    : uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
+    : needsRetry
       ? "Retry Immich upload"
-      : displayedClip?.immich_asset_id
-        ? "Re-upload to Immich"
+      : isLinked
+        ? "Open in Immich"
         : "Upload to Immich";
-  const uploadDetail =
-    uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
-      ? (uploadJob.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : uploadLabel)
-      : null;
+  const uploadDetail = needsRetry
+    ? (uploadJob?.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : uploadLabel)
+    : null;
   return <Stack spacing={2}>
     {job && !job.error && <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}</Alert>}
     {job?.error && (
@@ -198,9 +258,13 @@ export function JobStatus({
             <span>
               <Button
                 variant="outlined"
-                startIcon={<ImmichIcon uploaded={Boolean(displayedClip?.immich_asset_id)} />}
+                startIcon={<ImmichIcon uploaded={isLinked} />}
                 disabled={!displayedClip || uploading}
-                onClick={() => displayedClip && uploadMutation.mutate(displayedClip)}
+                onClick={() => {
+                  if (!displayedClip) return;
+                  if (isLinked && !needsRetry) checkImmichMutation.mutate(displayedClip);
+                  else uploadMutation.mutate(displayedClip);
+                }}
               >
                 {uploadLabel}
               </Button>
@@ -226,6 +290,16 @@ export function JobStatus({
         {uploadMutation.error.message}
       </Alert>
     )}
+    {checkImmichMutation.error && (
+      <Alert severity="error" onClose={() => checkImmichMutation.reset()}>
+        {checkImmichMutation.error.message}
+      </Alert>
+    )}
+    {reuploadMutation.error && (
+      <Alert severity="error" onClose={() => reuploadMutation.reset()}>
+        {reuploadMutation.error.message}
+      </Alert>
+    )}
     {clip.error && <Alert severity="error">{clip.error.message}</Alert>}
     {deleted && <Alert severity="success">The generated clip was deleted.</Alert>}
     {deleteWarnings.length > 0 && <Alert severity="warning">{deleteWarnings.join(" ")}</Alert>}
@@ -245,11 +319,41 @@ export function JobStatus({
         clip={displayedClip}
         busy={deleteMutation.isPending}
         error={deleteMutation.error?.message ?? null}
+        showImmichToggle={
+          Boolean(settings.data?.immich_manage_remote) && Boolean(displayedClip.immich_asset_id)
+        }
         onClose={() => {
           deleteMutation.reset();
           setDeleting(false);
         }}
-        onConfirm={() => deleteMutation.mutate(displayedClip)}
+        onConfirm={(deleteFromImmich) =>
+          deleteMutation.mutate({ target: displayedClip, deleteFromImmich })
+        }
+      />
+    )}
+    {immichIssue === "missing_permission" && immichSettingsUrl && (
+      <ImmichPermissionDialog
+        settingsUrl={immichSettingsUrl}
+        onClose={() => setImmichIssue(null)}
+      />
+    )}
+    {immichIssue === "asset_missing" && displayedClip && (
+      <ImmichAssetMissingDialog
+        busy={reuploadMutation.isPending}
+        onClose={() => setImmichIssue(null)}
+        onReupload={() => reuploadMutation.mutate(displayedClip)}
+      />
+    )}
+    {immichDeleteIssue && (
+      <ImmichDeletePermissionDialog
+        settingsUrl={immichDeleteIssue.settingsUrl}
+        busy={retryImmichDeleteMutation.isPending}
+        error={retryImmichDeleteMutation.error?.message ?? null}
+        onClose={() => {
+          retryImmichDeleteMutation.reset();
+          setImmichDeleteIssue(null);
+        }}
+        onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
       />
     )}
   </Stack>;

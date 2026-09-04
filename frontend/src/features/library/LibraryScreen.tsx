@@ -42,16 +42,25 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
+  checkImmichAsset,
   deleteClip,
   fetchClipFilterOptions,
   fetchClips,
   fetchJob,
   fetchSettings,
+  retryImmichAssetDelete,
+  reuploadClipToImmich,
   updateClipMetadata,
   uploadClipToImmich,
 } from "../../api";
 import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
-import { DeleteClipDialog, MetadataDialog } from "./ClipDialogs";
+import {
+  DeleteClipDialog,
+  ImmichAssetMissingDialog,
+  ImmichDeletePermissionDialog,
+  ImmichPermissionDialog,
+  MetadataDialog,
+} from "./ClipDialogs";
 
 const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 
@@ -154,16 +163,18 @@ function ImmichStatusChip({ clip }: { clip: ClipRecord }) {
   return null;
 }
 
-function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete, onUploadImmich, immichConfigured }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void; onUploadImmich: (clip: ClipRecord) => void; immichConfigured: boolean }) {
+function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete, onUploadImmich, onOpenImmich, immichConfigured }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void; onUploadImmich: (clip: ClipRecord) => void; onOpenImmich: (clip: ClipRecord) => void; immichConfigured: boolean }) {
   const metadata = clipMetadata(clip);
   const uploadJob = clip.immich_upload_job;
   const uploading = Boolean(uploadJob && NONTERMINAL_JOB_STATES.has(uploadJob.state));
+  const needsRetry = uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED";
+  const isLinked = Boolean(clip.immich_asset_id);
   const uploadLabel = uploading
     ? "Uploading to Immich…"
-    : uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
+    : needsRetry
       ? "Retry Immich upload"
-      : clip.immich_asset_id
-        ? "Re-upload to Immich"
+      : isLinked
+        ? "Open in Immich"
         : "Upload to Immich";
   const isList = mode === "list";
   const detailsVisible = isList || expanded;
@@ -206,10 +217,10 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
             {immichConfigured && (
               <ClipAction
                 label={uploadLabel}
-                icon={<ImmichIcon uploaded={Boolean(clip.immich_asset_id)} />}
+                icon={<ImmichIcon uploaded={isLinked} />}
                 large={size === "large"}
                 disabled={uploading}
-                onClick={() => onUploadImmich(clip)}
+                onClick={() => (isLinked && !needsRetry ? onOpenImmich(clip) : onUploadImmich(clip))}
               />
             )}
             <ClipAction label="Delete" icon={<DeleteOutlineRounded />} large={size === "large"} color="error" onClick={() => onDelete(clip)} />
@@ -336,13 +347,84 @@ export function LibraryScreen() {
     },
   });
   const deleteMutation = useMutation({
-    mutationFn: (clip: ClipRecord) => deleteClip(clip.id, clip.revision),
+    mutationFn: ({ clip, deleteFromImmich }: { clip: ClipRecord; deleteFromImmich: boolean }) =>
+      deleteClip(clip.id, clip.revision, deleteFromImmich),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["clips"] });
       void queryClient.invalidateQueries({ queryKey: ["clip-libraries"] });
       setExpandedClipId(null);
       setDeleting(null);
       setDeleteNotice(result.cleanup_warnings.length ? result.cleanup_warnings.join(" ") : null);
+      if (result.immich_delete_missing_permission) {
+        setImmichDeleteIssue({
+          assetId: result.immich_delete_missing_permission.asset_id,
+          settingsUrl: result.immich_delete_missing_permission.settings_url,
+        });
+      }
+    },
+  });
+  const [immichDeleteIssue, setImmichDeleteIssue] = useState<
+    { assetId: string; settingsUrl: string } | null
+  >(null);
+  const retryImmichDeleteMutation = useMutation({
+    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
+    onSuccess: (result, assetId) => {
+      if (result.status === "ok") {
+        setImmichDeleteIssue(null);
+        return;
+      }
+      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
+    },
+  });
+  const [immichIssue, setImmichIssue] = useState<
+    { clip: ClipRecord; status: "missing_permission" | "asset_missing"; settingsUrl: string | null } | null
+  >(null);
+  const checkImmichMutation = useMutation({
+    mutationFn: (clip: ClipRecord) => checkImmichAsset(clip.id),
+    onSuccess: (result, clip) => {
+      if (result.status === "ok") {
+        if (result.open_url) window.open(result.open_url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (result.status === "asset_missing") {
+        // The backend already cleared the stale association the moment it
+        // confirmed the asset was gone — mirror that here immediately so the
+        // icon reverts without waiting on the user to dismiss the dialog.
+        queryClient.setQueryData(clipsQueryKey, (page: typeof clips.data) =>
+          page && {
+            ...page,
+            items: page.items.map((item) =>
+              item.id === clip.id ? { ...item, immich_asset_id: null } : item
+            ),
+          }
+        );
+      }
+      setImmichIssue({ clip, status: result.status, settingsUrl: result.settings_url });
+    },
+  });
+  const reuploadMutation = useMutation({
+    mutationFn: (clip: ClipRecord) => reuploadClipToImmich(clip.id),
+    onSuccess: (job: JobSnapshot, clip: ClipRecord) => {
+      const summary: ImmichUploadJobSummary = {
+        id: job.id,
+        state: job.state,
+        stage: job.stage,
+        progress: job.progress,
+        message: job.message,
+        result: job.result as ImmichUploadJobResult | null,
+        error: job.error,
+      };
+      queryClient.setQueryData(clipsQueryKey, (page: typeof clips.data) =>
+        page && {
+          ...page,
+          items: page.items.map((item) =>
+            item.id === clip.id
+              ? { ...item, immich_asset_id: null, immich_upload_job: summary }
+              : item
+          ),
+        }
+      );
+      setImmichIssue(null);
     },
   });
   const visibleClips = clips.data?.items ?? [];
@@ -449,7 +531,7 @@ export function LibraryScreen() {
       {columnize(items, gridColumnCount).map((column, columnIndex) => (
         <Stack key={columnIndex} spacing={{ xs: 0.75, sm: 1.25 }} sx={{ minWidth: 0, maxWidth: "100%" }}>
           {column.map((clip) => (
-            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} immichConfigured={immichConfigured} />
+            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
           ))}
         </Stack>
       ))}
@@ -457,7 +539,7 @@ export function LibraryScreen() {
   ) : (
     <Box sx={{ display: "grid", alignItems: "start", alignSelf: "center", gap: 1, width: "100%", maxWidth: listRowWidth, mx: "auto" }}>
       {items.map((clip) => (
-        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} immichConfigured={immichConfigured} />
+        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
       ))}
     </Box>
   );
@@ -533,6 +615,8 @@ export function LibraryScreen() {
       </Collapse>
       {deleteNotice && <Alert severity="warning" onClose={() => setDeleteNotice(null)}>{deleteNotice}</Alert>}
       {uploadMutation.error && <Alert severity="error" onClose={() => uploadMutation.reset()}>{uploadMutation.error.message}</Alert>}
+      {checkImmichMutation.error && <Alert severity="error" onClose={() => checkImmichMutation.reset()}>{checkImmichMutation.error.message}</Alert>}
+      {reuploadMutation.error && <Alert severity="error" onClose={() => reuploadMutation.reset()}>{reuploadMutation.error.message}</Alert>}
       {clips.error && <Alert severity="error">{clips.error.message}</Alert>}
       {!clips.isLoading && visibleClips.length === 0 && <Alert severity="info">No clips match the current filters.</Alert>}
       {visibleClips.length > 0 && groupMode === "none" && renderClipCards(visibleClips)}
@@ -585,7 +669,41 @@ export function LibraryScreen() {
       {(clips.data?.pages ?? 1) > 1 && <Pagination page={page} count={clips.data?.pages ?? 1} onChange={(_, value) => { setPage(value); writeParams({ page: value === 1 ? null : String(value) }); }} />}
       {playing && <PlaybackDialog clip={playing} onClose={closePlayer} />}
       {editing && <MetadataDialog clip={editing} busy={editMutation.isPending || Boolean(editJobId)} error={editMutation.error?.message ?? editJob.data?.error?.message ?? null} onClose={() => setEditing(null)} onSave={(update) => editMutation.mutate({ clip: editing, update })} />}
-      {deleting && <DeleteClipDialog clip={deleting} busy={deleteMutation.isPending} error={deleteMutation.error?.message ?? null} onClose={() => { deleteMutation.reset(); setDeleting(null); }} onConfirm={() => deleteMutation.mutate(deleting)} />}
+      {deleting && (
+        <DeleteClipDialog
+          clip={deleting}
+          busy={deleteMutation.isPending}
+          error={deleteMutation.error?.message ?? null}
+          showImmichToggle={Boolean(settings.data?.immich_manage_remote) && Boolean(deleting.immich_asset_id)}
+          onClose={() => { deleteMutation.reset(); setDeleting(null); }}
+          onConfirm={(deleteFromImmich) => deleteMutation.mutate({ clip: deleting, deleteFromImmich })}
+        />
+      )}
+      {immichIssue?.status === "missing_permission" && immichIssue.settingsUrl && (
+        <ImmichPermissionDialog
+          settingsUrl={immichIssue.settingsUrl}
+          onClose={() => setImmichIssue(null)}
+        />
+      )}
+      {immichIssue?.status === "asset_missing" && (
+        <ImmichAssetMissingDialog
+          busy={reuploadMutation.isPending}
+          onClose={() => setImmichIssue(null)}
+          onReupload={() => reuploadMutation.mutate(immichIssue.clip)}
+        />
+      )}
+      {immichDeleteIssue && (
+        <ImmichDeletePermissionDialog
+          settingsUrl={immichDeleteIssue.settingsUrl}
+          busy={retryImmichDeleteMutation.isPending}
+          error={retryImmichDeleteMutation.error?.message ?? null}
+          onClose={() => {
+            retryImmichDeleteMutation.reset();
+            setImmichDeleteIssue(null);
+          }}
+          onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
+        />
+      )}
     </Stack>
   );
 }

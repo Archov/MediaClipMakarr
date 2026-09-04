@@ -11,6 +11,9 @@ from mediaclipmakarr.immich import (
     ImmichAuthError,
     ImmichInvalidResponseError,
     ImmichUnreachableError,
+    build_immich_api_key_settings_url,
+    build_immich_asset_url,
+    delete_immich_asset,
     set_immich_asset_description,
     tag_immich_assets,
     untag_immich_assets,
@@ -585,3 +588,79 @@ async def test_untag_immich_assets_raises_on_a_per_asset_failure_despite_http_20
             await untag_immich_assets(
                 "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
             )
+
+
+@pytest.mark.asyncio
+async def test_delete_immich_asset_succeeds() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/assets"
+        assert json.loads(request.read()) == {"ids": ["asset-123"], "force": False}
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await delete_immich_asset(
+            "asset-123", "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_immich_asset_raises_auth_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAuthError):
+            await delete_immich_asset(
+                "asset-123", "http://immich.example:2283", "bad-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_delete_immich_asset_raises_not_found_on_404() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAssetNotFoundError):
+            await delete_immich_asset(
+                "asset-123", "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_delete_immich_asset_raises_invalid_response_on_other_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await delete_immich_asset(
+                "asset-123", "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_delete_immich_asset_raises_unreachable_on_transport_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichUnreachableError):
+            await delete_immich_asset(
+                "asset-123", "http://missing.example:2283", "valid-key", client=client
+            )
+
+
+def test_build_immich_asset_url_points_at_the_photos_viewer() -> None:
+    assert (
+        build_immich_asset_url("http://immich.example:2283", "asset-123")
+        == "http://immich.example:2283/photos/asset-123"
+    )
+
+
+def test_build_immich_api_key_settings_url_opens_the_api_keys_panel() -> None:
+    assert (
+        build_immich_api_key_settings_url("http://immich.example:2283")
+        == "http://immich.example:2283/user-settings?isOpen=api-keys"
+    )

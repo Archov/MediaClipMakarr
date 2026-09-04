@@ -142,10 +142,13 @@ export function SettingsForm({
   );
 
   const [timezone, setTimezone] = useState(() => initialTimezone(settings));
-  // On a fresh install the initial timezone above is only a browser-detected guess,
-  // not a real edit — it must not auto-save on its own. Only a genuine selection
-  // from the control (or an already-configured value differing from it) counts.
-  const [timezoneTouched, setTimezoneTouched] = useState(false);
+  // On a fresh install (`timezone_configured` false), the initial timezone above
+  // is a browser-detected guess with nothing configured yet to clobber — it's
+  // meant to be saved as-is, becoming the real configured value (which flips
+  // `timezone_configured` server-side, so this only ever fires once). Once a
+  // timezone is genuinely configured, further loads must never auto-save a
+  // guess over it — only an explicit selection from the control counts then.
+  const [timezoneTouched, setTimezoneTouched] = useState(() => !settings.timezone_configured);
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
 

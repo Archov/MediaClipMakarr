@@ -97,6 +97,7 @@ class ImmichJobSettings:
     tag_show: bool
     tag_episode: bool
     auto_upload: bool
+    manage_remote: bool
     timezone: str
 
 
@@ -652,6 +653,23 @@ class JobRunner:
             build_thumbnail_job_plan(proposed, installed_stat),
         )
         await self._publish_durable_job_update(thumbnail_job.id)
+
+        immich_settings = (
+            await self.immich_settings_loader() if self.immich_settings_loader else None
+        )
+        if (
+            immich_settings is not None
+            and immich_settings.manage_remote
+            and immich_settings.url
+            and immich_settings.api_key
+            and proposed.get("immich_asset_id")
+            and proposed.get("immich_server_url") == normalize_immich_url(immich_settings.url)
+        ):
+            sync_job = await enqueue_immich_upload_job(
+                self.engine, build_immich_upload_plan(proposed)
+            )
+            await self._publish_durable_job_update(sync_job.id)
+
         self.wake()
 
 
@@ -693,9 +711,12 @@ class JobRunner:
             bool(clip.get("immich_asset_id")) and clip.get("immich_server_url") == normalized_url
         )
 
-        if reusing:
-            asset_id = str(clip["immich_asset_id"])
-        else:
+        async def fresh_upload() -> str | ImmichOrganizeResult:
+            """Upload the clip's file as a brand-new Immich asset and record the
+            association. Shared by the initial (non-reuse) path below and the
+            reuse-turned-out-to-be-stale self-heal further down, so both go
+            through the identical fingerprint/identity check and upload call.
+            """
             source = Path(str(clip["file_path"]))
             source_stat = await self.run_blocking(source.stat)
             recorded_size = clip.get("file_size_bytes")
@@ -724,7 +745,7 @@ class JobRunner:
                         "The clip file's identity could not be confirmed before "
                         "uploading to Immich."
                     )
-            asset_id = await self.run_blocking(
+            uploaded_asset_id = await self.run_blocking(
                 upload_immich_asset_sync,
                 source,
                 normalized_url,
@@ -734,10 +755,12 @@ class JobRunner:
                 local_timezone=immich_settings.timezone,
             )
             try:
-                await set_clip_immich_asset_id(self.engine, clip_id, asset_id, normalized_url)
+                await set_clip_immich_asset_id(
+                    self.engine, clip_id, uploaded_asset_id, normalized_url
+                )
             except Exception as error:
                 return ImmichOrganizeResult(
-                    asset_id=asset_id,
+                    asset_id=uploaded_asset_id,
                     state="PARTIAL",
                     error=JobError(
                         code=getattr(error, "job_error_code", "IMMICH_ASSET_ASSOCIATION_FAILED"),
@@ -747,11 +770,20 @@ class JobRunner:
                     message="Uploaded to Immich, but the local association could not be recorded.",
                     result_payload={
                         "clip_id": clip_id,
-                        "immich_asset_id": asset_id,
+                        "immich_asset_id": uploaded_asset_id,
                         "description_set": False,
                         "tags_applied": [],
                     },
                 )
+            return uploaded_asset_id
+
+        if reusing:
+            asset_id = str(clip["immich_asset_id"])
+        else:
+            upload_outcome = await fresh_upload()
+            if isinstance(upload_outcome, ImmichOrganizeResult):
+                return upload_outcome
+            asset_id = upload_outcome
 
         await report_stage("setting_description", 0.6, "Setting the Immich asset description.")
 
@@ -759,16 +791,15 @@ class JobRunner:
         # short-circuits the other, so a failure in one never hides a success in
         # the other. The one exception: a confirmed-missing asset on the reuse
         # path means nothing further is worth attempting against it.
-        # On a fresh upload Immich already derived the capture date/time correctly
-        # from the upload's own fileCreatedAt — only a reuse (validating/re-syncing
-        # an existing asset) needs it re-sent, so a clip's timestamp fix (e.g. this
-        # app's timezone setting changing) reaches assets uploaded before that change.
+        # Always sent explicitly (fresh upload or reuse alike): Immich's own
+        # date derivation for a fresh upload isn't reliable — nothing this app
+        # renders embeds a standard creation_time container tag it could read —
+        # so an unset date_time_original left freshly-uploaded assets showing
+        # UTC instead of this app's configured timezone.
         date_time_original = (
             _as_utc_datetime(clip["created_at"])
             .astimezone(ZoneInfo(immich_settings.timezone))
             .isoformat()
-            if reusing
-            else None
         )
         description_error: JobError | None = None
         try:
@@ -781,31 +812,38 @@ class JobRunner:
             )
         except ImmichApiError as error:
             if reusing and isinstance(error, ImmichAssetNotFoundError):
-                # Nothing new was created this run — a PARTIAL result would wrongly
-                # imply a confirmed asset. The stale `immich_asset_id` is left as-is
-                # here; the bulk job's validation stage is what actually detects this
-                # (via this same FAILED/IMMICH_ASSET_NOT_FOUND signal) and clears it
-                # to trigger a re-upload. A single-clip retry through this function
-                # alone would otherwise keep hitting the same stale id forever.
-                return ImmichOrganizeResult(
-                    asset_id=asset_id,
-                    state="FAILED",
-                    error=JobError(
-                        code=error.job_error_code,
-                        message=str(error),
-                        retryable=error.job_retryable,
-                    ),
-                    message=str(error),
-                    result_payload={
-                        "clip_id": clip_id,
-                        "immich_asset_id": asset_id,
-                        "description_set": False,
-                        "tags_applied": [],
-                    },
+                # The stored asset is confirmed gone — clear the stale
+                # association and upload fresh immediately, rather than
+                # failing forever on every future retry against the same
+                # dead id. (This self-heal used to be left to the bulk job's
+                # separate validate stage, or the "Reupload" dialog, to
+                # notice and fix — a single-clip retry through this function
+                # alone would otherwise keep hitting the same stale id
+                # forever, since nothing else clears it.)
+                await clear_clip_immich_asset_id(self.engine, clip_id)
+                upload_outcome = await fresh_upload()
+                if isinstance(upload_outcome, ImmichOrganizeResult):
+                    return upload_outcome
+                asset_id = upload_outcome
+                reusing = False
+                try:
+                    await set_immich_asset_description(
+                        asset_id,
+                        str(clip["title"]),
+                        normalized_url,
+                        immich_api_key,
+                        date_time_original=date_time_original,
+                    )
+                except ImmichApiError as retry_error:
+                    description_error = JobError(
+                        code=retry_error.job_error_code,
+                        message=str(retry_error),
+                        retryable=retry_error.job_retryable,
+                    )
+            else:
+                description_error = JobError(
+                    code=error.job_error_code, message=str(error), retryable=error.job_retryable
                 )
-            description_error = JobError(
-                code=error.job_error_code, message=str(error), retryable=error.job_retryable
-            )
 
         await report_stage("applying_tags", 0.85, "Applying Immich tags.")
 
@@ -958,6 +996,23 @@ class JobRunner:
                 message=result.message,
             )
         await self._publish_durable_job_update(claimed.id)
+
+        # `_upload_and_organize_clip` re-fetches the clip fresh at its own start,
+        # so an edit landing before that re-fetch is already reflected above. The
+        # remaining gap: an edit landing after that re-fetch but before this job
+        # finished — its own attempt to enqueue a sync would have found this job
+        # still active (immich_upload allows at most one active job per clip, a
+        # hard DB constraint, not just a courtesy) and silently returned it
+        # instead of creating a new one. Now that this job has just finalized and
+        # freed that slot, check whether the clip moved on since `clip` was
+        # fetched above and, if so, chain a follow-up run for the current state.
+        latest = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if latest is not None and int(latest["revision"]) != int(clip["revision"]):
+            follow_up = await enqueue_immich_upload_job(
+                self.engine, build_immich_upload_plan(latest)
+            )
+            await self._publish_durable_job_update(follow_up.id)
+            self.wake()
 
     async def _execute_bulk_immich_upload_job(self, claimed: ClaimedJob) -> None:
         plan = claimed.render_plan
