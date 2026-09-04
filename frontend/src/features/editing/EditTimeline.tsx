@@ -222,7 +222,10 @@ export function EditTimeline({
   };
 
   return (
-    <Box aria-label="Edit timeline" sx={{ minWidth: 0 }}>
+    <Box
+      aria-label="Edit timeline"
+      sx={{ minWidth: 0, userSelect: "none", WebkitUserSelect: "none" }}
+    >
       <Box
         sx={{
           position: "relative",
@@ -262,6 +265,7 @@ export function EditTimeline({
       <Box
         ref={trackRef}
         onPointerDown={(event) => {
+          event.preventDefault();
           event.currentTarget.setPointerCapture(event.pointerId);
           onActiveBoundaryChange?.(null);
           onInteractionStart?.();
@@ -286,6 +290,8 @@ export function EditTimeline({
           overflow: "visible",
           cursor: "crosshair",
           touchAction: "none",
+          userSelect: "none",
+          WebkitUserSelect: "none",
           backgroundImage: "linear-gradient(to right, rgba(255,255,255,.045) 1px, transparent 1px)",
           backgroundSize: "12.5% 100%",
         }}
@@ -301,6 +307,7 @@ export function EditTimeline({
               height: 8,
               bgcolor: "rgba(255,255,255,.2)",
               borderRadius: 1,
+              pointerEvents: "none",
             }}
           />
         )}
@@ -324,6 +331,7 @@ export function EditTimeline({
               borderBottom: 1,
               borderColor: "primary.light",
               overflow: "hidden",
+              pointerEvents: "none",
             }}
           >
             <ContentCutRounded sx={{ fontSize: 17, flex: "0 0 auto", color: "primary.light" }} />
