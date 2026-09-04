@@ -64,6 +64,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         executor = BlockingIOExecutor(application_settings.blocking_io_workers)
         app.state.blocking_io = executor
         app.state.media_process_gate = MediaProcessGate()
+        # Maps an opaque, server-issued retry token to the Immich asset id a
+        # remote clip-delete orphaned when the API key lacked `asset.delete` —
+        # in-memory only (this app is a single, persistent process, per its
+        # own architecture; a token surviving a restart isn't required for
+        # this low-stakes recovery flow). Never expose the asset id itself to
+        # callers: see `ImmichDeleteMissingPermission`.
+        app.state.immich_pending_asset_deletes = {}
         process_lock: ProcessLock | None = None
         database_engine = None
         try:

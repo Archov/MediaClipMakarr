@@ -404,7 +404,7 @@ export interface ClipMetadataUpdate {
 }
 
 export interface ImmichDeleteMissingPermission {
-  asset_id: string;
+  retry_token: string;
   settings_url: string;
 }
 

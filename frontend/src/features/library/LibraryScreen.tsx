@@ -357,23 +357,23 @@ export function LibraryScreen() {
       setDeleteNotice(result.cleanup_warnings.length ? result.cleanup_warnings.join(" ") : null);
       if (result.immich_delete_missing_permission) {
         setImmichDeleteIssue({
-          assetId: result.immich_delete_missing_permission.asset_id,
+          retryToken: result.immich_delete_missing_permission.retry_token,
           settingsUrl: result.immich_delete_missing_permission.settings_url,
         });
       }
     },
   });
   const [immichDeleteIssue, setImmichDeleteIssue] = useState<
-    { assetId: string; settingsUrl: string } | null
+    { retryToken: string; settingsUrl: string } | null
   >(null);
   const retryImmichDeleteMutation = useMutation({
-    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
-    onSuccess: (result, assetId) => {
+    mutationFn: (retryToken: string) => retryImmichAssetDelete(retryToken),
+    onSuccess: (result, retryToken) => {
       if (result.status === "ok") {
         setImmichDeleteIssue(null);
         return;
       }
-      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
+      setImmichDeleteIssue({ retryToken, settingsUrl: result.settings_url ?? "" });
     },
   });
   const [immichIssue, setImmichIssue] = useState<
@@ -701,7 +701,7 @@ export function LibraryScreen() {
             retryImmichDeleteMutation.reset();
             setImmichDeleteIssue(null);
           }}
-          onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
+          onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.retryToken)}
         />
       )}
     </Stack>

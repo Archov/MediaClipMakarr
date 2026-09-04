@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 import mediaclipmakarr.api.clips as clips_api
 import mediaclipmakarr.main as main_module
@@ -13,6 +14,7 @@ from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.clips import (
     ClipCreateRequest,
     ClipCreateValidationError,
+    clear_clip_immich_asset_id,
     get_clip,
     insert_clip,
     set_clip_immich_asset_id,
@@ -71,6 +73,7 @@ def _build_clips_app(settings: Settings, engine, effective) -> FastAPI:
     app.state.job_events = _StubJobEvents()
     app.state.job_runner = _StubJobRunner()
     app.state.blocking_io = BlockingIOExecutor(max_workers=1)
+    app.state.immich_pending_asset_deletes = {}
     app.include_router(clips_api.build_router(settings))
     return app
 
@@ -438,6 +441,71 @@ def test_check_immich_asset_returns_asset_missing_when_permission_present(
     assert cleared["immich_server_url"] is None
 
 
+def test_clear_clip_immich_asset_id_only_clears_the_expected_association(tmp_path) -> None:
+    engine, clip_root = _seed_clip(tmp_path)
+    asyncio.run(set_clip_immich_asset_id(engine, "clip-one", "asset-1", IMMICH_URL))
+
+    # A stale expectation (e.g. a concurrent run already replaced the
+    # association) must not clear the current, newer one.
+    mismatched = asyncio.run(
+        clear_clip_immich_asset_id(engine, "clip-one", expected_asset_id="asset-old")
+    )
+    assert mismatched is False
+    untouched = asyncio.run(get_clip(engine, "clip-one", clip_root))
+    assert untouched is not None
+    assert untouched["immich_asset_id"] == "asset-1"
+
+    matched = asyncio.run(
+        clear_clip_immich_asset_id(engine, "clip-one", expected_asset_id="asset-1")
+    )
+    assert matched is True
+    cleared = asyncio.run(get_clip(engine, "clip-one", clip_root))
+    assert cleared is not None
+    assert cleared["immich_asset_id"] is None
+    assert cleared["immich_server_url"] is None
+
+
+def test_check_immich_asset_reports_a_conflict_when_association_changed_concurrently(
+    tmp_path, monkeypatch
+) -> None:
+    engine, clip_root = _seed_clip(tmp_path)
+    asyncio.run(set_clip_immich_asset_id(engine, "clip-one", "asset-1", IMMICH_URL))
+    settings = Settings(_env_file=None, clip_dir=clip_root)
+
+    async def fake_read(asset_id, url, api_key):
+        # Simulate a concurrent run (e.g. the bulk job) replacing the
+        # association with a newer, valid one between this route's own read
+        # at the top of the function and its attempt to clear the stale one.
+        # Raw SQL here (rather than `set_clip_immich_asset_id`) since that
+        # helper's own same-server guard is orthogonal to what's under test.
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE clips SET immich_asset_id = :asset_id, "
+                    "immich_server_url = :server_url WHERE id = :id"
+                ),
+                {"asset_id": "asset-2", "server_url": IMMICH_URL, "id": "clip-one"},
+            )
+        raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+
+    async def fake_permissions(url, api_key):
+        return ["asset.read", "asset.upload"]
+
+    monkeypatch.setattr(clips_api, "read_immich_asset", fake_read)
+    monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
+    app = _build_clips_app(settings, engine, _effective_settings())
+    with TestClient(app) as client:
+        response = client.post("/api/clips/clip-one/immich-check")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "IMMICH_ASSOCIATION_CHANGED"
+
+    # The newer association must survive untouched.
+    survived = asyncio.run(get_clip(engine, "clip-one", clip_root))
+    assert survived is not None
+    assert survived["immich_asset_id"] == "asset-2"
+
+
 def test_check_immich_asset_rejects_a_clip_not_linked_to_the_current_server(
     tmp_path,
 ) -> None:
@@ -539,10 +607,14 @@ def test_remove_clip_reports_missing_permission_when_asset_delete_scope_absent(
     assert body["deleted"] is True
     # The dedicated dialog covers this — no redundant plain-text warning too.
     assert body["cleanup_warnings"] == []
-    assert body["immich_delete_missing_permission"] == {
-        "asset_id": "asset-1",
-        "settings_url": f"{IMMICH_URL}/user-settings?isOpen=api-keys",
-    }
+    permission_issue = body["immich_delete_missing_permission"]
+    assert permission_issue is not None
+    assert permission_issue["settings_url"] == f"{IMMICH_URL}/user-settings?isOpen=api-keys"
+    # An opaque token, never the raw Immich asset id, is what the client gets.
+    retry_token = permission_issue["retry_token"]
+    assert isinstance(retry_token, str) and retry_token
+    assert retry_token != "asset-1"
+    assert app.state.immich_pending_asset_deletes[retry_token] == "asset-1"
 
 
 def test_remove_clip_reports_a_warning_when_auth_error_but_permission_present(
@@ -589,12 +661,15 @@ def test_retry_immich_asset_delete_succeeds(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
     app = _build_clips_app(settings, _engine_only(tmp_path), _effective_settings())
+    app.state.immich_pending_asset_deletes["test-token"] = "asset-1"
     with TestClient(app) as client:
-        response = client.post("/api/immich/assets/asset-1/delete-retry")
+        response = client.post("/api/immich/delete-retries/test-token")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "settings_url": None}
     assert calls == ["asset-1"]
+    # Resolved — the token is single-use and must not linger.
+    assert "test-token" not in app.state.immich_pending_asset_deletes
 
 
 def test_retry_immich_asset_delete_still_missing_permission(tmp_path, monkeypatch) -> None:
@@ -609,13 +684,16 @@ def test_retry_immich_asset_delete_still_missing_permission(tmp_path, monkeypatc
     monkeypatch.setattr(clips_api, "delete_immich_asset", fake_delete)
     monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
     app = _build_clips_app(settings, _engine_only(tmp_path), _effective_settings())
+    app.state.immich_pending_asset_deletes["test-token"] = "asset-1"
     with TestClient(app) as client:
-        response = client.post("/api/immich/assets/asset-1/delete-retry")
+        response = client.post("/api/immich/delete-retries/test-token")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "missing_permission"
     assert body["settings_url"] == f"{IMMICH_URL}/user-settings?isOpen=api-keys"
+    # Still unresolved — the same token must stay valid for another attempt.
+    assert app.state.immich_pending_asset_deletes["test-token"] == "asset-1"
 
 
 def test_retry_immich_asset_delete_requires_immich_configured(tmp_path) -> None:
@@ -623,11 +701,21 @@ def test_retry_immich_asset_delete_requires_immich_configured(tmp_path) -> None:
     app = _build_clips_app(
         settings, _engine_only(tmp_path), _effective_settings(immich_url="", immich_api_key=None)
     )
+    app.state.immich_pending_asset_deletes["test-token"] = "asset-1"
     with TestClient(app) as client:
-        response = client.post("/api/immich/assets/asset-1/delete-retry")
+        response = client.post("/api/immich/delete-retries/test-token")
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "IMMICH_NOT_CONFIGURED"
+
+
+def test_retry_immich_asset_delete_rejects_an_unknown_token(tmp_path) -> None:
+    settings = Settings(_env_file=None, clip_dir=tmp_path / "clips")
+    app = _build_clips_app(settings, _engine_only(tmp_path), _effective_settings())
+    with TestClient(app) as client:
+        response = client.post("/api/immich/delete-retries/not-a-real-token")
+
+    assert response.status_code == 404
 
 
 def test_remove_clip_reports_no_warning_when_remote_asset_is_already_gone(

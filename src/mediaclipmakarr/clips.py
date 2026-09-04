@@ -142,22 +142,37 @@ async def set_clip_immich_asset_id(
             )
 
 
-async def clear_clip_immich_asset_id(engine: AsyncEngine, clip_id: str) -> None:
+async def clear_clip_immich_asset_id(
+    engine: AsyncEngine, clip_id: str, *, expected_asset_id: str
+) -> bool:
     """Drop a clip's Immich association after its asset was confirmed gone
     (deleted directly in Immich, detected via a 404 on read/update).
 
     Without this, `set_clip_immich_asset_id`'s same-server guard would refuse
     to record the id from a fresh re-upload — it only ever replaces an
     association for a *different* server, not a stale one for the same server.
+
+    Only clears when the clip's *currently stored* `immich_asset_id` still
+    matches `expected_asset_id` — the same compare-and-swap guard
+    `set_clip_immich_asset_id` already uses on the write side, applied here to
+    the clear side. Without it, a concurrent run (e.g. the bulk job processing
+    the same clip against an earlier snapshot, or two retry paths racing) could
+    have already replaced the association with a newer, valid one between the
+    caller's read and this clear — an unconditional clear would silently
+    orphan that newer asset. Returns whether anything was actually cleared;
+    callers must not proceed with a fresh upload when this returns `False`,
+    since that means the stored association has already moved on and a fresh
+    upload would create a needless duplicate.
     """
     async with engine.begin() as connection:
-        await connection.execute(
+        result = await connection.execute(
             text(
                 "UPDATE clips SET immich_asset_id = NULL, immich_server_url = NULL, "
-                "immich_tag_ids = NULL WHERE id = :id"
+                "immich_tag_ids = NULL WHERE id = :id AND immich_asset_id = :expected_asset_id"
             ),
-            {"id": clip_id},
+            {"id": clip_id, "expected_asset_id": expected_asset_id},
         )
+        return result.rowcount == 1
 
 
 def parse_stored_immich_tag_ids(value: object) -> list[str]:

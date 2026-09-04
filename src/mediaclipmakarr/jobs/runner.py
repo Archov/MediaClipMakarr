@@ -820,7 +820,32 @@ class JobRunner:
                 # notice and fix — a single-clip retry through this function
                 # alone would otherwise keep hitting the same stale id
                 # forever, since nothing else clears it.)
-                await clear_clip_immich_asset_id(self.engine, clip_id)
+                cleared = await clear_clip_immich_asset_id(
+                    self.engine, clip_id, expected_asset_id=asset_id
+                )
+                if not cleared:
+                    # Another process already moved this clip's association on
+                    # since it was fetched at this function's own start — our
+                    # view is stale. Report the original failure rather than
+                    # risk uploading a duplicate on top of whatever is now
+                    # recorded; a future run will re-fetch and see the current
+                    # state fresh.
+                    return ImmichOrganizeResult(
+                        asset_id=asset_id,
+                        state="FAILED",
+                        error=JobError(
+                            code=error.job_error_code,
+                            message=str(error),
+                            retryable=error.job_retryable,
+                        ),
+                        message=str(error),
+                        result_payload={
+                            "clip_id": clip_id,
+                            "immich_asset_id": asset_id,
+                            "description_set": False,
+                            "tags_applied": [],
+                        },
+                    )
                 upload_outcome = await fresh_upload()
                 if isinstance(upload_outcome, ImmichOrganizeResult):
                     return upload_outcome
@@ -1202,17 +1227,38 @@ class JobRunner:
                         and result.error is not None
                         and result.error.code == "IMMICH_ASSET_NOT_FOUND"
                     ):
-                        await clear_clip_immich_asset_id(self.engine, clip_id)
-                        reupload_ids.append(clip_id)
-                        details.append(
-                            {
-                                "clip_id": clip_id,
-                                "title": str(clip["title"]),
-                                "stage": "validate",
-                                "outcome": "failed",
-                                "error_code": "IMMICH_ASSET_NOT_FOUND",
-                            }
+                        cleared = await clear_clip_immich_asset_id(
+                            self.engine,
+                            clip_id,
+                            expected_asset_id=str(clip["immich_asset_id"]),
                         )
+                        if cleared:
+                            reupload_ids.append(clip_id)
+                            details.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "title": str(clip["title"]),
+                                    "stage": "validate",
+                                    "outcome": "failed",
+                                    "error_code": "IMMICH_ASSET_NOT_FOUND",
+                                }
+                            )
+                        else:
+                            # A concurrent run already moved this clip's
+                            # association on since this job's own snapshot was
+                            # taken — leave it alone rather than risk a
+                            # duplicate upload on top of whatever is now
+                            # recorded.
+                            skipped += 1
+                            details.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "title": str(clip["title"]),
+                                    "stage": "validate",
+                                    "outcome": "skipped",
+                                    "error_code": "IMMICH_ASSOCIATION_CHANGED",
+                                }
+                            )
                         continue
                     tally(result.state)
                     details.append(
@@ -1238,17 +1284,38 @@ class JobRunner:
                             str(clip["immich_asset_id"]), normalized_url, immich_settings.api_key
                         )
                     except ImmichAssetNotFoundError:
-                        await clear_clip_immich_asset_id(self.engine, clip_id)
-                        reupload_ids.append(clip_id)
-                        details.append(
-                            {
-                                "clip_id": clip_id,
-                                "title": str(clip["title"]),
-                                "stage": "validate",
-                                "outcome": "failed",
-                                "error_code": "IMMICH_ASSET_NOT_FOUND",
-                            }
+                        cleared = await clear_clip_immich_asset_id(
+                            self.engine,
+                            clip_id,
+                            expected_asset_id=str(clip["immich_asset_id"]),
                         )
+                        if cleared:
+                            reupload_ids.append(clip_id)
+                            details.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "title": str(clip["title"]),
+                                    "stage": "validate",
+                                    "outcome": "failed",
+                                    "error_code": "IMMICH_ASSET_NOT_FOUND",
+                                }
+                            )
+                        else:
+                            # A concurrent run already moved this clip's
+                            # association on since this job's own snapshot was
+                            # taken — leave it alone rather than risk a
+                            # duplicate upload on top of whatever is now
+                            # recorded.
+                            skipped += 1
+                            details.append(
+                                {
+                                    "clip_id": clip_id,
+                                    "title": str(clip["title"]),
+                                    "stage": "validate",
+                                    "outcome": "skipped",
+                                    "error_code": "IMMICH_ASSOCIATION_CHANGED",
+                                }
+                            )
                     except ImmichApiError as error:
                         failed += 1
                         details.append(
@@ -1356,8 +1423,13 @@ class JobRunner:
                     # _upload_and_organize_clip already durably recorded this asset
                     # id against the clip before returning. Left in place, a retry
                     # would see `reusing=True` and keep targeting the same missing
-                    # id forever — clear it so a retry re-uploads instead.
-                    await clear_clip_immich_asset_id(self.engine, clip_id)
+                    # id forever — clear it so a retry re-uploads instead. If a
+                    # concurrent run already moved the association elsewhere in
+                    # this narrow window, there's nothing stale left to clear
+                    # either way, so the outcome below still stands.
+                    await clear_clip_immich_asset_id(
+                        self.engine, clip_id, expected_asset_id=result.asset_id
+                    )
                     result = dataclasses.replace(
                         result,
                         state="FAILED",

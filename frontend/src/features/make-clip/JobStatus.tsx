@@ -112,23 +112,23 @@ export function JobStatus({
       void queryClient.removeQueries({ queryKey: ["clip", result.id] });
       if (result.immich_delete_missing_permission) {
         setImmichDeleteIssue({
-          assetId: result.immich_delete_missing_permission.asset_id,
+          retryToken: result.immich_delete_missing_permission.retry_token,
           settingsUrl: result.immich_delete_missing_permission.settings_url,
         });
       }
     },
   });
   const [immichDeleteIssue, setImmichDeleteIssue] = useState<
-    { assetId: string; settingsUrl: string } | null
+    { retryToken: string; settingsUrl: string } | null
   >(null);
   const retryImmichDeleteMutation = useMutation({
-    mutationFn: (assetId: string) => retryImmichAssetDelete(assetId),
-    onSuccess: (result, assetId) => {
+    mutationFn: (retryToken: string) => retryImmichAssetDelete(retryToken),
+    onSuccess: (result, retryToken) => {
       if (result.status === "ok") {
         setImmichDeleteIssue(null);
         return;
       }
-      setImmichDeleteIssue({ assetId, settingsUrl: result.settings_url ?? "" });
+      setImmichDeleteIssue({ retryToken, settingsUrl: result.settings_url ?? "" });
     },
   });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -147,12 +147,12 @@ export function JobStatus({
     },
   });
   const [immichIssue, setImmichIssue] = useState<
-    "missing_permission" | "asset_missing" | null
+    { clip: ClipRecord; status: "missing_permission" | "asset_missing" } | null
   >(null);
   const [immichSettingsUrl, setImmichSettingsUrl] = useState<string | null>(null);
   const checkImmichMutation = useMutation({
     mutationFn: (target: ClipRecord) => checkImmichAsset(target.id),
-    onSuccess: (result) => {
+    onSuccess: (result, target) => {
       if (result.status === "ok") {
         if (result.open_url) window.open(result.open_url, "_blank", "noopener,noreferrer");
         return;
@@ -164,7 +164,12 @@ export function JobStatus({
         void queryClient.invalidateQueries({ queryKey: ["clip", clipId] });
         void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
       }
-      setImmichIssue(result.status);
+      // Bind to the clip that was actually checked (`target`), not whatever
+      // `displayedClip` re-derives to later — this screen can stay mounted
+      // across a `clipId` change (e.g. starting a new clip while this
+      // dialog is open), and a reupload must never fire against a
+      // different clip than the one confirmed missing.
+      setImmichIssue({ clip: target, status: result.status });
       setImmichSettingsUrl(result.settings_url);
     },
   });
@@ -185,6 +190,9 @@ export function JobStatus({
     setEditJobId(null);
     editMutation.reset();
     deleteMutation.reset();
+    setImmichIssue(null);
+    setImmichSettingsUrl(null);
+    setImmichDeleteIssue(null);
   }, [clipId]);
 
   useEffect(() => {
@@ -331,17 +339,17 @@ export function JobStatus({
         }
       />
     )}
-    {immichIssue === "missing_permission" && immichSettingsUrl && (
+    {immichIssue?.status === "missing_permission" && immichSettingsUrl && (
       <ImmichPermissionDialog
         settingsUrl={immichSettingsUrl}
         onClose={() => setImmichIssue(null)}
       />
     )}
-    {immichIssue === "asset_missing" && displayedClip && (
+    {immichIssue?.status === "asset_missing" && (
       <ImmichAssetMissingDialog
         busy={reuploadMutation.isPending}
         onClose={() => setImmichIssue(null)}
-        onReupload={() => reuploadMutation.mutate(displayedClip)}
+        onReupload={() => reuploadMutation.mutate(immichIssue.clip)}
       />
     )}
     {immichDeleteIssue && (
@@ -353,7 +361,7 @@ export function JobStatus({
           retryImmichDeleteMutation.reset();
           setImmichDeleteIssue(null);
         }}
-        onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.assetId)}
+        onRetry={() => retryImmichDeleteMutation.mutate(immichDeleteIssue.retryToken)}
       />
     )}
   </Stack>;

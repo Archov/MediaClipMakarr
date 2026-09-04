@@ -434,6 +434,84 @@ async def test_immich_upload_self_heals_a_stale_asset_on_reuse_path(
 
 
 @pytest.mark.asyncio
+async def test_immich_upload_self_heal_does_not_clobber_a_concurrently_replaced_asset(
+    tmp_path, monkeypatch
+) -> None:
+    """If another process (e.g. the bulk job, or another retry) replaces the
+    clip's Immich association between this job's own clip fetch and its
+    attempt to clear a confirmed-stale one, the clear must be a no-op rather
+    than overwrite the newer association, and this run must report the
+    original failure rather than upload a duplicate asset on top of it.
+    """
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"):
+        upload_calls.append(url)
+        return "should-not-upload"
+
+    async def fake_set_description(asset_id, description, url, api_key, *, date_time_original=None):
+        if asset_id == "already-stored-asset":
+            # Simulate a concurrent run replacing the association with a
+            # newer, valid one right before this job's own attempt to clear
+            # the stale one it just found.
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE clips SET immich_asset_id = :asset_id, "
+                        "immich_server_url = :server_url WHERE id = :id"
+                    ),
+                    {
+                        "asset_id": "asset-from-elsewhere",
+                        "server_url": IMMICH_URL,
+                        "id": "clip-one",
+                    },
+                )
+            raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE clips SET immich_asset_id = :asset_id, "
+                    "immich_server_url = :server_url WHERE id = :id"
+                ),
+                {"asset_id": "already-stored-asset", "server_url": IMMICH_URL, "id": "clip-one"},
+            )
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+        runner = _make_runner(engine, tmp_path)
+        await runner._execute_claimed_job(claimed)
+
+        snapshot = await get_job_snapshot(engine, claimed.id)
+        clip = await get_clip(engine, "clip-one", clip_root)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == []  # never re-uploaded — the race was detected first
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.error is not None
+    assert snapshot.error.code == "IMMICH_ASSET_NOT_FOUND"
+    # The concurrently-written, newer association must survive untouched.
+    assert clip is not None
+    assert clip["immich_asset_id"] == "asset-from-elsewhere"
+
+
+@pytest.mark.asyncio
 async def test_immich_upload_rejects_a_fingerprint_mismatch_before_uploading(
     tmp_path, monkeypatch
 ) -> None:

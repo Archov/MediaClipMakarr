@@ -1,5 +1,6 @@
 """Managed clip API routes."""
 
+import secrets
 from pathlib import Path
 from typing import Annotated
 
@@ -267,8 +268,24 @@ def build_router(application_settings: Settings) -> APIRouter:
             if "all" in permissions or "asset.read" in permissions:
                 # Confirmed gone (not just an unreadable/permission-denied
                 # asset) — clear the stale association immediately rather
-                # than waiting on the user to dismiss anything.
-                await clear_clip_immich_asset_id(request.app.state.database_engine, clip_id)
+                # than waiting on the user to dismiss anything. Only if it's
+                # still the same association just checked — a concurrent run
+                # may have already replaced it with a newer, valid one.
+                cleared = await clear_clip_immich_asset_id(
+                    request.app.state.database_engine, clip_id, expected_asset_id=str(asset_id)
+                )
+                if not cleared:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "IMMICH_ASSOCIATION_CHANGED",
+                            "message": (
+                                "This clip's Immich association changed during the check "
+                                "— try again."
+                            ),
+                            "retryable": True,
+                        },
+                    ) from None
                 return ImmichAssetCheckResult(status="asset_missing")
             return ImmichAssetCheckResult(
                 status="missing_permission",
@@ -307,22 +324,46 @@ def build_router(application_settings: Settings) -> APIRouter:
             )
         # The plain upload route's "reusing" guard refuses to overwrite an
         # association still pointing at the same server — this route exists
-        # specifically for a confirmed-dead asset, so clear it first.
-        await clear_clip_immich_asset_id(request.app.state.database_engine, clip_id)
+        # specifically for a confirmed-dead asset, so clear it first. Only if
+        # it's still the same association just seen — a concurrent run may
+        # have already replaced it with a newer, valid one.
+        existing_asset_id = clip.get("immich_asset_id")
+        if existing_asset_id is not None:
+            cleared = await clear_clip_immich_asset_id(
+                request.app.state.database_engine,
+                clip_id,
+                expected_asset_id=str(existing_asset_id),
+            )
+            if not cleared:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "IMMICH_ASSOCIATION_CHANGED",
+                        "message": "This clip's Immich association changed — try again.",
+                        "retryable": True,
+                    },
+                )
         plan = build_immich_upload_plan(clip)
         job = await enqueue_immich_upload_job(request.app.state.database_engine, plan)
         await request.app.state.job_events.publish(job.id, job)
         request.app.state.job_runner.wake()
         return job
 
-    @router.post(
-        "/api/immich/assets/{asset_id}/delete-retry", response_model=ImmichAssetDeleteResult
-    )
-    async def retry_immich_asset_delete(asset_id: str, request: Request) -> ImmichAssetDeleteResult:
+    @router.post("/api/immich/delete-retries/{token}", response_model=ImmichAssetDeleteResult)
+    async def retry_immich_asset_delete(token: str, request: Request) -> ImmichAssetDeleteResult:
         # Not scoped under /api/clips/{clip_id} — by the time a retry is
-        # offered, the local clip is already deleted (see remove_clip), so
-        # this is keyed purely on the Immich asset id the earlier delete
-        # attempt reported back.
+        # offered, the local clip is already deleted (see remove_clip). Keyed
+        # on an opaque, server-issued token rather than a caller-supplied
+        # Immich asset id: accepting a bare asset id here would let anyone
+        # reaching this API direct a delete at an arbitrary Immich asset, not
+        # just one this app's own delete flow actually orphaned.
+        pending = request.app.state.immich_pending_asset_deletes
+        asset_id = pending.get(token)
+        if asset_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail="This delete retry is unknown or has already been resolved.",
+            )
         effective = request.app.state.effective_application_settings
         if not effective.immich_url or not effective.immich_api_key:
             raise HTTPException(
@@ -345,6 +386,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                     )
                 )
             except ImmichApiError as error:
+                # Leave the token valid — the underlying condition is still
+                # unresolved, so a future retry should get another attempt.
                 raise HTTPException(
                     status_code=502,
                     detail={
@@ -362,6 +405,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                         "retryable": True,
                     },
                 ) from auth_error
+            # Still missing `asset.delete` — keep the token valid for another
+            # attempt once the key is actually fixed.
             return ImmichAssetDeleteResult(
                 status="missing_permission",
                 settings_url=build_immich_api_key_settings_url(normalized_url),
@@ -375,6 +420,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                     "retryable": error.job_retryable,
                 },
             ) from error
+        # Resolved (deleted or already gone) — the token is single-use.
+        pending.pop(token, None)
         return ImmichAssetDeleteResult(status="ok")
 
     @router.post("/api/clips/immich-upload/bulk", response_model=JobSnapshot)
@@ -510,8 +557,13 @@ def build_router(application_settings: Settings) -> APIRouter:
                 except ImmichApiError:
                     pass
                 if missing_permission:
+                    # Issue an opaque token rather than handing the caller the
+                    # raw asset id — that id is never accepted back from the
+                    # client for the retry (see retry_immich_asset_delete).
+                    retry_token = secrets.token_urlsafe(32)
+                    request.app.state.immich_pending_asset_deletes[retry_token] = immich_asset_id
                     result.immich_delete_missing_permission = ImmichDeleteMissingPermission(
-                        asset_id=immich_asset_id,
+                        retry_token=retry_token,
                         settings_url=build_immich_api_key_settings_url(
                             normalize_immich_url(effective.immich_url)
                         ),

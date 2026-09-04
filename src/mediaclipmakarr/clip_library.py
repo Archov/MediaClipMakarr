@@ -125,9 +125,14 @@ class ImmichDeleteMissingPermission(BaseModel):
     other remote-delete failures (which stay a plain `cleanup_warnings` entry)
     so the frontend can offer a targeted fix-and-retry flow instead of just a
     warning banner. The local clip is already gone by this point, so a retry
-    is keyed on `asset_id` alone via `POST /api/immich/assets/{asset_id}/delete-retry`."""
+    is keyed on an opaque, server-issued `retry_token` — never the raw Immich
+    asset id — resolved server-side via `POST /api/immich/delete-retries/{token}`.
+    Exposing the bare asset id here would let any caller reaching this API
+    direct a delete at an arbitrary Immich asset, not just one this app's own
+    delete flow actually orphaned.
+    """
 
-    asset_id: str
+    retry_token: str
     settings_url: str
 
 

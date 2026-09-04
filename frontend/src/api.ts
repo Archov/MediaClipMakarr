@@ -298,10 +298,15 @@ export async function reuploadClipToImmich(clipId: string): Promise<JobSnapshot>
   return parseResponse<JobSnapshot>(response, "Immich reupload request");
 }
 
-export async function retryImmichAssetDelete(assetId: string): Promise<ImmichAssetDeleteResult> {
-  const response = await apiFetch(`/api/immich/assets/${encodeURIComponent(assetId)}/delete-retry`, {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-  });
+export async function retryImmichAssetDelete(
+  retryToken: string,
+): Promise<ImmichAssetDeleteResult> {
+  const response = await apiFetch(
+    `/api/immich/delete-retries/${encodeURIComponent(retryToken)}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+    },
+  );
   return parseResponse<ImmichAssetDeleteResult>(response, "Immich asset delete retry");
 }
