@@ -892,7 +892,15 @@ def embedded_revision_matches(path: Path, clip_id: str, revision: int) -> bool:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 start = chunk.find(marker, payload_start)
                 continue
-            if payload.get("clipId") == clip_id and payload.get("revision") == revision:
+            # Require the full envelope shape, not just a clipId/revision pair
+            # that happens to match — a truncated or hand-crafted marker with
+            # only those two fields must not be mistaken for a genuine one.
+            if (
+                payload.get("application") == "MediaClipMakarr"
+                and isinstance(payload.get("schemaVersion"), int)
+                and payload.get("clipId") == clip_id
+                and payload.get("revision") == revision
+            ):
                 return True
             start = chunk.find(marker, payload_start)
     return False

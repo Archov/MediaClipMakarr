@@ -12,6 +12,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
   createClip,
+  fetchClips,
   fetchMediaCapabilities,
 } from "../../api";
 import { formatTimestampMs } from "../../timestamps";
@@ -70,6 +71,22 @@ export function MakeClipScreen() {
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
   const capabilitiesVersion = mediaCapabilitiesVersion(selectedSession);
   const activeJob = useJobSnapshot(submittedJob, submittedJobId);
+  const latestClip = useQuery({
+    queryKey: ["clips", "make-clip-latest"],
+    queryFn: () => fetchClips({ page: 1, pageSize: 1, sort: "newest" }),
+  });
+  const newestClip = latestClip.data?.items[0] ?? null;
+  const activeJobIsRunning = Boolean(
+    activeJob && !["SUCCEEDED", "PARTIAL", "FAILED"].includes(activeJob.state),
+  );
+  const activeJobMatchesNewest = Boolean(
+    activeJob?.state === "SUCCEEDED" &&
+      activeJob.result &&
+      "clip_id" in activeJob.result &&
+      activeJob.result.clip_id === newestClip?.id,
+  );
+  const displayedJob =
+    submittedJob || activeJobIsRunning || activeJobMatchesNewest ? activeJob : null;
   const capabilities = useQuery({
     queryKey: ["media-capabilities", selectedSessionIdentity, capabilitiesVersion],
     queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
@@ -84,15 +101,8 @@ export function MakeClipScreen() {
     },
   });
 
-  const clearSubmittedJob = () => {
-    setSubmittedJob(null);
-    setSubmittedJobId(null);
-    window.sessionStorage.removeItem(ACTIVE_CLIP_JOB_KEY);
-  };
-
   const resetClipSubmission = () => {
     setBoundaryNotice(null);
-    clearSubmittedJob();
     clipCreate.reset();
   };
 
@@ -160,7 +170,6 @@ export function MakeClipScreen() {
       setSubtitleStreamIndex(streamIndex);
       setSubtitlesEnabled(true);
     }
-    clearSubmittedJob();
     clipCreate.reset();
   };
 
@@ -192,7 +201,6 @@ export function MakeClipScreen() {
                 setStartInput(formatTimestampMs(initialStartMs));
                 setEndMs(null);
                 setEndInput("");
-                clearSubmittedJob();
                 clipCreate.reset();
                 setBoundaryNotice(null);
                 setAudioStreamIndex("");
@@ -204,9 +212,11 @@ export function MakeClipScreen() {
         </CardContent>
       </Card>
 
-      {selectedSession && (
-        <Card variant="outlined">
-          <CardContent>
+      <Card variant="outlined">
+        <CardContent>
+          {!selectedSession ? (
+            <Alert severity="info">Select a Plex session to create a clip.</Alert>
+          ) : (
             <Stack spacing={2}>
               <ClipBoundaryEditor
                 startInput={startInput}
@@ -241,13 +251,11 @@ export function MakeClipScreen() {
                   subtitlesEnabled={subtitlesEnabled}
                   onAudioChange={(value) => {
                     setAudioStreamIndex(value);
-                    clearSubmittedJob();
                     clipCreate.reset();
                   }}
                   onSubtitleChange={(enabled, value) => {
                     setSubtitlesEnabled(enabled);
                     setSubtitleStreamIndex(value);
-                    clearSubmittedJob();
                     clipCreate.reset();
                   }}
                 />
@@ -270,17 +278,21 @@ export function MakeClipScreen() {
                 {clipCreate.isPending ? "Submitting…" : "Create clip"}
               </Button>
             </Stack>
-          </CardContent>
-        </Card>
-      )}
+          )}
+        </CardContent>
+      </Card>
 
-      {activeJob && (
-        <Card variant="outlined">
-          <CardContent>
-            <JobStatus job={activeJob} onSelectAlternative={selectAlternativeTrack} />
-          </CardContent>
-        </Card>
-      )}
+      <Card variant="outlined">
+        <CardContent>
+          <JobStatus
+            job={displayedJob}
+            initialClip={displayedJob ? null : newestClip}
+            isLoading={!displayedJob && latestClip.isLoading}
+            loadError={!displayedJob ? latestClip.error?.message ?? null : null}
+            onSelectAlternative={selectAlternativeTrack}
+          />
+        </CardContent>
+      </Card>
     </Stack>
   );
 }

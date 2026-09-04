@@ -17,6 +17,7 @@ from mediaclipmakarr.clip_library import (
     ClipRevisionConflict,
     build_metadata_edit_plan,
     delete_clip,
+    embedded_revision_matches,
     list_clips,
     list_filter_options,
     list_unlinked_clip_ids,
@@ -42,6 +43,60 @@ from mediaclipmakarr.jobs.repository import (
 
 async def run_blocking(function, *args, **kwargs):
     return await asyncio.to_thread(function, *args, **kwargs)
+
+
+def _envelope(**overrides: object) -> bytes:
+    payload = {
+        "application": "MediaClipMakarr",
+        "schemaVersion": 4,
+        "clipId": "clip-one",
+        "revision": 1,
+    }
+    payload.update(overrides)
+    return b"padding bytes MediaClipMakarr " + json.dumps(payload).encode()
+
+
+def test_embedded_revision_matches_accepts_a_complete_envelope(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(_envelope())
+
+    assert embedded_revision_matches(path, "clip-one", 1) is True
+
+
+def test_embedded_revision_matches_rejects_a_fabricated_two_field_marker(tmp_path) -> None:
+    """A marker followed by only clipId/revision (no application/schemaVersion) must
+    not be mistaken for a genuine recovery envelope — see PR discussion on #46/#55."""
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b'padding MediaClipMakarr {"clipId":"clip-one","revision":1}')
+
+    assert embedded_revision_matches(path, "clip-one", 1) is False
+
+
+def test_embedded_revision_matches_rejects_wrong_application(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(_envelope(application="SomeOtherApp"))
+
+    assert embedded_revision_matches(path, "clip-one", 1) is False
+
+
+def test_embedded_revision_matches_rejects_missing_schema_version(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    payload = {
+        "application": "MediaClipMakarr",
+        "clipId": "clip-one",
+        "revision": 1,
+    }
+    path.write_bytes(b"padding bytes MediaClipMakarr " + json.dumps(payload).encode())
+
+    assert embedded_revision_matches(path, "clip-one", 1) is False
+
+
+def test_embedded_revision_matches_rejects_mismatched_clip_id_or_revision(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(_envelope())
+
+    assert embedded_revision_matches(path, "clip-two", 1) is False
+    assert embedded_revision_matches(path, "clip-one", 2) is False
 
 
 def clip_payload(path: Path, *, clip_id: str = "clip-one", title: str = "Pilot"):
@@ -302,7 +357,14 @@ async def test_metadata_edit_job_moves_file_records_history_and_rejects_stale_pl
 
     async def fake_rewrite(_source, output, metadata, **_kwargs):
         output.parent.mkdir(parents=True, exist_ok=True)
-        envelope = json.dumps({"clipId": metadata["id"], "revision": metadata["revision"]})
+        envelope = json.dumps(
+            {
+                "application": "MediaClipMakarr",
+                "schemaVersion": 4,
+                "clipId": metadata["id"],
+                "revision": metadata["revision"],
+            }
+        )
         output.write_bytes(b"new clip MediaClipMakarr " + envelope.encode())
 
     monkeypatch.setattr(runner_module, "rewrite_clip_metadata", fake_rewrite)
@@ -379,7 +441,10 @@ async def test_pending_metadata_edit_recovers_before_install_boundary(tmp_path) 
     source.write_bytes(b"old clip")
     temp = tmp_path / "work" / "jobs" / "edit" / "metadata.mp4"
     temp.parent.mkdir(parents=True)
-    temp.write_bytes(b'new clip MediaClipMakarr {"clipId":"clip-one","revision":2}')
+    temp.write_bytes(
+        b'new clip MediaClipMakarr {"application":"MediaClipMakarr","schemaVersion":4,'
+        b'"clipId":"clip-one","revision":2}'
+    )
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
     try:

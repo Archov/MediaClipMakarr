@@ -29,6 +29,7 @@ from mediaclipmakarr.clip_library import (
     build_immich_tag_paths,
     build_immich_upload_plan,
     build_thumbnail_job_plan,
+    embedded_revision_matches,
     generate_thumbnail,
     rewrite_clip_metadata,
     thumbnail_path,
@@ -660,21 +661,30 @@ class JobRunner:
             source_stat = await self.run_blocking(source.stat)
             recorded_size = clip.get("file_size_bytes")
             recorded_modified_ns = clip.get("file_modified_ns")
-            # Older clips (recorded before these columns existed, or inserted
-            # through a path that never populated them) have no fingerprint to
-            # compare against — nothing to detect drift against, so there's
-            # nothing to reject. Only compare when both are actually recorded.
-            if (
-                recorded_size is not None
-                and recorded_modified_ns is not None
-                and (
+            if recorded_size is not None and recorded_modified_ns is not None:
+                if (
                     source_stat.st_size != recorded_size
                     or source_stat.st_mtime_ns != recorded_modified_ns
+                ):
+                    raise ClipRevisionConflict(
+                        "The clip file changed before it could be uploaded to Immich."
+                    )
+            else:
+                # Older clips (recorded before these columns existed, or inserted
+                # through a path that never populated them) have no byte-level
+                # fingerprint to compare against. Every file this app renders
+                # embeds its clip id/revision in a `comment` metadata tag
+                # (see clip_library.recovery_envelope) — fall back to that
+                # identity check rather than trusting whatever currently occupies
+                # file_path.
+                identity_confirmed = await self.run_blocking(
+                    embedded_revision_matches, source, clip_id, int(clip["revision"])
                 )
-            ):
-                raise ClipRevisionConflict(
-                    "The clip file changed before it could be uploaded to Immich."
-                )
+                if not identity_confirmed:
+                    raise ClipRevisionConflict(
+                        "The clip file's identity could not be confirmed before "
+                        "uploading to Immich."
+                    )
             asset_id = await self.run_blocking(
                 upload_immich_asset_sync,
                 source,
