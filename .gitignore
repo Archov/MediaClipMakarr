@@ -199,3 +199,4 @@ data/tools/*
 !data/sources/.gitkeep
 .ffs_lock
 *.ffs_lock
+*.windows
