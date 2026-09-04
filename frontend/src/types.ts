@@ -289,9 +289,33 @@ export interface ImmichUploadJobResult {
   tags_applied: string[];
 }
 
+export interface BulkImmichUploadJobResultDetail {
+  clip_id: string;
+  title: string | null;
+  stage: "validate" | "upload";
+  outcome: "succeeded" | "partial" | "failed" | "skipped";
+  error_code: string | null;
+}
+
+export interface BulkImmichUploadJobResult {
+  total: number;
+  succeeded: number;
+  partial: number;
+  failed: number;
+  skipped: number;
+  reuploaded: number;
+  permission_warnings: string[];
+  details: BulkImmichUploadJobResultDetail[];
+}
+
 export interface JobSnapshot {
   id: string;
-  type: "clip_create" | "thumbnail_generate" | "clip_metadata_edit" | "immich_upload";
+  type:
+    | "clip_create"
+    | "thumbnail_generate"
+    | "clip_metadata_edit"
+    | "immich_upload"
+    | "bulk_immich_upload";
   state: JobState;
   stage: JobStage;
   progress: number;
@@ -299,7 +323,7 @@ export interface JobSnapshot {
   elapsed_ms: number | null;
   queue_position: number | null;
   message: string;
-  result: ClipJobResult | ImmichUploadJobResult | null;
+  result: ClipJobResult | ImmichUploadJobResult | BulkImmichUploadJobResult | null;
   error: StructuredError | null;
   created_at: string;
   started_at: string | null;

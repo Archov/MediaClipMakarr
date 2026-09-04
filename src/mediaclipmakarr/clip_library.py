@@ -168,6 +168,31 @@ def build_immich_upload_plan(clip: dict[str, Any]) -> ImmichUploadJobPlan:
     )
 
 
+class BulkImmichUploadJobPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    job_id: str
+    clip_ids: list[str]
+    # A fixed constant, not per-clip: only one bulk upload may be in flight at a
+    # time (the dedup this enables is a courtesy, not a correctness guard — each
+    # clip is re-checked against its current state before processing, so even a
+    # redundant concurrent bulk job would just skip everything the first already
+    # handled rather than double-upload anything).
+    operation_hash: str
+
+
+BULK_IMMICH_UPLOAD_OPERATION_HASH = "bulk_immich_upload"
+
+
+def build_bulk_immich_upload_plan(clip_ids: list[str]) -> BulkImmichUploadJobPlan:
+    return BulkImmichUploadJobPlan(
+        job_id=f"job-{uuid4()}",
+        clip_ids=clip_ids,
+        operation_hash=BULK_IMMICH_UPLOAD_OPERATION_HASH,
+    )
+
+
 class ClipRevisionConflict(RuntimeError):
     job_error_code = "CLIP_REVISION_CONFLICT"
     job_retryable = False
@@ -381,6 +406,38 @@ async def list_clips(
         total=total,
         pages=max(1, (total + effective_page_size - 1) // effective_page_size),
     )
+
+
+async def list_all_clip_ids(engine: AsyncEngine) -> list[str]:
+    """All clip ids, oldest first — the candidate set for a bulk Immich upload.
+
+    Deliberately unfiltered by upload state: the job itself classifies each clip
+    as skipped (already linked to the current server) or attempted, so the
+    reported counts add up to the full clip count rather than silently omitting
+    already-linked clips from the total."""
+    async with engine.connect() as connection:
+        rows = (
+            await connection.execute(text("SELECT id FROM clips ORDER BY created_at"))
+        ).all()
+    return [str(row[0]) for row in rows]
+
+
+async def list_unlinked_clip_ids(engine: AsyncEngine, normalized_immich_url: str) -> list[str]:
+    """Clip ids not linked to *this* Immich server — no association at all, or one
+    recorded against a different, previously-configured server (which is not
+    linked to the one we'd actually be uploading to)."""
+    async with engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT id FROM clips "
+                    "WHERE immich_asset_id IS NULL OR immich_server_url IS NOT :url "
+                    "ORDER BY created_at"
+                ),
+                {"url": normalized_immich_url},
+            )
+        ).all()
+    return [str(row[0]) for row in rows]
 
 
 async def list_libraries(engine: AsyncEngine) -> list[str]:

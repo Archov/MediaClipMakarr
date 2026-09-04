@@ -4,8 +4,11 @@
     {
       "name": "mediaclipmakarr-dev",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["launch.py"],
-      "port": 5173
+      "runtimeArgs": [
+        "-c",
+        "import scripts.dev as dev; dev.WINDOWS_ENV_FILE = dev.PROJECT_ROOT / '.env.claude.windows'; dev.main()"
+      ],
+      "port": 5273
     }
   ]
 }

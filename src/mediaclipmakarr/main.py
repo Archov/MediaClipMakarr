@@ -105,6 +105,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     tag_library=settings.immich_tag_library,
                     tag_show=settings.immich_tag_show,
                     tag_episode=settings.immich_tag_episode,
+                    auto_upload=settings.immich_auto_upload,
+                    timezone=settings.timezone,
                 )
 
             app.state.plex_session_poller = PlexSessionPoller(
