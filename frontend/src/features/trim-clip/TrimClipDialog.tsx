@@ -280,6 +280,21 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
 
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2} justifyContent="center">
               <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
+                <Tooltip title="Set Start to playhead">
+                  <span>
+                    <IconButton
+                      aria-label="Set Start to playhead"
+                      disabled={playheadMs >= endMs}
+                      onClick={() => {
+                        setActiveBoundary("start");
+                        setBoundaryToPlayhead("start");
+                      }}
+                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
+                    >
+                      <AddLocationAltRounded />
+                    </IconButton>
+                  </span>
+                </Tooltip>
                 {frameStepMs && (
                   <FrameNudgeButton
                     boundary="Start"
@@ -313,21 +328,6 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
                 )}
-                <Tooltip title="Set Start to playhead">
-                  <span>
-                    <IconButton
-                      aria-label="Set Start to playhead"
-                      disabled={playheadMs >= endMs}
-                      onClick={() => {
-                        setActiveBoundary("start");
-                        setBoundaryToPlayhead("start");
-                      }}
-                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
-                    >
-                      <AddLocationAltRounded />
-                    </IconButton>
-                  </span>
-                </Tooltip>
               </Stack>
               <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
                 {frameStepMs && (
