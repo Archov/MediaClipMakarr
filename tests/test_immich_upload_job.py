@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -13,8 +14,12 @@ from mediaclipmakarr.clip_library import ClipRevisionConflict, build_immich_uplo
 from mediaclipmakarr.clips import get_clip, insert_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
-from mediaclipmakarr.immich import ImmichAssetNotFoundError, ImmichInvalidResponseError
+from mediaclipmakarr.immich import (
+    ImmichAssetNotFoundError,
+    ImmichInvalidResponseError,
+)
 from mediaclipmakarr.jobs import (
+    ImmichJobSettings,
     JobEventBroker,
     JobRunner,
     claim_next_job,
@@ -60,9 +65,25 @@ def clip_payload(path: Path, *, clip_id: str = "clip-one", title: str = "Pilot")
     }
 
 
-def _make_runner(engine, tmp_path, *, immich_url: str = IMMICH_URL) -> JobRunner:
-    async def immich_settings_loader() -> tuple[str | None, str | None]:
-        return immich_url, "test-key"
+def _make_runner(
+    engine,
+    tmp_path,
+    *,
+    immich_url: str = IMMICH_URL,
+    default_tag: str = "",
+    tag_library: bool = False,
+    tag_show: bool = False,
+    tag_episode: bool = False,
+) -> JobRunner:
+    async def immich_settings_loader() -> ImmichJobSettings:
+        return ImmichJobSettings(
+            url=immich_url,
+            api_key="test-key",
+            default_tag=default_tag,
+            tag_library=tag_library,
+            tag_show=tag_show,
+            tag_episode=tag_episode,
+        )
 
     return JobRunner(
         engine,
@@ -127,7 +148,12 @@ async def test_immich_upload_succeeds_end_to_end(tmp_path, monkeypatch) -> None:
     assert description_calls == ["asset-remote-1"]
     assert snapshot is not None
     assert snapshot.state == "SUCCEEDED"
-    assert snapshot.result == {"clip_id": "clip-one", "immich_asset_id": "asset-remote-1"}
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": True,
+        "tags_applied": [],
+    }
     assert clip is not None
     assert clip["immich_asset_id"] == "asset-remote-1"
     assert clip["immich_server_url"] == IMMICH_URL
@@ -184,7 +210,12 @@ async def test_immich_upload_partial_on_description_failure_then_retry_succeeds(
 
     assert first_snapshot is not None
     assert first_snapshot.state == "PARTIAL"
-    assert first_snapshot.result == {"clip_id": "clip-one", "immich_asset_id": "asset-remote-1"}
+    assert first_snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": False,
+        "tags_applied": [],
+    }
     assert first_snapshot.error is not None
     assert first_snapshot.error.code == "IMMICH_INVALID_RESPONSE"
 
@@ -299,7 +330,12 @@ async def test_immich_upload_partial_when_local_association_write_loses_a_race(
 
     assert snapshot is not None
     assert snapshot.state == "PARTIAL"
-    assert snapshot.result == {"clip_id": "clip-one", "immich_asset_id": "asset-remote-new"}
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-new",
+        "description_set": False,
+        "tags_applied": [],
+    }
     assert snapshot.error is not None
     assert snapshot.error.code == "IMMICH_ASSET_ASSOCIATION_FAILED"
     # The description step must never have been reached for the orphaned remote asset.
@@ -460,3 +496,462 @@ async def test_enqueue_immich_upload_job_returns_winner_on_index_conflict(tmp_pa
 async def engine_scalar(engine, sql: str):
     async with engine.connect() as connection:
         return await connection.scalar(text(sql))
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_applies_default_and_hierarchy_tags_on_success(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    upsert_calls: list[list[str]] = []
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        upsert_calls.append(tag_paths)
+        return {path: f"tag-id-{index}" for index, path in enumerate(tag_paths)}
+
+    tag_asset_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        tag_asset_calls.append((asset_id, tag_ids))
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(
+            engine,
+            tmp_path,
+            default_tag="plex",
+            tag_library=True,
+            tag_show=False,
+            tag_episode=False,
+        )
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": True,
+        "tags_applied": ["plex", "TV Shows"],
+    }
+    assert upsert_calls == [["plex", "TV Shows"]]
+    assert tag_asset_calls == [("asset-remote-1", ["tag-id-0", "tag-id-1"])]
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_partial_when_tagging_fails_but_description_succeeds(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        raise ImmichInvalidResponseError("tag service unavailable")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, default_tag="plex")
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "PARTIAL"
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": True,
+        "tags_applied": [],
+    }
+    assert snapshot.error is not None
+    assert snapshot.error.code == "IMMICH_INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_partial_when_description_fails_but_tagging_succeeds(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        raise ImmichInvalidResponseError("description service unavailable")
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        return {path: f"tag-id-{index}" for index, path in enumerate(tag_paths)}
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        return None
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, default_tag="plex")
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "PARTIAL"
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": False,
+        "tags_applied": ["plex"],
+    }
+    assert snapshot.error is not None
+    assert snapshot.error.code == "IMMICH_INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_combines_errors_when_description_and_tagging_both_fail(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        raise ImmichInvalidResponseError("description service unavailable")
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        raise ImmichInvalidResponseError("tag service unavailable")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, default_tag="plex")
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "PARTIAL"
+    assert snapshot.result == {
+        "clip_id": "clip-one",
+        "immich_asset_id": "asset-remote-1",
+        "description_set": False,
+        "tags_applied": [],
+    }
+    assert snapshot.error is not None
+    assert snapshot.error.code == "IMMICH_ORGANIZE_FAILED"
+    assert "description service unavailable" in snapshot.error.message
+    assert "tag service unavailable" in snapshot.error.message
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_skips_tagging_step_when_nothing_configured(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("upsert_immich_tags should not be called with nothing configured")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fail_if_called)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        # Default runner from _make_runner has all tag settings off/empty.
+        runner = _make_runner(engine, tmp_path)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result["tags_applied"] == []
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_ignores_a_missing_fingerprint_baseline(
+    tmp_path, monkeypatch
+) -> None:
+    """Clips recorded before file_size_bytes/file_modified_ns existed (or inserted
+    through a path that never set them) have no baseline to compare against — the
+    fingerprint check must not treat "no baseline" as "changed"."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        payload = clip_payload(source)
+        payload["file_size_bytes"] = None
+        payload["file_modified_ns"] = None
+        await insert_clip(engine, payload)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        assert row["file_size_bytes"] is None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_removes_stale_tags_no_longer_resolved(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return "asset-remote-1"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        return {path: f"tag-id-for-{path}" for path in tag_paths}
+
+    tag_asset_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        tag_asset_calls.append((asset_id, tag_ids))
+
+    untag_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_untag_assets(tag_id, asset_ids, url, api_key):
+        untag_calls.append((tag_id, asset_ids))
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    monkeypatch.setattr(runner_module, "untag_immich_assets", fake_untag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, tag_library=True)
+        await runner._execute_claimed_job(claimed)
+        clip_after_first = await get_clip(engine, "clip-one", clip_root)
+
+        # Simulate the library having been renamed since the first upload (what a
+        # metadata edit would produce), without needing to run that job here.
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE clips SET library = :library WHERE id = :id"),
+                {"library": "Anime", "id": "clip-one"},
+            )
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        retry_plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, retry_plan)
+        retry_claimed = await _claim_immich_upload_job(engine, "run-two")
+        await runner._execute_claimed_job(retry_claimed)
+        clip_after_second = await get_clip(engine, "clip-one", clip_root)
+        second_snapshot = await get_job_snapshot(engine, retry_claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert clip_after_first is not None
+    assert json.loads(clip_after_first["immich_tag_ids"]) == ["tag-id-for-TV Shows"]
+
+    # The stale "TV Shows" tag must have been removed, and only the new "Anime"
+    # tag added — never both accumulating.
+    assert untag_calls == [("tag-id-for-TV Shows", ["asset-remote-1"])]
+    assert tag_asset_calls[-1] == ("asset-remote-1", ["tag-id-for-Anime"])
+    assert clip_after_second is not None
+    assert json.loads(clip_after_second["immich_tag_ids"]) == ["tag-id-for-Anime"]
+    assert second_snapshot is not None
+    assert second_snapshot.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_does_not_carry_stale_tag_ids_across_a_server_change(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return f"asset-for-{url}"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        return {path: f"tag-id-for-{url}" for path in tag_paths}
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        return None
+
+    untag_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_untag_assets(tag_id, asset_ids, url, api_key):
+        untag_calls.append((tag_id, asset_ids))
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    monkeypatch.setattr(runner_module, "untag_immich_assets", fake_untag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner_a = _make_runner(engine, tmp_path, immich_url=IMMICH_URL, tag_library=True)
+        await runner_a._execute_claimed_job(claimed)
+        clip_after_first = await get_clip(engine, "clip-one", clip_root)
+
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        second_plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, second_plan)
+        second_claimed = await _claim_immich_upload_job(engine, "run-two")
+        runner_b = _make_runner(
+            engine, tmp_path, immich_url=OTHER_IMMICH_URL, tag_library=True
+        )
+        await runner_b._execute_claimed_job(second_claimed)
+        clip_after_second = await get_clip(engine, "clip-one", clip_root)
+    finally:
+        await engine.dispose()
+
+    assert clip_after_first is not None
+    assert json.loads(clip_after_first["immich_tag_ids"]) == [f"tag-id-for-{IMMICH_URL}"]
+
+    # The fresh upload to the second server must never have tried to remove a
+    # tag id that only ever existed on the first server.
+    assert untag_calls == []
+    assert clip_after_second is not None
+    assert json.loads(clip_after_second["immich_tag_ids"]) == [f"tag-id-for-{OTHER_IMMICH_URL}"]

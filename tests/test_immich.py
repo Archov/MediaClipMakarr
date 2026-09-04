@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -9,8 +10,12 @@ from mediaclipmakarr.immich import (
     ImmichAssetNotFoundError,
     ImmichAuthError,
     ImmichInvalidResponseError,
+    ImmichUnreachableError,
     set_immich_asset_description,
+    tag_immich_assets,
+    untag_immich_assets,
     upload_immich_asset_sync,
+    upsert_immich_tags,
 )
 from mediaclipmakarr.immich import test_immich_connection as check_immich_connection
 
@@ -285,4 +290,204 @@ async def test_set_immich_asset_description_raises_not_found_on_400() -> None:
                 "http://immich.example:2283",
                 "valid-key",
                 client=client,
+            )
+
+
+@pytest.mark.asyncio
+async def test_upsert_immich_tags_returns_path_to_id_map() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/api/tags"
+        payload = json.loads(request.read())
+        assert payload == {"tags": ["TV Shows", "TV Shows/Breaking Bad"]}
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "tag-library",
+                    "name": "TV Shows",
+                    "value": "TV Shows",
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z",
+                },
+                {
+                    "id": "tag-show",
+                    "name": "Breaking Bad",
+                    "value": "TV Shows/Breaking Bad",
+                    "parentId": "tag-library",
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z",
+                },
+            ],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await upsert_immich_tags(
+            ["TV Shows", "TV Shows/Breaking Bad"],
+            "http://immich.example:2283",
+            "valid-key",
+            client=client,
+        )
+
+    assert result == {"TV Shows": "tag-library", "TV Shows/Breaking Bad": "tag-show"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_immich_tags_raises_auth_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAuthError):
+            await upsert_immich_tags(
+                ["Tag"], "http://immich.example:2283", "bad-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_upsert_immich_tags_raises_unreachable_on_transport_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichUnreachableError):
+            await upsert_immich_tags(
+                ["Tag"], "http://missing.example:2283", "key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_upsert_immich_tags_raises_invalid_response_on_malformed_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"not": "a list"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await upsert_immich_tags(
+                ["Tag"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_succeeds() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/api/tags/assets"
+        return httpx.Response(200, json=[{"id": "asset-123", "success": True}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await tag_immich_assets(
+            "asset-123",
+            ["tag-1", "tag-2"],
+            "http://immich.example:2283",
+            "valid-key",
+            client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_raises_invalid_response_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await tag_immich_assets(
+                "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_treats_a_duplicate_result_as_success() -> None:
+    # HTTP 200 with a per-asset "already tagged" result must not be reported as
+    # a failure — it's the desired end state, just not newly achieved this call.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "duplicate"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await tag_immich_assets(
+            "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_raises_on_a_per_asset_failure_despite_http_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "no_permission"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await tag_immich_assets(
+                "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_raises_when_the_asset_is_missing_from_the_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": "some-other-asset", "success": True}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await tag_immich_assets(
+                "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_succeeds() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/tags/tag-1/assets"
+        assert json.loads(request.read()) == {"ids": ["asset-123"]}
+        return httpx.Response(200, json=[{"id": "asset-123", "success": True}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await untag_immich_assets(
+            "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_raises_invalid_response_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await untag_immich_assets(
+                "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_treats_not_found_as_success() -> None:
+    # The asset already didn't have this tag — the goal (tag not applied) is
+    # already achieved, so this must not be reported as a failure.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "not_found"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await untag_immich_assets(
+            "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_raises_on_a_per_asset_failure_despite_http_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "no_permission"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await untag_immich_assets(
+                "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
             )

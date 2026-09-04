@@ -468,13 +468,13 @@ Users can manually or automatically upload clips to Immich, organize them with t
 
 **Depends on:** P4-01.
 
-## P4-03 — Organize uploads with tags and albums
+## P4-03 — Organize uploads with tags
 
-**User outcome:** Users can select/create tags and albums and apply automatic Plex-derived hierarchy.
+**User outcome:** Users can select/create tags and apply automatic Plex-derived hierarchy.
 
 **Implementation:**
 
-- Fetch existing tags/albums for selection, create new ones, and support multiple albums.
+- Fetch existing tags, create new ones.
 - Apply the configured default tag.
 - Implement Library → Show/Movie → Episode hierarchical tag creation with dependency rules and idempotent lookup/create behavior.
 - Persist per-step success/failure details for retry and support diagnostics.

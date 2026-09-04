@@ -23,6 +23,7 @@ from mediaclipmakarr.config import Settings, load_settings, validate_path_layout
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import initialize_writable_directories, inspect_media_tools
 from mediaclipmakarr.jobs import (
+    ImmichJobSettings,
     JobEventBroker,
     JobRunner,
 )
@@ -95,9 +96,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async def load_cached_plex_token() -> str | None:
                 return app.state.effective_application_settings.plex_token
 
-            async def load_cached_immich_settings() -> tuple[str | None, str | None]:
+            async def load_cached_immich_settings() -> ImmichJobSettings:
                 settings = app.state.effective_application_settings
-                return settings.immich_url, settings.immich_api_key
+                return ImmichJobSettings(
+                    url=settings.immich_url,
+                    api_key=settings.immich_api_key,
+                    default_tag=settings.immich_default_tag,
+                    tag_library=settings.immich_tag_library,
+                    tag_show=settings.immich_tag_show,
+                    tag_episode=settings.immich_tag_episode,
+                )
 
             app.state.plex_session_poller = PlexSessionPoller(
                 load_cached_application_settings

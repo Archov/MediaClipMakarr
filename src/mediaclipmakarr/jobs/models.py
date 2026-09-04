@@ -20,6 +20,7 @@ JobStage = Literal[
     "updating_metadata",
     "uploading_asset",
     "setting_description",
+    "applying_tags",
     "finalizing",
     "complete",
     "failed",

@@ -19,10 +19,11 @@ from .repository import (
     transition_to_finalizing,
     update_running_job,
 )
-from .runner import JobRunner
+from .runner import ImmichJobSettings, JobRunner
 
 __all__ = [
     "ClaimedJob",
+    "ImmichJobSettings",
     "JobError",
     "JobEventBroker",
     "JobRunner",

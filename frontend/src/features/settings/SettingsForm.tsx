@@ -67,9 +67,6 @@ const IMMICH_REQUIRED_PERMISSIONS: ImmichPermission[] = [
   { scope: "tag.read", conditional: false },
   { scope: "tag.create", conditional: false },
   { scope: "tag.asset", conditional: false },
-  { scope: "album.read", conditional: false },
-  { scope: "album.create", conditional: false },
-  { scope: "albumAsset.create", conditional: false },
   { scope: "asset.delete", conditional: true },
 ];
 
@@ -779,7 +776,19 @@ export function SettingsForm({
                         size="small"
                         checked={immichTagShow}
                         disabled={managed("immich_tag_show")}
-                        onChange={(event) => setImmichTagShow(event.target.checked)}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setImmichTagShow(checked);
+                          // Episode nests under Show — turning Show off leaves no
+                          // parent for a stale "Episode was on" setting to nest
+                          // under, so cascade it off too rather than leaving it
+                          // silently armed for whenever Show gets re-enabled.
+                          // Skip this when Episode is environment-managed: autosave
+                          // never persists a managed field, so a local-only "false"
+                          // here would just diverge from the real (managed) value
+                          // until a resync happens to overwrite it back.
+                          if (!checked && !managed("immich_tag_episode")) setImmichTagEpisode(false);
+                        }}
                       />
                     }
                     label="Show/movie name"
@@ -789,7 +798,7 @@ export function SettingsForm({
                       <Checkbox
                         size="small"
                         checked={immichTagEpisode}
-                        disabled={managed("immich_tag_episode")}
+                        disabled={managed("immich_tag_episode") || !immichTagShow}
                         onChange={(event) => setImmichTagEpisode(event.target.checked)}
                       />
                     }

@@ -596,6 +596,76 @@ def automatic_title(metadata: dict[str, Any]) -> str:
     )
 
 
+def _sanitize_tag_segment(value: str) -> str:
+    """A tag-path segment must not itself contain "/" — that's the hierarchy
+    separator Immich's tag upsert parses on — so a literal slash in clip metadata
+    (a show or episode title, say) is replaced rather than left to silently split
+    into extra, unintended tag levels."""
+    return value.replace("/", "-")
+
+
+def build_immich_tag_paths(
+    clip: dict[str, Any],
+    *,
+    default_tag: str,
+    tag_library: bool,
+    tag_show: bool,
+    tag_episode: bool,
+) -> list[str]:
+    """Build the Immich tag paths to upsert and apply for a clip: the flat
+    default tag (if configured) and a Library / Show(-or-Movie) / Episode
+    hierarchy path (if any level is enabled and has data).
+
+    Library and Show are independent of each other (neither gates the other)
+    but both nest as path prefixes when present. Episode only ever nests under
+    an actually-present Show segment — it depends on Show, not on Library, and
+    never applies to a movie regardless of its own toggle.
+    """
+    paths: list[str] = []
+    cleaned_default = _clean(default_tag)
+    if cleaned_default:
+        paths.append(_sanitize_tag_segment(cleaned_default))
+
+    segments: list[str] = []
+    if tag_library:
+        library = _clean(clip.get("library"))
+        if library:
+            segments.append(_sanitize_tag_segment(library))
+
+    show_appended = False
+    if tag_show:
+        # Select strictly by the clip's current media_type, not by whichever
+        # field happens to be non-empty — a clip reclassified from episode to
+        # movie (or vice versa) can still carry a stale show_name/movie_title
+        # from before the change, and that must not leak into the tag path.
+        media_type = clip.get("media_type")
+        level_two = None
+        if media_type == "episode":
+            level_two = _clean(clip.get("show_name"))
+        elif media_type == "movie":
+            level_two = _clean(clip.get("movie_title"))
+        if level_two:
+            segments.append(_sanitize_tag_segment(level_two))
+            show_appended = True
+
+    if tag_episode and show_appended and clip.get("media_type") == "episode":
+        season = clip.get("season_number")
+        episode = clip.get("episode_number")
+        episode_title = _clean(clip.get("episode_title"))
+        code = (
+            f"S{int(season):02d}E{int(episode):02d}"
+            if season is not None and episode is not None
+            else None
+        )
+        level_three = " - ".join(part for part in (code, episode_title) if part)
+        if level_three:
+            segments.append(_sanitize_tag_segment(level_three))
+
+    if segments:
+        paths.append("/".join(segments))
+    return paths
+
+
 def recovery_envelope(metadata: dict[str, Any]) -> str:
     payload = {
         "schemaVersion": 4,

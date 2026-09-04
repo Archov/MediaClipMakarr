@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -135,6 +136,32 @@ async def set_clip_immich_asset_id(
             raise ImmichAssetAssociationConflict(
                 f"Clip {clip_id} already has a different Immich asset recorded for this server."
             )
+
+
+def parse_stored_immich_tag_ids(value: object) -> list[str]:
+    """Decode the `immich_tag_ids` column (a JSON array, or NULL) into a list."""
+    if not value:
+        return []
+    try:
+        decoded = json.loads(str(value))
+    except ValueError:
+        return []
+    return [str(item) for item in decoded] if isinstance(decoded, list) else []
+
+
+async def set_clip_immich_tag_ids(engine: AsyncEngine, clip_id: str, tag_ids: list[str]) -> None:
+    """Durably record which Immich tag ids are currently applied to a clip.
+
+    This is a best-effort cache of reality, not a guarded association like
+    `set_clip_immich_asset_id` — it exists purely so the next upload/organize run
+    can diff against it to remove tags that are no longer wanted (e.g. after the
+    clip's library or show name changes), rather than only ever adding new ones.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE clips SET immich_tag_ids = :tag_ids WHERE id = :id"),
+            {"id": clip_id, "tag_ids": json.dumps(tag_ids)},
+        )
 
 
 async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:

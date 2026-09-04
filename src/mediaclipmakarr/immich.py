@@ -320,3 +320,182 @@ async def set_immich_asset_description(
     finally:
         if owns_client:
             await active_client.aclose()
+
+
+async def upsert_immich_tags(
+    tag_paths: list[str],
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, str]:
+    """Create or look up one or more `/`-separated hierarchical tag paths.
+
+    Immich creates (or reuses) every ancestor segment of each path automatically —
+    this is the "idempotent lookup/create" behavior; nothing extra is needed on our
+    side to make repeated calls with the same paths safe. Returns `{path: tag_id}`.
+    """
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.put(
+                f"{normalized_url}/api/tags",
+                headers={"x-api-key": immich_api_key, "Content-Type": "application/json"},
+                json={"tags": tag_paths},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while upserting tags: {error}"
+            ) from error
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError("Immich rejected the configured API key while upserting tags.")
+        if response.status_code != 200:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while upserting tags."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while upserting tags."
+            ) from error
+        if not isinstance(payload, list):
+            raise ImmichInvalidResponseError(
+                "Immich did not return a tag list while upserting tags."
+            )
+        result: dict[str, str] = {}
+        for entry in payload:
+            if isinstance(entry, dict) and entry.get("id") and entry.get("value"):
+                result[str(entry["value"])] = str(entry["id"])
+        return result
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+def _require_bulk_success(
+    payload: object, asset_id: str, *, acceptable_errors: set[str], action: str
+) -> None:
+    """Check one asset's entry in a bulk tag/untag response array.
+
+    HTTP 200 from these endpoints only means the request was well-formed — each
+    asset gets its own `{id, success, error?}` result, and a `success: false`
+    entry (e.g. `no_permission`, `validation`) must not be treated as done just
+    because the surrounding request succeeded.
+    """
+    if not isinstance(payload, list):
+        raise ImmichInvalidResponseError(f"Immich did not return a result list while {action}.")
+    entry = next(
+        (item for item in payload if isinstance(item, dict) and item.get("id") == asset_id),
+        None,
+    )
+    if entry is None:
+        raise ImmichInvalidResponseError(
+            f"Immich did not report a result for the asset while {action}."
+        )
+    if entry.get("success") is True or entry.get("error") in acceptable_errors:
+        return
+    raise ImmichInvalidResponseError(
+        f"Immich reported failure ({entry.get('error') or 'unknown'}) while {action}."
+    )
+
+
+async def tag_immich_assets(
+    asset_id: str,
+    tag_ids: list[str],
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.put(
+                f"{normalized_url}/api/tags/assets",
+                headers={"x-api-key": immich_api_key, "Content-Type": "application/json"},
+                json={"assetIds": [asset_id], "tagIds": tag_ids},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while tagging the asset: {error}"
+            ) from error
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError("Immich rejected the configured API key while tagging the asset.")
+        if response.status_code != 200:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while tagging the asset."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while tagging the asset."
+            ) from error
+        # HTTP 200 only means the request was well-formed — each requested asset
+        # gets its own success/error entry, and a false success here would let the
+        # runner durably record a tag id as applied when it never actually was.
+        _require_bulk_success(
+            payload, asset_id, acceptable_errors={"duplicate"}, action="tagging the asset"
+        )
+    finally:
+        if owns_client:
+            await active_client.aclose()
+
+
+async def untag_immich_assets(
+    tag_id: str,
+    asset_ids: list[str],
+    immich_url: str,
+    immich_api_key: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Remove one tag from the given assets — used to clean up a tag that a clip
+    no longer resolves to (e.g. its library or show name changed since the last
+    upload), so re-tagging only ever adds tags without this call would otherwise
+    leave stale, superseded tags applied forever."""
+    normalized_url = normalize_immich_url(immich_url)
+    owns_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    try:
+        try:
+            response = await active_client.request(
+                "DELETE",
+                f"{normalized_url}/api/tags/{tag_id}/assets",
+                headers={"x-api-key": immich_api_key, "Content-Type": "application/json"},
+                json={"ids": asset_ids},
+            )
+        except httpx.RequestError as error:
+            raise ImmichUnreachableError(
+                f"The Immich server could not be reached while removing a tag: {error}"
+            ) from error
+        if response.status_code in {401, 403}:
+            raise ImmichAuthError("Immich rejected the configured API key while removing a tag.")
+        if response.status_code != 200:
+            raise ImmichInvalidResponseError(
+                f"Immich returned HTTP {response.status_code} while removing a tag."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while removing a tag."
+            ) from error
+        for target_asset_id in asset_ids:
+            # "not_found" here means the asset already didn't have this tag — the
+            # goal (tag not applied) is already achieved, so that's an acceptable
+            # outcome, not a failure to report.
+            _require_bulk_success(
+                payload,
+                target_asset_id,
+                acceptable_errors={"not_found", "duplicate"},
+                action="removing a tag",
+            )
+    finally:
+        if owns_client:
+            await active_client.aclose()
