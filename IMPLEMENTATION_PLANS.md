@@ -489,20 +489,22 @@ Users can manually or automatically upload clips to Immich, organize them with t
 
 ## P4-04 — Add automatic and bulk upload workflows
 
-**User outcome:** New clips can upload automatically, and existing unlinked clips can be processed in bulk.
+**User outcome:** New clips can upload automatically, and the whole library can be validated and uploaded in bulk.
 
 **Implementation:**
 
 - Chain an Immich upload step after successful local clip finalization when enabled.
-- Keep local creation successful when automatic upload fails; represent the overall optional step clearly.
-- Add a bulk job that snapshots currently unlinked clip IDs, processes them sequentially, continues after individual failures, and reports totals/details.
-- Ensure retries skip clips that acquired an association after the bulk snapshot.
+- Keep local creation successful when automatic upload fails; represent the overall optional step clearly (the clip-creation screen surfaces the chained upload job's own status once it exists).
+- Add a bulk job that snapshots every clip, classifies each relative to the currently configured Immich server (linked vs. unlinked — a clip linked to a different/stale server counts as unlinked), processes them sequentially, continues after individual failures, and reports totals/details.
+- Already-linked clips are re-validated each run, not merely skipped: check the asset still exists, and — API key permissions allowing — re-sync its description and tags. This deliberately widens the operation beyond "upload only what's new," so it also catches an asset deleted directly in Immich or local metadata (title, library, show) that drifted after the clip was first uploaded. A key missing the relevant permissions degrades gracefully (existence-check only, or skip validation entirely) rather than failing the whole run.
+- Ensure retries skip clips that acquired an association to the currently configured server after the bulk snapshot was taken (a redundant concurrent bulk run is self-correcting, not a failure).
 
 **Acceptance criteria:**
 
 - Auto-upload failure never rolls back a valid local clip.
 - Bulk upload continues after failure and reports succeeded, skipped, partial, and failed counts.
 - A browser refresh reconnects to the same bulk job.
+- Bulk-job enqueue is protected at the database layer against a duplicate concurrent request, since it may run concurrently with the rest of the job queue rather than strictly sequentially.
 
 **Depends on:** P4-02, P4-03.
 
