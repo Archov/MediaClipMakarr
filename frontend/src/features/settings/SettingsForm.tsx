@@ -134,6 +134,10 @@ export function SettingsForm({
   const [immichPermissionsOpen, setImmichPermissionsOpen] = useState(false);
 
   const [timezone, setTimezone] = useState(() => initialTimezone(settings));
+  // On a fresh install the initial timezone above is only a browser-detected guess,
+  // not a real edit — it must not auto-save on its own. Only a genuine selection
+  // from the control (or an already-configured value differing from it) counts.
+  const [timezoneTouched, setTimezoneTouched] = useState(false);
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
 
@@ -157,55 +161,105 @@ export function SettingsForm({
     if (settings.immich_api_key_configured) setImmichUrlUnlocked(false);
   }, [settings.immich_api_key_configured]);
 
-  // Whenever `settings` refreshes from the server (initial load, or after a Test
-  // connection or auto-save round-trip elsewhere), each field below only adopts the
-  // fresh value if the local draft still matches what we last knew the server to have.
-  // If it doesn't, there's an edit in progress that this refresh knows nothing about —
-  // leave it alone rather than clobbering it with a now-stale response, and the
-  // diff-based auto-save effect below will pick it up and save it normally.
+  // For each field the auto-save effect below manages, the value we believe the
+  // server currently holds: seeded from `settings` on load, optimistically advanced
+  // the moment we dispatch a save for it (before the response arrives), and adopted
+  // as the new baseline whenever a refresh confirms the local draft still matches it.
+  // A refresh only ever overwrites a field's draft when the draft equals this
+  // baseline — i.e. nothing has changed locally since we last told the server (or
+  // last learned) what the field holds. Unlike comparing against a single frozen
+  // "previous settings" snapshot, this correctly survives an A→B→A revert made while
+  // the A→B save is still in flight: the reverted draft no longer matches the
+  // optimistic B baseline, so the in-flight response landing later leaves it alone,
+  // and the diff-based auto-save effect notices the mismatch against server truth and
+  // resends the revert on its own.
+  const knownValuesRef = useRef({
+    plexUrl: settings.plex_url,
+    mappings: settings.source_path_mappings,
+    timezone: initialTimezone(settings),
+    x264Preset: settings.x264_preset,
+    immichUrl: settings.immich_url,
+    immichDefaultTag: settings.immich_default_tag,
+    immichAutoUpload: settings.immich_auto_upload,
+    immichManageRemote: settings.immich_manage_remote,
+    immichTagLibrary: settings.immich_tag_library,
+    immichTagShow: settings.immich_tag_show,
+    immichTagEpisode: settings.immich_tag_episode,
+  });
+
+  // The Plex token / Immich API key masks are driven purely by their "configured"
+  // booleans (set only via Test connection or an explicit clear), not by the general
+  // auto-save flow, so they still just compare against the previous settings snapshot.
   const previousSettingsRef = useRef(settings);
   useEffect(() => {
     const previous = previousSettingsRef.current;
     previousSettingsRef.current = settings;
+    const known = knownValuesRef.current;
 
-    setPlexUrl((current) => (current === previous.plex_url ? settings.plex_url : current));
     setPlexToken((current) => {
       const previousDraft = secretDraft(previous.plex_token_configured);
       return current === previousDraft ? secretDraft(settings.plex_token_configured) : current;
     });
-    setImmichUrl((current) => (current === previous.immich_url ? settings.immich_url : current));
     setImmichApiKey((current) => {
       const previousDraft = secretDraft(previous.immich_api_key_configured);
       return current === previousDraft ? secretDraft(settings.immich_api_key_configured) : current;
     });
-    setImmichDefaultTag((current) =>
-      current === previous.immich_default_tag ? settings.immich_default_tag : current,
-    );
-    setImmichAutoUpload((current) =>
-      current === previous.immich_auto_upload ? settings.immich_auto_upload : current,
-    );
-    setImmichManageRemote((current) =>
-      current === previous.immich_manage_remote ? settings.immich_manage_remote : current,
-    );
-    setImmichTagLibrary((current) =>
-      current === previous.immich_tag_library ? settings.immich_tag_library : current,
-    );
-    setImmichTagShow((current) =>
-      current === previous.immich_tag_show ? settings.immich_tag_show : current,
-    );
-    setImmichTagEpisode((current) =>
-      current === previous.immich_tag_episode ? settings.immich_tag_episode : current,
-    );
-    setTimezone((current) => {
-      const previousInitial = initialTimezone(previous);
-      return current === previousInitial ? initialTimezone(settings) : current;
+
+    setPlexUrl((current) => {
+      if (current !== known.plexUrl) return current;
+      known.plexUrl = settings.plex_url;
+      return settings.plex_url;
     });
-    setX264Preset((current) => (current === previous.x264_preset ? settings.x264_preset : current));
-    setMappings((current) =>
-      JSON.stringify(current) === JSON.stringify(previous.source_path_mappings)
-        ? settings.source_path_mappings
-        : current,
-    );
+    setMappings((current) => {
+      if (JSON.stringify(current) !== JSON.stringify(known.mappings)) return current;
+      known.mappings = settings.source_path_mappings;
+      return settings.source_path_mappings;
+    });
+    setTimezone((current) => {
+      if (current !== known.timezone) return current;
+      known.timezone = initialTimezone(settings);
+      return known.timezone;
+    });
+    setX264Preset((current) => {
+      if (current !== known.x264Preset) return current;
+      known.x264Preset = settings.x264_preset;
+      return settings.x264_preset;
+    });
+    setImmichUrl((current) => {
+      if (current !== known.immichUrl) return current;
+      known.immichUrl = settings.immich_url;
+      return settings.immich_url;
+    });
+    setImmichDefaultTag((current) => {
+      if (current !== known.immichDefaultTag) return current;
+      known.immichDefaultTag = settings.immich_default_tag;
+      return settings.immich_default_tag;
+    });
+    setImmichAutoUpload((current) => {
+      if (current !== known.immichAutoUpload) return current;
+      known.immichAutoUpload = settings.immich_auto_upload;
+      return settings.immich_auto_upload;
+    });
+    setImmichManageRemote((current) => {
+      if (current !== known.immichManageRemote) return current;
+      known.immichManageRemote = settings.immich_manage_remote;
+      return settings.immich_manage_remote;
+    });
+    setImmichTagLibrary((current) => {
+      if (current !== known.immichTagLibrary) return current;
+      known.immichTagLibrary = settings.immich_tag_library;
+      return settings.immich_tag_library;
+    });
+    setImmichTagShow((current) => {
+      if (current !== known.immichTagShow) return current;
+      known.immichTagShow = settings.immich_tag_show;
+      return settings.immich_tag_show;
+    });
+    setImmichTagEpisode((current) => {
+      if (current !== known.immichTagEpisode) return current;
+      known.immichTagEpisode = settings.immich_tag_episode;
+      return settings.immich_tag_episode;
+    });
   }, [settings]);
 
   const managed = (field: ApplicationSettingField) => settings.environment_managed[field];
@@ -233,7 +287,13 @@ export function SettingsForm({
     ) {
       update.source_path_mappings = mappings;
     }
-    if (!managed("timezone") && timezone !== settings.timezone) update.timezone = timezone;
+    if (
+      !managed("timezone") &&
+      (settings.timezone_configured || timezoneTouched) &&
+      timezone !== settings.timezone
+    ) {
+      update.timezone = timezone;
+    }
     if (!managed("x264_preset") && x264Preset !== settings.x264_preset) {
       update.x264_preset = x264Preset;
     }
@@ -258,7 +318,24 @@ export function SettingsForm({
     }
     if (Object.keys(update).length === 0) return;
 
-    const timer = setTimeout(() => autoSave.mutate(update), AUTO_SAVE_DEBOUNCE_MS);
+    const timer = setTimeout(() => {
+      // Advance the optimistic baseline for exactly the fields we're about to send,
+      // so the resync effect can tell a value confirmed by this save apart from one
+      // edited again in the meantime (see knownValuesRef above).
+      const known = knownValuesRef.current;
+      if (update.plex_url !== undefined) known.plexUrl = update.plex_url;
+      if (update.source_path_mappings !== undefined) known.mappings = update.source_path_mappings;
+      if (update.timezone !== undefined) known.timezone = update.timezone;
+      if (update.x264_preset !== undefined) known.x264Preset = update.x264_preset;
+      if (update.immich_url !== undefined) known.immichUrl = update.immich_url;
+      if (update.immich_default_tag !== undefined) known.immichDefaultTag = update.immich_default_tag;
+      if (update.immich_auto_upload !== undefined) known.immichAutoUpload = update.immich_auto_upload;
+      if (update.immich_manage_remote !== undefined) known.immichManageRemote = update.immich_manage_remote;
+      if (update.immich_tag_library !== undefined) known.immichTagLibrary = update.immich_tag_library;
+      if (update.immich_tag_show !== undefined) known.immichTagShow = update.immich_tag_show;
+      if (update.immich_tag_episode !== undefined) known.immichTagEpisode = update.immich_tag_episode;
+      autoSave.mutate(update);
+    }, AUTO_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -266,6 +343,7 @@ export function SettingsForm({
     plexUrl,
     mappings,
     timezone,
+    timezoneTouched,
     x264Preset,
     immichUrl,
     immichDefaultTag,
@@ -373,17 +451,18 @@ export function SettingsForm({
       });
       return;
     }
+    // Only the credential pair is saved here, gated on a freshly-submitted key, same
+    // as Plex. The plain-config fields (default tag, auto-upload, tag toggles) are
+    // already kept in sync by the general auto-save effect above; duplicating them
+    // here meant the automatic mount-time connection check (which runs with no
+    // submitted key) always had a non-empty save payload built from its stale
+    // mount-time closure, letting it clobber a since-auto-saved edit once it finally
+    // resolved.
     testImmich.mutate({
       test: submittedKey ? { immich_url: immichUrl, immich_api_key: submittedKey } : {},
       save: {
         ...(!managed("immich_url") && submittedKey && { immich_url: immichUrl }),
         ...(!managed("immich_api_key") && submittedKey && { immich_api_key: submittedKey }),
-        ...(!managed("immich_default_tag") && { immich_default_tag: immichDefaultTag }),
-        ...(!managed("immich_auto_upload") && { immich_auto_upload: immichAutoUpload }),
-        ...(!managed("immich_manage_remote") && { immich_manage_remote: immichManageRemote }),
-        ...(!managed("immich_tag_library") && { immich_tag_library: immichTagLibrary }),
-        ...(!managed("immich_tag_show") && { immich_tag_show: immichTagShow }),
-        ...(!managed("immich_tag_episode") && { immich_tag_episode: immichTagEpisode }),
       },
     });
   };
@@ -920,7 +999,10 @@ export function SettingsForm({
                     options={settings.available_timezones}
                     value={timezone}
                     disabled={managed("timezone")}
-                    onChange={(_event, value) => setTimezone(value)}
+                    onChange={(_event, value) => {
+                      setTimezone(value);
+                      setTimezoneTouched(true);
+                    }}
                     renderInput={(parameters) => (
                       <TextField
                         {...parameters}
