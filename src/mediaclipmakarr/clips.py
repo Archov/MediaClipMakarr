@@ -121,12 +121,16 @@ async def set_clip_immich_asset_id(
     Refuses to silently overwrite an association already recorded for the *same*
     server (a genuine conflict, e.g. a concurrent duplicate run landing between this
     caller's read and this write) while still allowing replacement when the
-    configured server has changed.
+    configured server has changed. Also clears any cached `immich_tag_ids` in the
+    same write: that cache belongs to whichever asset+server was previously
+    recorded, and leaving it in place would let a later run reload tag ids that are
+    foreign to the new association and send them to the new server.
     """
     async with engine.begin() as connection:
         result = await connection.execute(
             text(
-                "UPDATE clips SET immich_asset_id = :asset_id, immich_server_url = :server_url "
+                "UPDATE clips SET immich_asset_id = :asset_id, immich_server_url = :server_url, "
+                "immich_tag_ids = NULL "
                 "WHERE id = :id AND "
                 "(immich_asset_id IS NULL OR immich_server_url IS NOT :server_url)"
             ),
