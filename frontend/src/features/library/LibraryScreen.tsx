@@ -24,7 +24,6 @@ import {
   FormControl,
   IconButton,
   InputLabel,
-  LinearProgress,
   Menu,
   MenuItem,
   Pagination,
@@ -43,7 +42,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
-  bulkUploadClipsToImmich,
   deleteClip,
   fetchClipFilterOptions,
   fetchClips,
@@ -52,11 +50,8 @@ import {
   updateClipMetadata,
   uploadClipToImmich,
 } from "../../api";
-import type { BulkImmichUploadJobResult, ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
-import { useJobSnapshot } from "../make-clip/hooks";
+import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
 import { DeleteClipDialog, MetadataDialog } from "./ClipDialogs";
-
-const ACTIVE_BULK_UPLOAD_JOB_KEY = "mediaclipmakarr.activeBulkUploadJobId";
 
 const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 
@@ -251,10 +246,6 @@ export function LibraryScreen() {
   const [deleting, setDeleting] = useState<ClipRecord | null>(null);
   const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
   const [editJobId, setEditJobId] = useState<string | null>(null);
-  const [bulkUploadJob, setBulkUploadJob] = useState<JobSnapshot | null>(null);
-  const [bulkUploadJobId, setBulkUploadJobId] = useState<string | null>(() =>
-    typeof window === "undefined" ? null : window.sessionStorage.getItem(ACTIVE_BULK_UPLOAD_JOB_KEY),
-  );
   const layoutRef = useRef<HTMLDivElement>(null);
   const [layoutWidth, setLayoutWidth] = useState(0);
   const queryClient = useQueryClient();
@@ -354,34 +345,6 @@ export function LibraryScreen() {
       setDeleteNotice(result.cleanup_warnings.length ? result.cleanup_warnings.join(" ") : null);
     },
   });
-  const activeBulkUploadJob = useJobSnapshot(bulkUploadJob, bulkUploadJobId);
-  const bulkUploadTerminal = activeBulkUploadJob ? !NONTERMINAL_JOB_STATES.has(activeBulkUploadJob.state) : false;
-  useEffect(() => {
-    if (activeBulkUploadJob && bulkUploadTerminal) {
-      void queryClient.invalidateQueries({ queryKey: ["clips"] });
-      window.sessionStorage.removeItem(ACTIVE_BULK_UPLOAD_JOB_KEY);
-    }
-    // Only re-run when the job transitions into a terminal state, not on every
-    // in-flight progress update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeBulkUploadJob?.id, bulkUploadTerminal, queryClient]);
-  const bulkUploadMutation = useMutation({
-    mutationFn: bulkUploadClipsToImmich,
-    onSuccess: (job: JobSnapshot) => {
-      setBulkUploadJob(job);
-      setBulkUploadJobId(job.id);
-      window.sessionStorage.setItem(ACTIVE_BULK_UPLOAD_JOB_KEY, job.id);
-    },
-  });
-  const dismissBulkUploadSummary = () => {
-    setBulkUploadJob(null);
-    setBulkUploadJobId(null);
-    window.sessionStorage.removeItem(ACTIVE_BULK_UPLOAD_JOB_KEY);
-  };
-  const bulkUploadResult = bulkUploadTerminal ? (activeBulkUploadJob?.result as BulkImmichUploadJobResult | null) : null;
-  const bulkUploadAttentionTitles = bulkUploadResult?.details
-    .filter((item) => item.outcome === "partial" || item.outcome === "failed")
-    .map((item) => item.title || item.clip_id) ?? [];
   const visibleClips = clips.data?.items ?? [];
   const plexLibraryCase = useMemo(() => new Map(
     (filterOptions.data?.libraries ?? []).map((name) => [name.toLocaleLowerCase(), name])
@@ -523,17 +486,6 @@ export function LibraryScreen() {
           <Tooltip title="Clear filters">
             <span><IconButton aria-label="Clear filters" disabled={activeFilterCount === 0} onClick={clearFilters}><FilterAltOffRounded /></IconButton></span>
           </Tooltip>
-          <Tooltip title={immichConfigured ? "Bulk upload to Immich" : "Configure Immich in Settings to enable bulk upload"}>
-            <span>
-              <IconButton
-                aria-label="Bulk upload to Immich"
-                disabled={!immichConfigured || bulkUploadMutation.isPending || (Boolean(activeBulkUploadJob) && !bulkUploadTerminal)}
-                onClick={() => bulkUploadMutation.mutate()}
-              >
-                <ImmichIcon uploaded />
-              </IconButton>
-            </span>
-          </Tooltip>
           <ToggleButtonGroup exclusive size="small" value={size} onChange={(_, value) => value && setSize(value)}><ToggleButton value="small">S</ToggleButton><ToggleButton value="medium">M</ToggleButton><ToggleButton value="large">L</ToggleButton></ToggleButtonGroup>
           <FormControl size="small" sx={{ minWidth: 92 }}>
             <InputLabel>Show</InputLabel>
@@ -581,28 +533,6 @@ export function LibraryScreen() {
       </Collapse>
       {deleteNotice && <Alert severity="warning" onClose={() => setDeleteNotice(null)}>{deleteNotice}</Alert>}
       {uploadMutation.error && <Alert severity="error" onClose={() => uploadMutation.reset()}>{uploadMutation.error.message}</Alert>}
-      {bulkUploadMutation.error && <Alert severity="error" onClose={() => bulkUploadMutation.reset()}>{bulkUploadMutation.error.message}</Alert>}
-      {activeBulkUploadJob && !bulkUploadTerminal && (
-        <Stack spacing={0.5}>
-          <LinearProgress variant="determinate" value={Math.round(activeBulkUploadJob.progress * 100)} />
-          <Typography variant="caption" color="text.secondary">{activeBulkUploadJob.message}</Typography>
-        </Stack>
-      )}
-      {activeBulkUploadJob && bulkUploadTerminal && bulkUploadResult && (
-        <Alert severity={activeBulkUploadJob.state === "FAILED" ? "error" : activeBulkUploadJob.state === "PARTIAL" ? "warning" : "success"} onClose={dismissBulkUploadSummary}>
-          Bulk upload complete: {bulkUploadResult.succeeded} succeeded, {bulkUploadResult.partial} partial, {bulkUploadResult.failed} failed, {bulkUploadResult.skipped} skipped.
-          {bulkUploadAttentionTitles.length > 0 && (
-            <>
-              {" "}These need attention — retry individually: {bulkUploadAttentionTitles.join(", ")}.
-            </>
-          )}
-        </Alert>
-      )}
-      {activeBulkUploadJob && bulkUploadTerminal && !bulkUploadResult && (
-        <Alert severity="error" onClose={dismissBulkUploadSummary}>
-          {activeBulkUploadJob.error?.message ?? "The bulk Immich upload failed."}
-        </Alert>
-      )}
       {clips.error && <Alert severity="error">{clips.error.message}</Alert>}
       {!clips.isLoading && visibleClips.length === 0 && <Alert severity="info">No clips match the current filters.</Alert>}
       {visibleClips.length > 0 && groupMode === "none" && renderClipCards(visibleClips)}

@@ -25,6 +25,7 @@ import {
   IconButton,
   InputAdornment,
   InputLabel,
+  LinearProgress,
   Link,
   List,
   ListItem,
@@ -40,13 +41,16 @@ import {
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
-import { testImmichConnection, testPlexConnection, updateSettings } from "../../api";
+import { bulkUploadClipsToImmich, testImmichConnection, testPlexConnection, updateSettings } from "../../api";
+import { useJobSnapshot } from "../make-clip/hooks";
 import type {
   ApplicationSettingField,
   ApplicationSettings,
   ApplicationSettingsUpdate,
+  BulkImmichUploadJobResult,
   ImmichConnectionRequest,
   ImmichConnectionResult,
+  JobSnapshot,
   PlexConnectionRequest,
   PlexConnectionResult,
   SourcePathMapping,
@@ -55,6 +59,8 @@ import type {
 const x264Presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
 const SECRET_MASK = "●●●●●●●●";
 const AUTO_SAVE_DEBOUNCE_MS = 800;
+const ACTIVE_BULK_UPLOAD_JOB_KEY = "mediaclipmakarr.activeBulkUploadJobId";
+const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 interface ImmichPermission {
   scope: string;
   conditional: boolean;
@@ -129,6 +135,10 @@ export function SettingsForm({
   const [immichTagEpisode, setImmichTagEpisode] = useState(settings.immich_tag_episode);
   const [immichConnection, setImmichConnection] = useState<ImmichConnectionResult | null>(null);
   const [immichPermissionsOpen, setImmichPermissionsOpen] = useState(false);
+  const [bulkUploadJob, setBulkUploadJob] = useState<JobSnapshot | null>(null);
+  const [bulkUploadJobId, setBulkUploadJobId] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : window.sessionStorage.getItem(ACTIVE_BULK_UPLOAD_JOB_KEY),
+  );
 
   const [timezone, setTimezone] = useState(() => initialTimezone(settings));
   // On a fresh install the initial timezone above is only a browser-detected guess,
@@ -463,6 +473,36 @@ export function SettingsForm({
       },
     });
   };
+
+  const activeBulkUploadJob = useJobSnapshot(bulkUploadJob, bulkUploadJobId);
+  const bulkUploadTerminal = activeBulkUploadJob ? !NONTERMINAL_JOB_STATES.has(activeBulkUploadJob.state) : false;
+  useEffect(() => {
+    if (activeBulkUploadJob && bulkUploadTerminal) {
+      void queryClient.invalidateQueries({ queryKey: ["clips"] });
+      window.sessionStorage.removeItem(ACTIVE_BULK_UPLOAD_JOB_KEY);
+    }
+    // Only re-run when the job transitions into a terminal state, not on every
+    // in-flight progress update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBulkUploadJob?.id, bulkUploadTerminal, queryClient]);
+  const bulkUploadMutation = useMutation({
+    mutationFn: bulkUploadClipsToImmich,
+    onSuccess: (job: JobSnapshot) => {
+      setBulkUploadJob(job);
+      setBulkUploadJobId(job.id);
+      window.sessionStorage.setItem(ACTIVE_BULK_UPLOAD_JOB_KEY, job.id);
+    },
+  });
+  const dismissBulkUploadSummary = () => {
+    setBulkUploadJob(null);
+    setBulkUploadJobId(null);
+    window.sessionStorage.removeItem(ACTIVE_BULK_UPLOAD_JOB_KEY);
+  };
+  const bulkUploadResult = bulkUploadTerminal ? (activeBulkUploadJob?.result as BulkImmichUploadJobResult | null) : null;
+  const bulkUploadAttentionTitles = bulkUploadResult?.details
+    .filter((item) => item.outcome === "partial" || item.outcome === "failed")
+    .map((item) => item.title || item.clip_id) ?? [];
+  const immichConfigured = Boolean(settings.immich_url && settings.immich_api_key_configured);
 
   useEffect(() => {
     // Check current connectivity as soon as the settings page loads, in addition to
@@ -816,6 +856,52 @@ export function SettingsForm({
                   sx={{ maxWidth: 320, width: "100%" }}
                 />
                 <ManagedLabel managed={managed("immich_default_tag")} />
+              </Stack>
+
+              <Divider />
+
+              <Stack spacing={1} alignItems="flex-start">
+                <Tooltip title={immichConfigured ? "Uploads every clip not yet in Immich" : "Configure Immich above to enable bulk upload"}>
+                  <span>
+                    <Button
+                      variant="outlined"
+                      disabled={!immichConfigured || bulkUploadMutation.isPending || (Boolean(activeBulkUploadJob) && !bulkUploadTerminal)}
+                      onClick={() => bulkUploadMutation.mutate()}
+                    >
+                      Upload all non-uploaded clips
+                    </Button>
+                  </span>
+                </Tooltip>
+                {bulkUploadMutation.error && (
+                  <Alert severity="error" onClose={() => bulkUploadMutation.reset()} sx={{ width: "100%" }}>
+                    {bulkUploadMutation.error.message}
+                  </Alert>
+                )}
+                {activeBulkUploadJob && !bulkUploadTerminal && (
+                  <Stack spacing={0.5} sx={{ width: "100%" }}>
+                    <LinearProgress variant="determinate" value={Math.round(activeBulkUploadJob.progress * 100)} />
+                    <Typography variant="caption" color="text.secondary">{activeBulkUploadJob.message}</Typography>
+                  </Stack>
+                )}
+                {activeBulkUploadJob && bulkUploadTerminal && bulkUploadResult && (
+                  <Alert
+                    severity={activeBulkUploadJob.state === "FAILED" ? "error" : activeBulkUploadJob.state === "PARTIAL" ? "warning" : "success"}
+                    onClose={dismissBulkUploadSummary}
+                    sx={{ width: "100%" }}
+                  >
+                    Bulk upload complete: {bulkUploadResult.succeeded} succeeded, {bulkUploadResult.partial} partial, {bulkUploadResult.failed} failed, {bulkUploadResult.skipped} skipped.
+                    {bulkUploadAttentionTitles.length > 0 && (
+                      <>
+                        {" "}These need attention — retry individually from the Library screen: {bulkUploadAttentionTitles.join(", ")}.
+                      </>
+                    )}
+                  </Alert>
+                )}
+                {activeBulkUploadJob && bulkUploadTerminal && !bulkUploadResult && (
+                  <Alert severity="error" onClose={dismissBulkUploadSummary} sx={{ width: "100%" }}>
+                    {activeBulkUploadJob.error?.message ?? "The bulk Immich upload failed."}
+                  </Alert>
+                )}
               </Stack>
             </Stack>
           </Box>

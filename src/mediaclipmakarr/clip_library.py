@@ -408,6 +408,20 @@ async def list_clips(
     )
 
 
+async def list_all_clip_ids(engine: AsyncEngine) -> list[str]:
+    """All clip ids, oldest first — the candidate set for a bulk Immich upload.
+
+    Deliberately unfiltered by upload state: the job itself classifies each clip
+    as skipped (already linked to the current server) or attempted, so the
+    reported counts add up to the full clip count rather than silently omitting
+    already-linked clips from the total."""
+    async with engine.connect() as connection:
+        rows = (
+            await connection.execute(text("SELECT id FROM clips ORDER BY created_at"))
+        ).all()
+    return [str(row[0]) for row in rows]
+
+
 async def list_unlinked_clip_ids(engine: AsyncEngine, normalized_immich_url: str) -> list[str]:
     """Clip ids not linked to *this* Immich server — no association at all, or one
     recorded against a different, previously-configured server (which is not

@@ -7,7 +7,6 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from mediaclipmakarr.application_settings import normalize_immich_url
 from mediaclipmakarr.clip_library import (
     ClipAssetUnavailable,
     ClipDeleteRequest,
@@ -23,10 +22,10 @@ from mediaclipmakarr.clip_library import (
     build_metadata_edit_plan,
     build_thumbnail_job_plan,
     delete_clip,
+    list_all_clip_ids,
     list_clips,
     list_filter_options,
     list_libraries,
-    list_unlinked_clip_ids,
     public_clip,
     thumbnail_is_current,
 )
@@ -210,10 +209,7 @@ def build_router(application_settings: Settings) -> APIRouter:
                     "message": "Configure Immich in Settings before uploading.",
                 },
             )
-        normalized_url = normalize_immich_url(effective.immich_url)
-        clip_ids = await list_unlinked_clip_ids(
-            request.app.state.database_engine, normalized_url
-        )
+        clip_ids = await list_all_clip_ids(request.app.state.database_engine)
         plan = build_bulk_immich_upload_plan(clip_ids)
         job = await enqueue_bulk_immich_upload_job(request.app.state.database_engine, plan)
         await request.app.state.job_events.publish(job.id, job)
