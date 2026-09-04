@@ -817,14 +817,6 @@ export function SettingsForm({
                 />
                 <ManagedLabel managed={managed("immich_default_tag")} />
               </Stack>
-
-              <Tooltip title="Uploading existing clips is coming in a future release.">
-                <span style={{ alignSelf: "flex-start" }}>
-                  <Button variant="outlined" disabled sx={{ alignSelf: "flex-start", whiteSpace: "nowrap" }}>
-                    Upload all non-uploaded clips
-                  </Button>
-                </span>
-              </Tooltip>
             </Stack>
           </Box>
         </CardContent>
