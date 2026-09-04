@@ -515,7 +515,13 @@ export function SettingsForm({
   );
   const downloadBulkUploadLog = () => {
     if (!bulkUploadResult) return;
-    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    // A title starting with =, +, -, or @ would be interpreted as a formula by
+    // Excel/Sheets/LibreOffice when this CSV is opened — prefix it with an
+    // apostrophe so it's treated as plain text instead.
+    const escape = (value: string) => {
+      const safe = /^[\t\r\n ]*[=+\-@]/.test(value) ? `'${value}` : value;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
     const rows = [
       ["clip_id", "title", "stage", "outcome", "error_code"],
       ...bulkUploadResult.details.map((item) => [

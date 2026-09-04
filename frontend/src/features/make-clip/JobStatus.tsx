@@ -29,12 +29,14 @@ export function JobStatus({
   isLoading = false,
   loadError = null,
   onSelectAlternative,
+  onDismiss,
 }: {
   job: JobSnapshot | null;
   initialClip?: ClipRecord | null;
   isLoading?: boolean;
   loadError?: string | null;
   onSelectAlternative?: (alternative: Record<string, unknown>) => void;
+  onDismiss?: () => void;
 }) {
   const queryClient = useQueryClient();
   const jobClipId = job?.state === "SUCCEEDED" && job.result && "clip_id" in job.result ? job.result.clip_id : null;
@@ -111,6 +113,11 @@ export function JobStatus({
     {job && !job.error && <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}</Alert>}
     {job?.error && (
       <MediaErrorAlert error={job.error} onSelectAlternative={onSelectAlternative} />
+    )}
+    {job && (job.state === "FAILED" || job.state === "PARTIAL") && onDismiss && (
+      <Button variant="text" onClick={onDismiss} sx={{ alignSelf: "flex-start" }}>
+        Dismiss
+      </Button>
     )}
     {job && job.state !== "SUCCEEDED" && job.state !== "FAILED" && <LinearProgress variant="determinate" value={Math.round(job.progress * 100)} aria-label="Clip render progress" />}
     {!job && isLoading && <Stack direction="row" spacing={1} alignItems="center"><CircularProgress size={18} aria-label="Loading newest clip" /><span>Loading newest clip…</span></Stack>}

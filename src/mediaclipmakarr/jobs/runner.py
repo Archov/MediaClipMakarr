@@ -186,6 +186,7 @@ class JobRunner:
         self.media_process_gate = media_process_gate or MediaProcessGate()
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
         self._next_stale_workdir_reap_at = 0.0
 
@@ -212,6 +213,11 @@ class JobRunner:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        if self._background_tasks:
+            for task in list(self._background_tasks):
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
 
     def wake(self) -> None:
         self._wake.set()
@@ -233,48 +239,68 @@ class JobRunner:
                     await asyncio.wait_for(self._wake.wait(), timeout=timeout_seconds)
                 continue
             await self._publish_durable_job_update(claimed.id)
-            try:
-                # Immich uploads are a long-lived network call with no ffmpeg/CPU
-                # cost — holding the media-process gate for their duration would
-                # stall unrelated interactive media work (e.g. on-demand thumbnail
-                # generation) behind them for no reason.
-                if claimed.type in ("immich_upload", "bulk_immich_upload"):
+            if claimed.type == "bulk_immich_upload":
+                # A bulk upload can take minutes or hours across many clips —
+                # awaiting it here inline would occupy the sole claim loop for
+                # its entire duration, stalling every other queued job (clip
+                # renders, thumbnails, metadata edits, single-clip uploads)
+                # behind it. Run it concurrently instead so the loop keeps
+                # claiming and executing everything else. The clip-level writes
+                # it performs are already guarded against a concurrent
+                # single-clip upload touching the same clip — see
+                # `set_clip_immich_asset_id`'s association-conflict check.
+                task = asyncio.create_task(
+                    self._execute_and_finalize(claimed),
+                    name=f"bulk-immich-upload-{claimed.id}",
+                )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+                continue
+            await self._execute_and_finalize(claimed)
+
+    async def _execute_and_finalize(self, claimed: ClaimedJob) -> None:
+        try:
+            # Immich uploads are a long-lived network call with no ffmpeg/CPU
+            # cost — holding the media-process gate for their duration would
+            # stall unrelated interactive media work (e.g. on-demand thumbnail
+            # generation) behind them for no reason.
+            if claimed.type in ("immich_upload", "bulk_immich_upload"):
+                await self._execute_claimed_job(claimed)
+            else:
+                async with self.media_process_gate.slot():
                     await self._execute_claimed_job(claimed)
-                else:
-                    async with self.media_process_gate.slot():
-                        await self._execute_claimed_job(claimed)
-            except asyncio.CancelledError:
-                await self._cleanup_job_workdir(claimed.id, "application shutdown")
-                with contextlib.suppress(Exception):
-                    await fail_job(
-                        self.engine,
-                        claimed.id,
-                        claimed.run_token,
-                        code="APP_SHUTDOWN",
-                        message="The application shut down before this job completed.",
-                        retryable=True,
-                    )
-                    await self._publish_durable_job_update(claimed.id)
-                raise
-            except Exception as error:
-                await self._cleanup_job_workdir(claimed.id, "job failure")
-                logger.exception("Clip render job %s failed.", claimed.id)
-                try:
-                    await fail_job(
-                        self.engine,
-                        claimed.id,
-                        claimed.run_token,
-                        code=getattr(error, "job_error_code", type(error).__name__.upper()),
-                        message=str(error) or "Clip render failed unexpectedly.",
-                        retryable=getattr(error, "job_retryable", True),
-                        alternatives=getattr(error, "alternatives", None),
-                        context=getattr(error, "context", None),
-                    )
-                except Exception:
-                    logger.exception(
-                        "The failure state for job %s could not be stored.", claimed.id
-                    )
+        except asyncio.CancelledError:
+            await self._cleanup_job_workdir(claimed.id, "application shutdown")
+            with contextlib.suppress(Exception):
+                await fail_job(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    code="APP_SHUTDOWN",
+                    message="The application shut down before this job completed.",
+                    retryable=True,
+                )
                 await self._publish_durable_job_update(claimed.id)
+            raise
+        except Exception as error:
+            await self._cleanup_job_workdir(claimed.id, "job failure")
+            logger.exception("Clip render job %s failed.", claimed.id)
+            try:
+                await fail_job(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    code=getattr(error, "job_error_code", type(error).__name__.upper()),
+                    message=str(error) or "Clip render failed unexpectedly.",
+                    retryable=getattr(error, "job_retryable", True),
+                    alternatives=getattr(error, "alternatives", None),
+                    context=getattr(error, "context", None),
+                )
+            except Exception:
+                logger.exception(
+                    "The failure state for job %s could not be stored.", claimed.id
+                )
+            await self._publish_durable_job_update(claimed.id)
 
     async def _publish_durable_job_update(self, job_id: str) -> JobSnapshot | None:
         snapshot = await get_job_snapshot(self.engine, job_id)
@@ -1070,9 +1096,39 @@ class JobRunner:
 
                 clip = clips[clip_id]
                 if can_sync_metadata:
-                    result = await self._upload_and_organize_clip(
-                        clip, immich_settings, report_stage=noop_report_stage
-                    )
+                    try:
+                        result = await self._upload_and_organize_clip(
+                            clip, immich_settings, report_stage=noop_report_stage
+                        )
+                    except Exception as error:
+                        # Mirrors the upload stage's per-clip guard below: an
+                        # exception here (e.g. a tag-cache write failure, or an
+                        # invalid configured timezone) must not abort the whole
+                        # bulk run and lose every already-accumulated tally and
+                        # detail — just this one clip.
+                        failed += 1
+                        error_code = getattr(
+                            error, "job_error_code", type(error).__name__.upper()
+                        )
+                        error_message = str(error) or error_code
+                        details.append(
+                            {
+                                "clip_id": clip_id,
+                                "title": str(clip["title"]),
+                                "stage": "validate",
+                                "outcome": "failed",
+                                "error_code": error_code,
+                            }
+                        )
+                        await record_immich_upload_result(
+                            self.engine,
+                            build_immich_upload_plan(clip),
+                            state="FAILED",
+                            result_payload=None,
+                            message=error_message,
+                            error=JobError(code=error_code, message=error_message, retryable=True),
+                        )
+                        continue
                     if (
                         result.state == "FAILED"
                         and result.error is not None
@@ -1229,6 +1285,11 @@ class JobRunner:
                         result.asset_id, normalized_url, immich_settings.api_key
                     )
                 except ImmichAssetNotFoundError:
+                    # _upload_and_organize_clip already durably recorded this asset
+                    # id against the clip before returning. Left in place, a retry
+                    # would see `reusing=True` and keep targeting the same missing
+                    # id forever — clear it so a retry re-uploads instead.
+                    await clear_clip_immich_asset_id(self.engine, clip_id)
                     result = dataclasses.replace(
                         result,
                         state="FAILED",

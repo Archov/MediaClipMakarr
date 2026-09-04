@@ -1689,3 +1689,169 @@ async def test_immich_upload_clears_stale_tag_cache_on_server_change_with_no_tag
     assert clip_after_second is not None
     assert clip_after_second["immich_server_url"] == OTHER_IMMICH_URL
     assert not parse_stored_immich_tag_ids(clip_after_second["immich_tag_ids"])
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_validate_stage_isolates_an_unexpected_per_clip_exception(
+    tmp_path, monkeypatch
+) -> None:
+    """An exception in the validate stage that isn't an ImmichApiError (e.g. a
+    tag-cache write failure, or an invalid configured timezone) must be tallied
+    and skipped over, not allowed to abort the whole bulk run and lose every
+    already-accumulated result — mirrors the upload stage's existing guard."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source_one = clip_root / "TV Shows" / "Pilot.mp4"
+    source_two = clip_root / "TV Shows" / "Encore.mp4"
+    source_one.parent.mkdir(parents=True)
+    source_one.write_bytes(b"one")
+    source_two.write_bytes(b"two")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_set_description(
+        asset_id, description, url, api_key, *, date_time_original=None
+    ):
+        if asset_id == "asset-one":
+            raise RuntimeError("unexpected bug, not an Immich API error")
+
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    async def fake_read_asset(asset_id, url, api_key):
+        return {"id": asset_id}
+
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
+    try:
+        await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
+        await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-one", IMMICH_URL)
+        await set_clip_immich_asset_id(engine, "clip-two", "asset-two", IMMICH_URL)
+
+        plan = build_bulk_immich_upload_plan(["clip-one", "clip-two"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    # Must reach a well-formed terminal state with the full result payload, not
+    # an unhandled-exception FAILED with no result_payload at all.
+    assert snapshot.state == "PARTIAL"
+    assert snapshot.result is not None
+    assert snapshot.result["succeeded"] == 1
+    assert snapshot.result["failed"] == 1
+    outcomes = {item["clip_id"]: item["outcome"] for item in snapshot.result["details"]}
+    assert outcomes == {"clip-one": "failed", "clip-two": "succeeded"}
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_clears_stale_asset_id_when_post_upload_verification_404s(
+    tmp_path, monkeypatch
+) -> None:
+    """A fresh upload that Immich reports as successful, but that can't be found
+    immediately afterward, must not leave the clip pointing at a dead asset id —
+    otherwise a retry would see `reusing=True` and target the same missing id
+    forever."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(
+        source_path, url, api_key, *, file_created_at, file_modified_at, local_timezone="UTC"
+    ):
+        return "asset-ghost"
+
+    async def fake_set_description(
+        asset_id, description, url, api_key, *, date_time_original=None
+    ):
+        return None
+
+    async def fake_permissions(url, api_key):
+        return list(FULL_IMMICH_PERMISSIONS)
+
+    async def fake_read_asset(asset_id, url, api_key):
+        raise ImmichAssetNotFoundError(f"Immich asset {asset_id} no longer exists.")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "fetch_immich_api_key_permissions", fake_permissions)
+    monkeypatch.setattr(runner_module, "read_immich_asset", fake_read_asset)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+
+        plan = build_bulk_immich_upload_plan(["clip-one"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+        clip = await get_clip(engine, "clip-one", clip_root)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.result is not None
+    outcomes = {item["clip_id"]: item["outcome"] for item in snapshot.result["details"]}
+    assert outcomes["clip-one"] == "failed"
+    assert clip is not None
+    assert clip["immich_asset_id"] is None
+    assert clip["immich_server_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_latest_jobs_for_operations_orders_by_completion_not_enqueue_time(
+    tmp_path,
+) -> None:
+    """A synthetic bulk-job row is inserted with created_at set to whenever the
+    bulk run actually reached that clip. An individual retry enqueued earlier but
+    forced to finish later (since only one job runs at a time) must still win —
+    ordering by created_at alone would hide its real, more recent outcome."""
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        async with engine.begin() as connection:
+            # The bulk job's synthetic row: created and finished at the same
+            # moment, in the middle of the timeline.
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs (id, type, state, stage, progress, "
+                    "current_stage_progress, message, attempt, render_plan_json, "
+                    "render_plan_hash, created_at, started_at, finished_at) "
+                    "VALUES ('job-bulk-row', 'immich_upload', 'SUCCEEDED', 'complete', 1, 1, "
+                    "'bulk', 1, '{}', 'clip-one', :mid, :mid, :mid)"
+                ),
+                {"mid": datetime(2026, 1, 2)},
+            )
+            # An individually-enqueued retry: created *before* the bulk row (it
+            # was queued while the bulk job was still running) but only actually
+            # finishes *after* it, since only one job runs at a time.
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs (id, type, state, stage, progress, "
+                    "current_stage_progress, message, attempt, render_plan_json, "
+                    "render_plan_hash, created_at, started_at, finished_at) "
+                    "VALUES ('job-retry-row', 'immich_upload', 'FAILED', 'failed', 1, 1, "
+                    "'retry', 1, '{}', 'clip-one', :early, :late, :late)"
+                ),
+                {"early": datetime(2026, 1, 1), "late": datetime(2026, 1, 3)},
+            )
+
+        per_clip = await get_latest_jobs_for_operations(engine, "immich_upload", ["clip-one"])
+    finally:
+        await engine.dispose()
+
+    assert per_clip["clip-one"].id == "job-retry-row"
+    assert per_clip["clip-one"].state == "FAILED"

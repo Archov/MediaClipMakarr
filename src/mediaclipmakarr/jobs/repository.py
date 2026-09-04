@@ -501,6 +501,15 @@ async def get_latest_jobs_for_operations(
     For `immich_upload` jobs, `render_plan_hash` is the clip id (see
     `ImmichUploadJobPlan.operation_hash`), so this answers "what's the latest upload
     job for each of these clips" directly from the durable jobs table.
+
+    Ordered by completion time (`finished_at`, falling back to `created_at` for a
+    still-running job), not enqueue time: a bulk upload's synthetic row for a clip
+    is inserted with `created_at` set to whenever the bulk run actually reached that
+    clip, which can be well after an individual retry was *enqueued* for the same
+    clip. Since only one job runs at a time, that individual retry only *finishes*
+    once the bulk run (and everything else queued ahead of it) is done — ordering by
+    `created_at` alone would keep preferring the bulk row forever, hiding the
+    retry's real, more recent outcome.
     """
     if not operation_hashes:
         return {}
@@ -511,7 +520,8 @@ async def get_latest_jobs_for_operations(
                     text(
                         "SELECT * FROM ("
                         "  SELECT *, ROW_NUMBER() OVER ("
-                        "    PARTITION BY render_plan_hash ORDER BY created_at DESC"
+                        "    PARTITION BY render_plan_hash "
+                        "    ORDER BY COALESCE(finished_at, created_at) DESC"
                         "  ) AS rn "
                         "  FROM jobs WHERE type = :type AND render_plan_hash IN :hashes"
                         ") WHERE rn = 1"

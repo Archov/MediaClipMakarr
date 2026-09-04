@@ -8,7 +8,7 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
   createClip,
@@ -71,6 +71,7 @@ export function MakeClipScreen() {
   const selectedSessionEnded = Boolean(selectedSessionIdentity && snapshot && !selectedSession);
   const capabilitiesVersion = mediaCapabilitiesVersion(selectedSession);
   const activeJob = useJobSnapshot(submittedJob, submittedJobId);
+  const queryClient = useQueryClient();
   const latestClip = useQuery({
     queryKey: ["clips", "make-clip-latest"],
     queryFn: () => fetchClips({ page: 1, pageSize: 1, sort: "newest" }),
@@ -85,8 +86,27 @@ export function MakeClipScreen() {
       "clip_id" in activeJob.result &&
       activeJob.result.clip_id === newestClip?.id,
   );
+  // A reconnected job that finished FAILED/PARTIAL (e.g. after a page reload
+  // while it was still running) has no way to "match newest" — there's no
+  // successful clip to compare against — but the user still needs to see the
+  // error and any recovery actions, not an empty state or an older clip.
+  const activeJobNeedsAttention = Boolean(
+    activeJob && (activeJob.state === "FAILED" || activeJob.state === "PARTIAL"),
+  );
   const displayedJob =
-    submittedJob || activeJobIsRunning || activeJobMatchesNewest ? activeJob : null;
+    submittedJob || activeJobIsRunning || activeJobMatchesNewest || activeJobNeedsAttention
+      ? activeJob
+      : null;
+
+  useEffect(() => {
+    // The "newest clip" query only runs once on mount, so a clip finished by a
+    // reconnected job (job snapshot arriving via SSE, not this mutation's own
+    // onSuccess) would otherwise never be reflected here — refetch it as soon
+    // as the active job reaches SUCCEEDED so activeJobMatchesNewest can catch up.
+    if (activeJob?.state === "SUCCEEDED") {
+      void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
+    }
+  }, [activeJob?.state, queryClient]);
   const capabilities = useQuery({
     queryKey: ["media-capabilities", selectedSessionIdentity, capabilitiesVersion],
     queryFn: () => fetchMediaCapabilities(selectedSessionIdentity || ""),
@@ -104,6 +124,12 @@ export function MakeClipScreen() {
   const resetClipSubmission = () => {
     setBoundaryNotice(null);
     clipCreate.reset();
+  };
+
+  const dismissActiveJob = () => {
+    setSubmittedJob(null);
+    setSubmittedJobId(null);
+    window.sessionStorage.removeItem(ACTIVE_CLIP_JOB_KEY);
   };
 
   const handleStartChange = (input: string, value: number | null) => {
@@ -290,6 +316,7 @@ export function MakeClipScreen() {
             isLoading={!displayedJob && latestClip.isLoading}
             loadError={!displayedJob ? latestClip.error?.message ?? null : null}
             onSelectAlternative={selectAlternativeTrack}
+            onDismiss={activeJobNeedsAttention ? dismissActiveJob : undefined}
           />
         </CardContent>
       </Card>
