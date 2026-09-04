@@ -17,6 +17,7 @@ from mediaclipmakarr.clip_library import (
     ClipPage,
     ClipRecord,
     ClipRevisionConflict,
+    build_immich_upload_plan,
     build_metadata_edit_plan,
     build_thumbnail_job_plan,
     delete_clip,
@@ -36,8 +37,10 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.jobs import (
     JobSnapshot,
     enqueue_clip_create_job,
+    enqueue_immich_upload_job,
     enqueue_metadata_edit_job,
     enqueue_thumbnail_job,
+    get_latest_jobs_for_operations,
 )
 from mediaclipmakarr.plex import PlexClient, PlexSessionError
 from mediaclipmakarr.render_plan import build_clip_render_plan
@@ -113,7 +116,7 @@ def build_router(application_settings: Settings) -> APIRouter:
             pattern="^(newest|oldest|title_asc|title_desc|duration_asc|duration_desc)$",
         ),
     ) -> ClipPage:
-        return await list_clips(
+        clip_page = await list_clips(
             request.app.state.database_engine,
             page=page,
             page_size=None if all_items else page_size,
@@ -124,6 +127,14 @@ def build_router(application_settings: Settings) -> APIRouter:
             episode=episode,
             sort=sort,
         )
+        upload_jobs = await get_latest_jobs_for_operations(
+            request.app.state.database_engine,
+            "immich_upload",
+            [item.id for item in clip_page.items],
+        )
+        for item in clip_page.items:
+            item.immich_upload_job = upload_jobs.get(item.id)
+        return clip_page
 
     @router.get("/api/clips/libraries", response_model=list[str])
     async def clip_libraries(request: Request) -> list[str]:
@@ -155,7 +166,34 @@ def build_router(application_settings: Settings) -> APIRouter:
         )
         if clip is None:
             raise HTTPException(status_code=404, detail="Clip not found.")
-        return public_clip(clip)
+        upload_jobs = await get_latest_jobs_for_operations(
+            request.app.state.database_engine, "immich_upload", [clip_id]
+        )
+        return public_clip(clip, immich_upload_job=upload_jobs.get(clip_id))
+
+    @router.post("/api/clips/{clip_id}/immich-upload", response_model=JobSnapshot)
+    async def upload_clip_to_immich(clip_id: str, request: Request) -> JobSnapshot:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        effective = request.app.state.effective_application_settings
+        if not effective.immich_url or not effective.immich_api_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMMICH_NOT_CONFIGURED",
+                    "message": "Configure Immich in Settings before uploading.",
+                },
+            )
+        plan = build_immich_upload_plan(clip)
+        job = await enqueue_immich_upload_job(request.app.state.database_engine, plan)
+        await request.app.state.job_events.publish(job.id, job)
+        request.app.state.job_runner.wake()
+        return job
 
     @router.put("/api/clips/{clip_id}", response_model=JobSnapshot)
     async def edit_clip_metadata(

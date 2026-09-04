@@ -17,6 +17,8 @@ import {
   Card,
   CardActions,
   CardContent,
+  Chip,
+  CircularProgress,
   Collapse,
   Dialog,
   FormControl,
@@ -44,10 +46,14 @@ import {
   fetchClipFilterOptions,
   fetchClips,
   fetchJob,
+  fetchSettings,
   updateClipMetadata,
+  uploadClipToImmich,
 } from "../../api";
-import type { ClipMetadataUpdate, ClipRecord } from "../../types";
+import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
 import { DeleteClipDialog, MetadataDialog } from "./ClipDialogs";
+
+const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 
 type ViewMode = "grid" | "list";
 type ThumbnailSize = "small" | "medium" | "large";
@@ -110,15 +116,55 @@ function ClipThumbnail({ clip, expanded, onActivate }: { clip: ClipRecord; expan
   );
 }
 
-function ClipAction({ label, icon, large, href, color = "primary", onClick }: { label: string; icon: ReactNode; large: boolean; href?: string; color?: "primary" | "error"; onClick?: () => void }) {
+function ClipAction({ label, icon, large, href, color = "primary", disabled, onClick }: { label: string; icon: ReactNode; large: boolean; href?: string; color?: "primary" | "error"; disabled?: boolean; onClick?: () => void }) {
   const stopAndRun = (event: React.MouseEvent) => { event.stopPropagation(); onClick?.(); };
-  if (large) return <Button size="small" color={color} startIcon={icon} href={href} onClick={stopAndRun}>{label}</Button>;
-  if (href) return <Tooltip title={label}><IconButton size="small" color={color} component="a" href={href} aria-label={label} onClick={stopAndRun}>{icon}</IconButton></Tooltip>;
-  return <Tooltip title={label}><IconButton size="small" color={color} aria-label={label} onClick={stopAndRun}>{icon}</IconButton></Tooltip>;
+  if (large) return <Button size="small" color={color} disabled={disabled} startIcon={icon} href={href} onClick={stopAndRun}>{label}</Button>;
+  if (href) return <Tooltip title={label}><IconButton size="small" color={color} disabled={disabled} component="a" href={href} aria-label={label} onClick={stopAndRun}>{icon}</IconButton></Tooltip>;
+  return <Tooltip title={label}><span><IconButton size="small" color={color} disabled={disabled} aria-label={label} onClick={stopAndRun}>{icon}</IconButton></span></Tooltip>;
 }
 
-function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void }) {
+// The theme-matched blue from src/assets/immich.svg — inlined (rather than loaded
+// via <img>) so its fill can switch to the theme's error red before upload.
+const IMMICH_ICON_BLUE = "#61a6fa";
+const IMMICH_ICON_PATH =
+  "M238.8 155.5c33.5 29.7 60.5 61.5 77.9 91.5 29.9-53.4 49.8-116.9 50.1-157.3v-.8c0-59.8-59.7-83.1-111.1-83.1S144.6 29 144.6 88.8V92c28.7 12.8 62.6 35.6 94.2 63.5M55.9 318.6c21-23.3 53.1-48.6 89.4-69.9 38.6-22.7 77.2-38.6 111.1-45.8-41.6-44.9-95.8-83.5-134.1-96.2-.3-.1-.5-.2-.7-.2-57-18.7-97.6 30.9-113.5 79.8S-4.1 299.1 52.8 317.6c.8.2 1.8.6 3.1 1m448-133.2C488 136.6 447.4 87 390.5 105.5c-.8.3-1.8.6-3.1 1-3.3 31.2-14.4 70.5-31.2 109.1-17.9 41.1-39.8 76.6-62.9 102.4 60 11.9 126.5 11.3 165.1-1 .3-.1.5-.2.7-.2 57-18.6 60.6-82.5 44.8-131.4M205 366.3c-9.7-43.7-12.8-85.3-9.3-119.8-55.5 25.7-109 65.3-133 97.8-.2.2-.3.4-.5.6-35.2 48.4-.6 102.3 41 132.5s103.5 46.4 138.7-1.9c.5-.7 1.1-1.5 1.9-2.6-15.6-27.1-29.7-65.5-38.8-106.6m243.8-24.4c-30.7 6.5-71.5 8.1-113.4 4-44.6-4.3-85.1-14.2-116.8-28.2 7.2 60.8 28.4 123.8 51.9 156.7.2.2.3.4.5.6 35.2 48.4 97.1 32.2 138.7 1.9 41.6-30.2 76.2-84.1 41-132.5-.5-.6-1.1-1.4-1.9-2.5";
+
+function ImmichIcon({ uploaded }: { uploaded: boolean }) {
+  const theme = useTheme();
+  return (
+    <Box component="svg" viewBox="0 0 512 512" sx={{ width: 20, height: 20, display: "block" }}>
+      <path d={IMMICH_ICON_PATH} fill={uploaded ? IMMICH_ICON_BLUE : theme.palette.error.main} />
+    </Box>
+  );
+}
+
+function ImmichStatusChip({ clip }: { clip: ClipRecord }) {
+  const job = clip.immich_upload_job;
+  if (job && NONTERMINAL_JOB_STATES.has(job.state)) {
+    return <Chip size="small" variant="outlined" icon={<CircularProgress size={12} />} label="Uploading…" />;
+  }
+  if (job?.state === "PARTIAL" || job?.state === "FAILED") {
+    const label = job.state === "PARTIAL" ? "Partial" : "Failed";
+    const detail = job.error ? `${job.error.code}: ${job.error.message}` : label;
+    return <Tooltip title={detail}><Chip size="small" color={job.state === "PARTIAL" ? "warning" : "error"} label={label} /></Tooltip>;
+  }
+  if (job?.state === "SUCCEEDED" || clip.immich_asset_id) {
+    return <Chip size="small" color="success" label="Uploaded" />;
+  }
+  return null;
+}
+
+function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete, onUploadImmich, immichConfigured }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void; onUploadImmich: (clip: ClipRecord) => void; immichConfigured: boolean }) {
   const metadata = clipMetadata(clip);
+  const uploadJob = clip.immich_upload_job;
+  const uploading = Boolean(uploadJob && NONTERMINAL_JOB_STATES.has(uploadJob.state));
+  const uploadLabel = uploading
+    ? "Uploading to Immich…"
+    : uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
+      ? "Retry Immich upload"
+      : clip.immich_asset_id
+        ? "Re-upload to Immich"
+        : "Upload to Immich";
   const isList = mode === "list";
   const detailsVisible = isList || expanded;
   const [playArmed, setPlayArmed] = useState(false);
@@ -153,11 +199,21 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
           </Collapse>
         </CardContent>
         <Collapse in={detailsVisible} unmountOnExit>
-          <CardActions sx={{ px: 0.5, pt: 0, pb: 0.5, gap: size === "large" ? 0 : 0.25, flexWrap: "wrap" }}>
+          <CardActions sx={{ px: 0.5, pt: 0, pb: 0.5, gap: size === "large" ? 0 : 0.25, flexWrap: "wrap", alignItems: "center" }}>
             <ClipAction label="Play" icon={<PlayArrowRounded />} large={size === "large"} onClick={() => onPlay(clip)} />
             <ClipAction label="Edit" icon={<EditRounded />} large={size === "large"} onClick={() => onEdit(clip)} />
             <ClipAction label="Download" icon={<DownloadRounded />} large={size === "large"} href={clip.download_url} />
+            {immichConfigured && (
+              <ClipAction
+                label={uploadLabel}
+                icon={<ImmichIcon uploaded={Boolean(clip.immich_asset_id)} />}
+                large={size === "large"}
+                disabled={uploading}
+                onClick={() => onUploadImmich(clip)}
+              />
+            )}
             <ClipAction label="Delete" icon={<DeleteOutlineRounded />} large={size === "large"} color="error" onClick={() => onDelete(clip)} />
+            <ImmichStatusChip clip={clip} />
           </CardActions>
         </Collapse>
       </Box>
@@ -219,8 +275,22 @@ export function LibraryScreen() {
     return () => window.clearTimeout(timeout);
   }, [search]);
 
-  const clips = useQuery({ queryKey: ["clips", page, pageSize, search, library, mediaType, movies, shows, episodes, sort], queryFn: () => fetchClips({ page, pageSize, search, library, mediaType, media: [...movies, ...shows], episode: episodes, sort }) });
+  const clipsQueryKey = ["clips", page, pageSize, search, library, mediaType, movies, shows, episodes, sort];
+  const clips = useQuery({
+    queryKey: clipsQueryKey,
+    queryFn: () => fetchClips({ page, pageSize, search, library, mediaType, media: [...movies, ...shows], episode: episodes, sort }),
+    // Only keep polling while at least one visible clip has an Immich upload still in
+    // flight — avoids per-card queries while still recovering state across a reload.
+    refetchInterval: (query) => {
+      const hasPendingUpload = query.state.data?.items.some(
+        (item) => item.immich_upload_job && NONTERMINAL_JOB_STATES.has(item.immich_upload_job.state)
+      );
+      return hasPendingUpload ? 1_000 : false;
+    },
+  });
   const filterOptions = useQuery({ queryKey: ["clip-filter-options"], queryFn: fetchClipFilterOptions });
+  const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
+  const immichConfigured = Boolean(settings.data?.immich_url && settings.data?.immich_api_key_configured);
   const editJob = useQuery({
     queryKey: ["job", editJobId],
     queryFn: () => fetchJob(editJobId!),
@@ -240,6 +310,31 @@ export function LibraryScreen() {
   }, [editJob.data?.state, queryClient]);
 
   const editMutation = useMutation({ mutationFn: ({ clip, update }: { clip: ClipRecord; update: ClipMetadataUpdate }) => updateClipMetadata(clip.id, update), onSuccess: (job) => setEditJobId(job.id) });
+  const uploadMutation = useMutation({
+    mutationFn: (clip: ClipRecord) => uploadClipToImmich(clip.id),
+    onSuccess: (job: JobSnapshot, clip: ClipRecord) => {
+      // Seed the shared clips cache with the fresh job snapshot so the conditional
+      // refetchInterval above picks it up on the next tick without waiting on a
+      // full round trip.
+      const summary: ImmichUploadJobSummary = {
+        id: job.id,
+        state: job.state,
+        stage: job.stage,
+        progress: job.progress,
+        message: job.message,
+        result: job.result as ImmichUploadJobResult | null,
+        error: job.error,
+      };
+      queryClient.setQueryData(clipsQueryKey, (page: typeof clips.data) =>
+        page && {
+          ...page,
+          items: page.items.map((item) =>
+            item.id === clip.id ? { ...item, immich_upload_job: summary } : item
+          ),
+        }
+      );
+    },
+  });
   const deleteMutation = useMutation({
     mutationFn: (clip: ClipRecord) => deleteClip(clip.id, clip.revision),
     onSuccess: (result) => {
@@ -354,7 +449,7 @@ export function LibraryScreen() {
       {columnize(items, gridColumnCount).map((column, columnIndex) => (
         <Stack key={columnIndex} spacing={{ xs: 0.75, sm: 1.25 }} sx={{ minWidth: 0, maxWidth: "100%" }}>
           {column.map((clip) => (
-            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
+            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} immichConfigured={immichConfigured} />
           ))}
         </Stack>
       ))}
@@ -362,7 +457,7 @@ export function LibraryScreen() {
   ) : (
     <Box sx={{ display: "grid", alignItems: "start", alignSelf: "center", gap: 1, width: "100%", maxWidth: listRowWidth, mx: "auto" }}>
       {items.map((clip) => (
-        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} />
+        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} immichConfigured={immichConfigured} />
       ))}
     </Box>
   );
@@ -437,6 +532,7 @@ export function LibraryScreen() {
         </Stack>
       </Collapse>
       {deleteNotice && <Alert severity="warning" onClose={() => setDeleteNotice(null)}>{deleteNotice}</Alert>}
+      {uploadMutation.error && <Alert severity="error" onClose={() => uploadMutation.reset()}>{uploadMutation.error.message}</Alert>}
       {clips.error && <Alert severity="error">{clips.error.message}</Alert>}
       {!clips.isLoading && visibleClips.length === 0 && <Alert severity="info">No clips match the current filters.</Alert>}
       {visibleClips.length > 0 && groupMode === "none" && renderClipCards(visibleClips)}

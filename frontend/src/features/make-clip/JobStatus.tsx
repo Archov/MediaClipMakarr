@@ -97,7 +97,7 @@ export function JobStatus({
       <MediaErrorAlert error={job.error} onSelectAlternative={onSelectAlternative} />
     )}
     {job.state !== "SUCCEEDED" && job.state !== "FAILED" && <LinearProgress variant="determinate" value={Math.round(job.progress * 100)} aria-label="Clip render progress" />}
-    {job.state === "SUCCEEDED" && job.result && !deleted && <Stack spacing={2}>
+    {job.state === "SUCCEEDED" && job.result && "play_url" in job.result && !deleted && <Stack spacing={2}>
       <Box component="video" src={job.result.play_url} poster={clip.data?.thumbnail_url} controls sx={{ width: "100%", borderRadius: 1, bgcolor: "black" }} />
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         <Chip label={clip.data?.title ?? job.result.title} color="success" variant="outlined" />

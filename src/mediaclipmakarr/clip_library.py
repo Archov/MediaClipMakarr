@@ -18,6 +18,24 @@ from mediaclipmakarr.render_plan import resolve_unique_clip_path, sanitize_displ
 from mediaclipmakarr.subprocesses import run_command
 
 
+class ImmichUploadJobSummary(BaseModel):
+    """A lean, read-only view of a clip's latest Immich-upload job.
+
+    Deliberately not `jobs.models.JobSnapshot` — `jobs/models.py` already imports plan
+    types from this module, so importing `JobSnapshot` back here would be circular.
+    `jobs/repository.py` (which already depends on this module) converts a
+    `JobSnapshot` into this shape when building the batched per-clip lookup.
+    """
+
+    id: str
+    state: str
+    stage: str
+    progress: float
+    message: str
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
 class ClipRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -43,6 +61,8 @@ class ClipRecord(BaseModel):
     thumbnail_url: str
     play_url: str
     download_url: str
+    immich_asset_id: str | None = None
+    immich_upload_job: ImmichUploadJobSummary | None = None
 
 
 class ClipPage(BaseModel):
@@ -127,6 +147,25 @@ class ThumbnailJobPlan(BaseModel):
     source_size: int
     source_modified_ns: int
     operation_hash: str
+
+
+class ImmichUploadJobPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    job_id: str
+    clip_id: str
+    # Also doubles as the dedup key for `_find_active_job` — only one upload job may
+    # be in flight per clip at a time, mirroring the thumbnail job's hash-based dedup.
+    operation_hash: str
+
+
+def build_immich_upload_plan(clip: dict[str, Any]) -> ImmichUploadJobPlan:
+    return ImmichUploadJobPlan(
+        job_id=f"job-{uuid4()}",
+        clip_id=str(clip["id"]),
+        operation_hash=str(clip["id"]),
+    )
 
 
 class ClipRevisionConflict(RuntimeError):
@@ -423,7 +462,9 @@ def _case_insensitive_values(rows: list[Any]) -> list[str]:
     return sorted(values.values(), key=str.casefold)
 
 
-def public_clip(row: dict[str, Any]) -> ClipRecord:
+def public_clip(
+    row: dict[str, Any], *, immich_upload_job: ImmichUploadJobSummary | None = None
+) -> ClipRecord:
     clip_id = str(row["id"])
     return ClipRecord.model_validate(
         {
@@ -431,6 +472,7 @@ def public_clip(row: dict[str, Any]) -> ClipRecord:
             "thumbnail_url": f"/api/clips/{clip_id}/thumbnail",
             "play_url": f"/api/clips/{clip_id}/media",
             "download_url": f"/api/clips/{clip_id}/download",
+            "immich_upload_job": immich_upload_job,
         }
     )
 
@@ -556,7 +598,7 @@ def automatic_title(metadata: dict[str, Any]) -> str:
 
 def recovery_envelope(metadata: dict[str, Any]) -> str:
     payload = {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "application": "MediaClipMakarr",
         "clipId": metadata["id"],
         "revision": metadata["revision"],
@@ -578,6 +620,8 @@ def recovery_envelope(metadata: dict[str, Any]) -> str:
                 "episode_number",
                 "clip_number",
                 "plex_username",
+                "immich_asset_id",
+                "immich_server_url",
             )
         },
         "source": {

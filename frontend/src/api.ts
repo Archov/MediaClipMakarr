@@ -248,6 +248,14 @@ export async function updateClipMetadata(
   return parseResponse<JobSnapshot>(response, "Clip metadata update");
 }
 
+export async function uploadClipToImmich(clipId: string): Promise<JobSnapshot> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/immich-upload`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+  });
+  return parseResponse<JobSnapshot>(response, "Immich upload request");
+}
+
 export async function deleteClip(
   clipId: string,
   expectedRevision: number,
