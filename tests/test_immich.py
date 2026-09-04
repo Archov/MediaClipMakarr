@@ -369,6 +369,35 @@ async def test_upsert_immich_tags_raises_invalid_response_on_malformed_body() ->
 
 
 @pytest.mark.asyncio
+async def test_upsert_immich_tags_raises_invalid_response_on_incomplete_body() -> None:
+    """A well-formed HTTP 200 that omits a requested path (or returns an entry
+    missing id/value) must not be treated as a valid partial result — the caller
+    would otherwise tag only the returned subset and could untag everything else."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "tag-library",
+                    "value": "TV Shows",
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z",
+                },
+            ],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await upsert_immich_tags(
+                ["TV Shows", "TV Shows/Breaking Bad"],
+                "http://immich.example:2283",
+                "valid-key",
+                client=client,
+            )
+
+
+@pytest.mark.asyncio
 async def test_tag_immich_assets_succeeds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PUT"

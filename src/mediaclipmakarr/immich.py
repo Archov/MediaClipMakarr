@@ -369,6 +369,14 @@ async def upsert_immich_tags(
         for entry in payload:
             if isinstance(entry, dict) and entry.get("id") and entry.get("value"):
                 result[str(entry["value"])] = str(entry["id"])
+        # A well-formed HTTP 200 still isn't a guarantee every requested path came
+        # back with a usable id — treat a short response as invalid rather than
+        # silently tagging (and later untagging) only the returned subset.
+        missing = [path for path in tag_paths if path not in result]
+        if missing:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a tag id for: " + ", ".join(missing)
+            )
         return result
     finally:
         if owns_client:

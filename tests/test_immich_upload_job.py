@@ -11,7 +11,7 @@ from sqlalchemy import text
 import mediaclipmakarr.jobs.repository as repository_module
 import mediaclipmakarr.jobs.runner as runner_module
 from mediaclipmakarr.clip_library import ClipRevisionConflict, build_immich_upload_plan
-from mediaclipmakarr.clips import get_clip, insert_clip
+from mediaclipmakarr.clips import get_clip, insert_clip, parse_stored_immich_tag_ids
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.immich import (
@@ -765,17 +765,22 @@ async def test_immich_upload_skips_tagging_step_when_nothing_configured(
 
 
 @pytest.mark.asyncio
-async def test_immich_upload_ignores_a_missing_fingerprint_baseline(
+async def test_immich_upload_falls_back_to_embedded_identity_when_no_fingerprint_baseline(
     tmp_path, monkeypatch
 ) -> None:
     """Clips recorded before file_size_bytes/file_modified_ns existed (or inserted
-    through a path that never set them) have no baseline to compare against — the
-    fingerprint check must not treat "no baseline" as "changed"."""
+    through a path that never set them) have no byte-level baseline to compare
+    against — the fingerprint check must fall back to the clip id/revision envelope
+    every rendered file carries in its `comment` metadata tag, and proceed when it
+    matches."""
     database_path = tmp_path / "application.db"
     clip_root = tmp_path / "clips"
     source = clip_root / "TV Shows" / "Pilot.mp4"
     source.parent.mkdir(parents=True)
-    source.write_bytes(b"clip bytes")
+    source.write_bytes(
+        b'clip bytes MediaClipMakarr {"application":"MediaClipMakarr","schemaVersion":4,'
+        b'"clipId":"clip-one","revision":1}'
+    )
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
@@ -807,6 +812,89 @@ async def test_immich_upload_ignores_a_missing_fingerprint_baseline(
 
     assert snapshot is not None
     assert snapshot.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_rejects_unknown_identity_when_no_fingerprint_baseline(
+    tmp_path, monkeypatch
+) -> None:
+    """Without a byte-level baseline or a matching embedded identity envelope, the
+    file at file_path is an unknown quantity — reject it rather than uploading
+    whatever currently occupies that path under the clip's name."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"unrelated bytes with no identity envelope")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(str(source_path))
+        return "asset-remote-1"
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    try:
+        payload = clip_payload(source)
+        payload["file_size_bytes"] = None
+        payload["file_modified_ns"] = None
+        await insert_clip(engine, payload)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path)
+        with pytest.raises(ClipRevisionConflict):
+            await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_rejects_a_fabricated_two_field_identity_envelope(
+    tmp_path, monkeypatch
+) -> None:
+    """A marker followed by only clipId/revision (no application/schemaVersion) is
+    not a genuine recovery envelope and must not be accepted as identity proof."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'clip bytes MediaClipMakarr {"clipId":"clip-one","revision":1}')
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(str(source_path))
+        return "asset-remote-1"
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    try:
+        payload = clip_payload(source)
+        payload["file_size_bytes"] = None
+        payload["file_modified_ns"] = None
+        await insert_clip(engine, payload)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path)
+        with pytest.raises(ClipRevisionConflict):
+            await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == []
 
 
 @pytest.mark.asyncio
@@ -955,3 +1043,68 @@ async def test_immich_upload_does_not_carry_stale_tag_ids_across_a_server_change
     assert untag_calls == []
     assert clip_after_second is not None
     assert json.loads(clip_after_second["immich_tag_ids"]) == [f"tag-id-for-{OTHER_IMMICH_URL}"]
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_clears_stale_tag_cache_on_server_change_with_no_tags_configured(
+    tmp_path, monkeypatch
+) -> None:
+    """When the configured server changes and no tags are configured on the retry,
+    the tag-diffing block never runs at all (nothing to add, and the stale cache is
+    deliberately not trusted as "previous"). The old server's tag ids must still be
+    cleared from the durable cache — otherwise a later run that reuses this new
+    association would load them back and send them to the new server."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return f"asset-for-{url}"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        return {path: f"tag-id-for-{url}" for path in tag_paths}
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        return None
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner_a = _make_runner(engine, tmp_path, immich_url=IMMICH_URL, tag_library=True)
+        await runner_a._execute_claimed_job(claimed)
+        clip_after_first = await get_clip(engine, "clip-one", clip_root)
+
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        second_plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, second_plan)
+        second_claimed = await _claim_immich_upload_job(engine, "run-two")
+        # No tags configured this time — the tag-diffing block is skipped entirely.
+        runner_b = _make_runner(engine, tmp_path, immich_url=OTHER_IMMICH_URL)
+        await runner_b._execute_claimed_job(second_claimed)
+        clip_after_second = await get_clip(engine, "clip-one", clip_root)
+    finally:
+        await engine.dispose()
+
+    assert clip_after_first is not None
+    assert json.loads(clip_after_first["immich_tag_ids"]) == [f"tag-id-for-{IMMICH_URL}"]
+
+    assert clip_after_second is not None
+    assert clip_after_second["immich_server_url"] == OTHER_IMMICH_URL
+    assert not parse_stored_immich_tag_ids(clip_after_second["immich_tag_ids"])
