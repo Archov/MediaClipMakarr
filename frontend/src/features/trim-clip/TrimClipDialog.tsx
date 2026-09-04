@@ -43,9 +43,10 @@ interface FrameNudgeButtonProps {
   direction: "backward" | "forward";
   disabled: boolean;
   onClick: () => void;
+  onArrowNudge: (direction: -1 | 1) => void;
 }
 
-function FrameNudgeButton({ boundary, direction, disabled, onClick }: FrameNudgeButtonProps) {
+function FrameNudgeButton({ boundary, direction, disabled, onClick, onArrowNudge }: FrameNudgeButtonProps) {
   const backward = direction === "backward";
   return (
     <Tooltip title={`Move ${boundary} ${direction} one nominal frame`}>
@@ -55,6 +56,11 @@ function FrameNudgeButton({ boundary, direction, disabled, onClick }: FrameNudge
           disabled={disabled}
           variant="outlined"
           onClick={onClick}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            onArrowNudge(event.key === "ArrowLeft" ? -1 : 1);
+          }}
           sx={{ minWidth: 44, width: 44, height: 56, px: 0.5, fontVariantNumeric: "tabular-nums" }}
         >
           {backward ? "−1f" : "+1f"}
@@ -79,6 +85,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const [playheadMs, setPlayheadMs] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [videoPlaying, setVideoPlaying] = useState(false);
+  const [activeBoundary, setActiveBoundary] = useState<"start" | "end" | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [expectedRevision, setExpectedRevision] = useState<number | null>(null);
 
@@ -205,6 +212,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
 
   const nudgeBoundaryOneFrame = (boundary: "start" | "end", direction: -1 | 1) => {
     if (!frameStepMs) return;
+    setActiveBoundary(boundary);
     const next = shiftTimelineBoundary(selectionRange, editableRange, boundary, direction * frameStepMs);
     if (next === selectionRange) return;
     commitRange(next.startMs, next.endMs, boundary);
@@ -261,7 +269,9 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
               selectionRange={selectionRange}
               playheadMs={playheadMs}
               stepMs={frameStepMs}
+              activeBoundary={activeBoundary}
               onInteractionStart={cancelPreview}
+              onActiveBoundaryChange={setActiveBoundary}
               onSelectionChange={(range, activeBoundary) => {
                 commitRange(range.startMs, range.endMs, activeBoundary);
               }}
@@ -276,6 +286,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     direction="backward"
                     disabled={!canNudgeBoundary("start", -1)}
                     onClick={() => nudgeBoundaryOneFrame("start", -1)}
+                    onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
                 )}
                 <TextField
@@ -284,6 +295,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   error={Boolean(startError)}
                   helperText={startError}
                   onChange={(event) => setStartFromInput(event.target.value)}
+                  onFocus={() => setActiveBoundary("start")}
                   onBlur={() => {
                     if (startError) {
                       setStartInput(formatTimestampMs(startMs));
@@ -298,6 +310,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     direction="forward"
                     disabled={!canNudgeBoundary("start", 1)}
                     onClick={() => nudgeBoundaryOneFrame("start", 1)}
+                    onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
                 )}
                 <Tooltip title="Set Start to playhead">
@@ -305,7 +318,10 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     <IconButton
                       aria-label="Set Start to playhead"
                       disabled={playheadMs >= endMs}
-                      onClick={() => setBoundaryToPlayhead("start")}
+                      onClick={() => {
+                        setActiveBoundary("start");
+                        setBoundaryToPlayhead("start");
+                      }}
                       sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                     >
                       <AddLocationAltRounded />
@@ -320,6 +336,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     direction="backward"
                     disabled={!canNudgeBoundary("end", -1)}
                     onClick={() => nudgeBoundaryOneFrame("end", -1)}
+                    onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />
                 )}
                 <TextField
@@ -328,6 +345,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   error={Boolean(endError)}
                   helperText={endError}
                   onChange={(event) => setEndFromInput(event.target.value)}
+                  onFocus={() => setActiveBoundary("end")}
                   onBlur={() => {
                     if (endError) {
                       setEndInput(formatTimestampMs(endMs));
@@ -342,6 +360,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     direction="forward"
                     disabled={!canNudgeBoundary("end", 1)}
                     onClick={() => nudgeBoundaryOneFrame("end", 1)}
+                    onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />
                 )}
                 <Tooltip title="Set End to playhead">
@@ -349,7 +368,10 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     <IconButton
                       aria-label="Set End to playhead"
                       disabled={playheadMs <= startMs}
-                      onClick={() => setBoundaryToPlayhead("end")}
+                      onClick={() => {
+                        setActiveBoundary("end");
+                        setBoundaryToPlayhead("end");
+                      }}
                       sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
                     >
                       <AddLocationAltRounded />

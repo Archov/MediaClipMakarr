@@ -22,9 +22,11 @@ export interface EditTimelineProps {
   referenceRange?: TimelineRange;
   playheadMs: number;
   stepMs?: number;
+  activeBoundary?: "start" | "end" | null;
   formatRulerTime?: (valueMs: number) => string;
   onSelectionChange: (range: TimelineRange, activeBoundary: "start" | "end") => void;
   onPlayheadChange: (valueMs: number) => void;
+  onActiveBoundaryChange?: (boundary: "start" | "end" | null) => void;
   onInteractionStart?: () => void;
 }
 
@@ -34,9 +36,12 @@ interface BoundaryHandleProps {
   editableRange: TimelineRange;
   selectionRange: TimelineRange;
   stepMs?: number;
+  active: boolean;
+  formatTime: (valueMs: number) => string;
   trackRef: React.RefObject<HTMLDivElement | null>;
   onSelectionChange: EditTimelineProps["onSelectionChange"];
   onPlayheadChange: EditTimelineProps["onPlayheadChange"];
+  onActivate: () => void;
   onInteractionStart?: EditTimelineProps["onInteractionStart"];
 }
 
@@ -46,9 +51,12 @@ function BoundaryHandle({
   editableRange,
   selectionRange,
   stepMs,
+  active,
+  formatTime,
   trackRef,
   onSelectionChange,
   onPlayheadChange,
+  onActivate,
   onInteractionStart,
 }: BoundaryHandleProps) {
   const dragOffsetRef = useRef(0);
@@ -77,15 +85,18 @@ function BoundaryHandle({
       component="button"
       type="button"
       role="slider"
-      aria-label={`${boundary === "start" ? "Start" : "End"} boundary`}
+      aria-label={`${boundary === "start" ? "Start" : "End"} boundary${active ? ", selected" : ""}`}
       aria-valuemin={boundary === "start" ? editableRange.startMs : selectionRange.startMs + 1}
       aria-valuemax={boundary === "start" ? selectionRange.endMs - 1 : editableRange.endMs}
       aria-valuenow={valueMs}
+      aria-valuetext={formatTime(valueMs)}
+      onFocus={onActivate}
       onPointerDown={(event) => {
         event.stopPropagation();
         const handleBounds = event.currentTarget.getBoundingClientRect();
         dragOffsetRef.current = event.clientX - (handleBounds.left + handleBounds.width / 2);
         event.currentTarget.setPointerCapture(event.pointerId);
+        onActivate();
         onInteractionStart?.();
       }}
       onPointerMove={(event) => {
@@ -114,11 +125,12 @@ function BoundaryHandle({
         position: "absolute",
         zIndex: 5,
         left: `${timeToTimelinePercent(valueMs, viewportRange)}%`,
-        top: "50%",
+        top: 0,
+        bottom: 0,
         width: 44,
-        height: 54,
+        height: "auto",
         p: 0,
-        transform: "translate(-50%, -50%)",
+        transform: "translateX(-50%)",
         border: 0,
         bgcolor: "transparent",
         color: "common.white",
@@ -128,32 +140,34 @@ function BoundaryHandle({
           content: '""',
           position: "absolute",
           left: "50%",
-          top: 7,
-          bottom: 7,
+          top: 8,
+          bottom: 0,
           width: 4,
           transform: "translateX(-50%)",
           borderRadius: 1,
           bgcolor: "primary.light",
-          boxShadow: "0 0 0 1px rgba(0,0,0,.7)",
+          boxShadow: active
+            ? "0 0 0 1px #fff, 0 0 0 2px rgba(0,0,0,.75)"
+            : "0 0 0 1px rgba(0,0,0,.7)",
         },
         "&:focus-visible": {
-          outline: "2px solid",
-          outlineColor: "common.white",
-          outlineOffset: 2,
-          borderRadius: 1,
+          outline: "none",
         },
       }}
     >
       <Box
         sx={{
           position: "absolute",
-          top: 0,
+          bottom: 0,
           left: "50%",
           width: 14,
           height: 14,
-          transform: "translateX(-50%) rotate(45deg)",
+          transform: "translate(-50%, 50%) rotate(45deg)",
           bgcolor: "primary.light",
           borderRadius: "2px 0 2px 0",
+          boxShadow: active
+            ? "0 0 0 1px #fff, 0 0 0 2px rgba(0,0,0,.75)"
+            : "0 0 0 1px rgba(0,0,0,.7)",
         }}
       />
     </Box>
@@ -167,9 +181,11 @@ export function EditTimeline({
   referenceRange,
   playheadMs,
   stepMs,
+  activeBoundary,
   formatRulerTime = formatTimelineRulerTime,
   onSelectionChange,
   onPlayheadChange,
+  onActiveBoundaryChange,
   onInteractionStart,
 }: EditTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -247,6 +263,7 @@ export function EditTimeline({
         ref={trackRef}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
+          onActiveBoundaryChange?.(null);
           onInteractionStart?.();
           updatePlayheadFromPointer(event.clientX);
         }}
@@ -325,9 +342,12 @@ export function EditTimeline({
           editableRange={editableRange}
           selectionRange={selectionRange}
           stepMs={stepMs}
+          active={activeBoundary === "start"}
+          formatTime={formatRulerTime}
           trackRef={trackRef}
           onSelectionChange={onSelectionChange}
           onPlayheadChange={onPlayheadChange}
+          onActivate={() => onActiveBoundaryChange?.("start")}
           onInteractionStart={onInteractionStart}
         />
         <BoundaryHandle
@@ -336,9 +356,12 @@ export function EditTimeline({
           editableRange={editableRange}
           selectionRange={selectionRange}
           stepMs={stepMs}
+          active={activeBoundary === "end"}
+          formatTime={formatRulerTime}
           trackRef={trackRef}
           onSelectionChange={onSelectionChange}
           onPlayheadChange={onPlayheadChange}
+          onActivate={() => onActiveBoundaryChange?.("end")}
           onInteractionStart={onInteractionStart}
         />
 
@@ -351,7 +374,7 @@ export function EditTimeline({
               zIndex: 6,
               left: `${timeToTimelinePercent(playheadMs, viewportRange)}%`,
               top: -12,
-              bottom: -7,
+              bottom: 0,
               width: 2,
               transform: "translateX(-50%)",
               bgcolor: "warning.main",
