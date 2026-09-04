@@ -1,11 +1,14 @@
 """Public job-system interfaces."""
 
+from mediaclipmakarr.clip_library import BulkImmichUploadJobPlan
+
 from .events import JobEventBroker, job_sse_payload
 from .models import ClaimedJob, JobError, JobSnapshot, JobUpdateConflict
 from .recovery import fail_abandoned_jobs, recover_finalizing_jobs
 from .repository import (
     claim_next_job,
     create_pending_operation,
+    enqueue_bulk_immich_upload_job,
     enqueue_clip_create_job,
     enqueue_immich_upload_job,
     enqueue_metadata_edit_job,
@@ -22,6 +25,7 @@ from .repository import (
 from .runner import ImmichJobSettings, JobRunner
 
 __all__ = [
+    "BulkImmichUploadJobPlan",
     "ClaimedJob",
     "ImmichJobSettings",
     "JobError",
@@ -31,6 +35,7 @@ __all__ = [
     "JobUpdateConflict",
     "claim_next_job",
     "create_pending_operation",
+    "enqueue_bulk_immich_upload_job",
     "enqueue_clip_create_job",
     "enqueue_immich_upload_job",
     "enqueue_metadata_edit_job",

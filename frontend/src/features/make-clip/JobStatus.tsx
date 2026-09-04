@@ -31,7 +31,7 @@ export function JobStatus({
   onSelectAlternative?: (alternative: Record<string, unknown>) => void;
 }) {
   const queryClient = useQueryClient();
-  const clipId = job?.state === "SUCCEEDED" && job.result ? job.result.clip_id : null;
+  const clipId = job?.state === "SUCCEEDED" && job.result && "clip_id" in job.result ? job.result.clip_id : null;
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleted, setDeleted] = useState(false);

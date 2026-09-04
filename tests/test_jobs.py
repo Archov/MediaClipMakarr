@@ -20,6 +20,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.hdr import AdvancedMediaError, HdrCapabilities
 from mediaclipmakarr.jobs import (
+    ImmichJobSettings,
     JobEventBroker,
     JobRunner,
     claim_next_job,
@@ -211,6 +212,143 @@ async def test_job_runner_finalizes_clip_and_serves_by_managed_id(tmp_path) -> N
     assert snapshot.result["clip_id"] == plan.clip_id
     assert clip is not None
     assert await asyncio.to_thread(Path(clip["file_path"]).read_bytes) == b"rendered mp4"
+
+
+@pytest.mark.asyncio
+async def test_clip_create_auto_enqueues_immich_upload_when_configured(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    clip_dir = tmp_path / "clips"
+    work_dir = tmp_path / "work"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def renderer(plan, settings, *, progress):
+        await progress(1.0, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered mp4")
+        return RenderedClipFile(path=output, duration_ms=plan.source_end_ms - plan.source_start_ms)
+
+    async def immich_settings_loader() -> ImmichJobSettings:
+        return ImmichJobSettings(
+            url="http://immich.example:2283",
+            api_key="test-key",
+            default_tag="",
+            tag_library=False,
+            tag_show=False,
+            tag_episode=False,
+            auto_upload=True,
+        )
+
+    try:
+        settings = Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=work_dir,
+            clip_dir=clip_dir,
+            source_dirs=[tmp_path],
+        )
+        events = JobEventBroker()
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=events,
+            renderer=renderer,
+            immich_settings_loader=immich_settings_loader,
+        )
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-token")
+        assert claimed is not None
+        await runner._execute_claimed_job(claimed)
+        clip_snapshot = await get_job_snapshot(engine, queued.id)
+        thumbnail_claimed = await claim_next_job(engine, "run-token-2")
+        assert thumbnail_claimed is not None
+        assert thumbnail_claimed.type == "thumbnail_generate"
+        upload_claimed = await claim_next_job(engine, "run-token-3")
+    finally:
+        await engine.dispose()
+
+    assert clip_snapshot is not None
+    assert clip_snapshot.state == "SUCCEEDED"
+    assert upload_claimed is not None
+    assert upload_claimed.type == "immich_upload"
+
+
+@pytest.mark.asyncio
+async def test_clip_create_does_not_auto_enqueue_immich_upload_when_disabled(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    clip_dir = tmp_path / "clips"
+    work_dir = tmp_path / "work"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def renderer(plan, settings, *, progress):
+        await progress(1.0, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered mp4")
+        return RenderedClipFile(path=output, duration_ms=plan.source_end_ms - plan.source_start_ms)
+
+    async def immich_settings_loader() -> ImmichJobSettings:
+        return ImmichJobSettings(
+            url="http://immich.example:2283",
+            api_key="test-key",
+            default_tag="",
+            tag_library=False,
+            tag_show=False,
+            tag_episode=False,
+            auto_upload=False,
+        )
+
+    try:
+        settings = Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=work_dir,
+            clip_dir=clip_dir,
+            source_dirs=[tmp_path],
+        )
+        events = JobEventBroker()
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=events,
+            renderer=renderer,
+            immich_settings_loader=immich_settings_loader,
+        )
+        plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        queued = await enqueue_clip_create_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-token")
+        assert claimed is not None
+        await runner._execute_claimed_job(claimed)
+        clip_snapshot = await get_job_snapshot(engine, queued.id)
+        thumbnail_claimed = await claim_next_job(engine, "run-token-2")
+        assert thumbnail_claimed is not None
+        assert thumbnail_claimed.type == "thumbnail_generate"
+        upload_claimed = await claim_next_job(engine, "run-token-3")
+    finally:
+        await engine.dispose()
+
+    assert clip_snapshot is not None
+    assert clip_snapshot.state == "SUCCEEDED"
+    assert upload_claimed is None
 
 
 @pytest.mark.asyncio

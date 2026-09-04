@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.clip_library import (
+    BulkImmichUploadJobPlan,
     ClipRevisionConflict,
     ImmichUploadJobPlan,
     ImmichUploadJobSummary,
@@ -70,10 +71,27 @@ async def enqueue_immich_upload_job(
         return winner
 
 
+async def enqueue_bulk_immich_upload_job(
+    engine: AsyncEngine, plan: BulkImmichUploadJobPlan
+) -> JobSnapshot:
+    existing = await _find_active_job(engine, "bulk_immich_upload", plan.operation_hash)
+    if existing is not None:
+        return existing
+    return await _enqueue_job(
+        engine, "bulk_immich_upload", plan, "Bulk Immich upload is queued."
+    )
+
+
 async def _enqueue_job(
     engine: AsyncEngine,
     job_type: str,
-    plan: ClipRenderPlan | ThumbnailJobPlan | MetadataEditJobPlan,
+    plan: (
+        ClipRenderPlan
+        | ThumbnailJobPlan
+        | MetadataEditJobPlan
+        | ImmichUploadJobPlan
+        | BulkImmichUploadJobPlan
+    ),
     message: str,
 ) -> JobSnapshot:
     created_at = utc_now()
@@ -176,6 +194,7 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
         "thumbnail_generate": ThumbnailJobPlan,
         "clip_metadata_edit": MetadataEditJobPlan,
         "immich_upload": ImmichUploadJobPlan,
+        "bulk_immich_upload": BulkImmichUploadJobPlan,
     }.get(job_type)
     if plan_class is None:
         raise ValueError(f"Unsupported queued job type: {job_type}")

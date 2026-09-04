@@ -7,11 +7,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from mediaclipmakarr.clip_library import ImmichUploadJobPlan, MetadataEditJobPlan, ThumbnailJobPlan
+from mediaclipmakarr.clip_library import (
+    BulkImmichUploadJobPlan,
+    ImmichUploadJobPlan,
+    MetadataEditJobPlan,
+    ThumbnailJobPlan,
+)
 from mediaclipmakarr.render_plan import ClipRenderPlan
 
 JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "FAILED"]
-JobType = Literal["clip_create", "thumbnail_generate", "clip_metadata_edit", "immich_upload"]
+JobType = Literal[
+    "clip_create",
+    "thumbnail_generate",
+    "clip_metadata_edit",
+    "immich_upload",
+    "bulk_immich_upload",
+]
 JobStage = Literal[
     "queued",
     "validating",
@@ -59,7 +70,13 @@ class ClaimedJob:
     id: str
     run_token: str
     type: JobType
-    render_plan: ClipRenderPlan | ThumbnailJobPlan | MetadataEditJobPlan | ImmichUploadJobPlan
+    render_plan: (
+        ClipRenderPlan
+        | ThumbnailJobPlan
+        | MetadataEditJobPlan
+        | ImmichUploadJobPlan
+        | BulkImmichUploadJobPlan
+    )
 
 
 class JobUpdateConflict(RuntimeError):

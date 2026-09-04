@@ -10,8 +10,12 @@ from sqlalchemy import text
 
 import mediaclipmakarr.jobs.repository as repository_module
 import mediaclipmakarr.jobs.runner as runner_module
-from mediaclipmakarr.clip_library import ClipRevisionConflict, build_immich_upload_plan
-from mediaclipmakarr.clips import get_clip, insert_clip
+from mediaclipmakarr.clip_library import (
+    ClipRevisionConflict,
+    build_bulk_immich_upload_plan,
+    build_immich_upload_plan,
+)
+from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.immich import (
@@ -23,6 +27,7 @@ from mediaclipmakarr.jobs import (
     JobEventBroker,
     JobRunner,
     claim_next_job,
+    enqueue_bulk_immich_upload_job,
     enqueue_immich_upload_job,
     get_job_snapshot,
 )
@@ -74,6 +79,7 @@ def _make_runner(
     tag_library: bool = False,
     tag_show: bool = False,
     tag_episode: bool = False,
+    auto_upload: bool = False,
 ) -> JobRunner:
     async def immich_settings_loader() -> ImmichJobSettings:
         return ImmichJobSettings(
@@ -83,6 +89,7 @@ def _make_runner(
             tag_library=tag_library,
             tag_show=tag_show,
             tag_episode=tag_episode,
+            auto_upload=auto_upload,
         )
 
     return JobRunner(
@@ -955,3 +962,229 @@ async def test_immich_upload_does_not_carry_stale_tag_ids_across_a_server_change
     assert untag_calls == []
     assert clip_after_second is not None
     assert json.loads(clip_after_second["immich_tag_ids"]) == [f"tag-id-for-{OTHER_IMMICH_URL}"]
+
+
+async def _claim_bulk_upload_job(engine, run_token: str):
+    claimed = await claim_next_job(engine, run_token)
+    assert claimed is not None
+    assert claimed.type == "bulk_immich_upload"
+    return claimed
+
+
+@pytest.mark.asyncio
+async def test_enqueue_bulk_immich_upload_job_reuses_an_already_active_job(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        first = await enqueue_bulk_immich_upload_job(
+            engine, build_bulk_immich_upload_plan(["clip-one"])
+        )
+        second = await enqueue_bulk_immich_upload_job(
+            engine, build_bulk_immich_upload_plan(["clip-one", "clip-two"])
+        )
+        row_count = await engine_scalar(
+            engine, "SELECT COUNT(*) FROM jobs WHERE type = 'bulk_immich_upload'"
+        )
+    finally:
+        await engine.dispose()
+
+    assert second.id == first.id
+    assert row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_reuploads_stale_server_clip_but_skips_current_server_clip(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source_one = clip_root / "TV Shows" / "Pilot.mp4"
+    source_two = clip_root / "TV Shows" / "Encore.mp4"
+    source_one.parent.mkdir(parents=True)
+    source_one.write_bytes(b"clip one bytes")
+    source_two.write_bytes(b"clip two bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(str(source_path))
+        return "asset-remote-new"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
+        await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
+        # clip-one is linked to a different (stale) server — still eligible.
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-old", OTHER_IMMICH_URL)
+        # clip-two is already linked to the currently configured server — skip it.
+        await set_clip_immich_asset_id(engine, "clip-two", "asset-current", IMMICH_URL)
+
+        plan = build_bulk_immich_upload_plan(["clip-one", "clip-two"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == [str(source_one)]
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result == {
+        "total": 2,
+        "succeeded": 1,
+        "partial": 0,
+        "failed": 0,
+        "skipped": 1,
+        "details": [
+            {
+                "clip_id": "clip-one",
+                "title": "Pilot",
+                "outcome": "succeeded",
+                "error_code": None,
+            },
+            {
+                "clip_id": "clip-two",
+                "title": "Encore",
+                "outcome": "skipped",
+                "error_code": None,
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_continues_after_a_clip_fails_and_tallies_outcomes(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source_one = clip_root / "TV Shows" / "Pilot.mp4"
+    source_two = clip_root / "TV Shows" / "Encore.mp4"
+    source_three = clip_root / "TV Shows" / "Finale.mp4"
+    source_one.parent.mkdir(parents=True)
+    source_one.write_bytes(b"one")
+    source_two.write_bytes(b"two")
+    source_three.write_bytes(b"three")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(str(source_path))
+        if source_path == source_two:
+            raise ImmichInvalidResponseError("upload exploded")
+        return f"asset-for-{source_path.name}"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        if asset_id == "asset-for-Finale.mp4":
+            raise ImmichInvalidResponseError("description exploded")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
+        await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
+        await insert_clip(engine, clip_payload(source_three, clip_id="clip-three", title="Finale"))
+
+        plan = build_bulk_immich_upload_plan(["clip-one", "clip-two", "clip-three"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    # clip-two's upload failure must not have stopped clip-three from being processed.
+    assert upload_calls == [str(source_one), str(source_two), str(source_three)]
+    assert snapshot is not None
+    assert snapshot.state == "PARTIAL"
+    assert snapshot.error is not None
+    assert snapshot.result is not None
+    assert snapshot.result["total"] == 3
+    assert snapshot.result["succeeded"] == 1
+    assert snapshot.result["partial"] == 1
+    assert snapshot.result["failed"] == 1
+    assert snapshot.result["skipped"] == 0
+    outcomes = {item["clip_id"]: item["outcome"] for item in snapshot.result["details"]}
+    assert outcomes == {"clip-one": "succeeded", "clip-two": "failed", "clip-three": "partial"}
+    titles = {item["clip_id"]: item["title"] for item in snapshot.result["details"]}
+    assert titles == {"clip-one": "Pilot", "clip-two": "Encore", "clip-three": "Finale"}
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_with_no_eligible_clips_is_marked_succeeded(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        plan = build_bulk_immich_upload_plan([])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "SUCCEEDED"
+    assert snapshot.result == {
+        "total": 0,
+        "succeeded": 0,
+        "partial": 0,
+        "failed": 0,
+        "skipped": 0,
+        "details": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_marks_failed_when_every_attempted_clip_fails(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source_one = clip_root / "TV Shows" / "Pilot.mp4"
+    source_two = clip_root / "TV Shows" / "Encore.mp4"
+    source_one.parent.mkdir(parents=True)
+    source_one.write_bytes(b"one")
+    source_two.write_bytes(b"two")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        raise ImmichInvalidResponseError("upload exploded")
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    try:
+        await insert_clip(engine, clip_payload(source_one, clip_id="clip-one", title="Pilot"))
+        await insert_clip(engine, clip_payload(source_two, clip_id="clip-two", title="Encore"))
+
+        plan = build_bulk_immich_upload_plan(["clip-one", "clip-two"])
+        await enqueue_bulk_immich_upload_job(engine, plan)
+        claimed = await _claim_bulk_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+        await runner._execute_claimed_job(claimed)
+        snapshot = await get_job_snapshot(engine, claimed.id)
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None
+    assert snapshot.state == "FAILED"
+    assert snapshot.error is not None
+    assert snapshot.error.code == "BULK_UPLOAD_FAILED"
