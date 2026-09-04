@@ -18,17 +18,19 @@ import {
   deleteClip,
   fetchClip,
   fetchJob,
+  fetchSettings,
   updateClipMetadata,
+  uploadClipToImmich,
 } from "../../api";
 import { formatTimestampMs } from "../../timestamps";
 import type {
   ClipMetadataUpdate,
   ClipRecord,
-  ImmichUploadJobSummary,
   JobSnapshot,
   JobState,
 } from "../../types";
 import { DeleteClipDialog, MetadataDialog } from "../library/ClipDialogs";
+import { ImmichIcon } from "../library/LibraryScreen";
 import { MediaErrorAlert } from "./MediaErrorAlert";
 
 const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
@@ -38,41 +40,6 @@ function severity(state: JobState): "success" | "info" | "warning" | "error" {
   if (state === "PARTIAL") return "warning";
   if (state === "FAILED") return "error";
   return "info";
-}
-
-// Auto-upload (and any prior manual upload) runs as its own independent job —
-// the clip-create job is already durably SUCCEEDED before it's even enqueued,
-// so its outcome has to be surfaced separately rather than folded into `job`.
-function ImmichUploadIndicator({
-  uploadJob,
-}: {
-  uploadJob: ImmichUploadJobSummary | null | undefined;
-}) {
-  if (!uploadJob) return null;
-  if (NONTERMINAL_JOB_STATES.has(uploadJob.state)) {
-    return (
-      <Chip
-        size="small"
-        variant="outlined"
-        icon={<CircularProgress size={12} />}
-        label="Uploading to Immich…"
-      />
-    );
-  }
-  if (uploadJob.state === "PARTIAL" || uploadJob.state === "FAILED") {
-    const label = uploadJob.state === "PARTIAL" ? "Immich upload partial" : "Immich upload failed";
-    const detail = uploadJob.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : label;
-    return (
-      <Tooltip title={detail}>
-        <Chip
-          size="small"
-          color={uploadJob.state === "PARTIAL" ? "warning" : "error"}
-          label={label}
-        />
-      </Tooltip>
-    );
-  }
-  return null;
 }
 
 export function JobStatus({
@@ -135,6 +102,21 @@ export function JobStatus({
       void queryClient.removeQueries({ queryKey: ["clip", result.id] });
     },
   });
+  const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
+  const immichConfigured = Boolean(
+    settings.data?.immich_url && settings.data?.immich_api_key_configured,
+  );
+  const uploadMutation = useMutation({
+    mutationFn: (target: ClipRecord) => uploadClipToImmich(target.id),
+    onSuccess: () => {
+      // Auto-upload (and any prior manual upload) runs as its own independent
+      // job — refetch rather than trust a stale snapshot, since `displayedClip`
+      // may be backed by either the `["clip", jobClipId]` query or the parent's
+      // "newest clip" list query depending on whether a render job is active.
+      void queryClient.invalidateQueries({ queryKey: ["clip", clipId] });
+      void queryClient.invalidateQueries({ queryKey: ["clips", "make-clip-latest"] });
+    },
+  });
 
   useEffect(() => {
     setEditing(false);
@@ -168,6 +150,19 @@ export function JobStatus({
   const editJobBusy = Boolean(
     editJobId && !["SUCCEEDED", "FAILED", "PARTIAL"].includes(editJob.data?.state ?? ""),
   );
+  const uploadJob = displayedClip?.immich_upload_job;
+  const uploading = Boolean(uploadJob && NONTERMINAL_JOB_STATES.has(uploadJob.state));
+  const uploadLabel = uploading
+    ? "Uploading to Immich…"
+    : uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
+      ? "Retry Immich upload"
+      : displayedClip?.immich_asset_id
+        ? "Re-upload to Immich"
+        : "Upload to Immich";
+  const uploadDetail =
+    uploadJob?.state === "PARTIAL" || uploadJob?.state === "FAILED"
+      ? (uploadJob.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : uploadLabel)
+      : null;
   return <Stack spacing={2}>
     {job && !job.error && <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}</Alert>}
     {job?.error && (
@@ -187,7 +182,8 @@ export function JobStatus({
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         <Chip label={title} color="success" variant="outlined" />
         <Chip label={formatTimestampMs(durationMs) || "--:--"} variant="outlined" />
-        <ImmichUploadIndicator uploadJob={displayedClip?.immich_upload_job} />
+      </Stack>
+      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         <Button href={downloadUrl} variant="outlined" startIcon={<ArrowDownwardRounded />}>Download</Button>
         <Button
           variant="outlined"
@@ -197,6 +193,20 @@ export function JobStatus({
         >
           Edit
         </Button>
+        {immichConfigured && (
+          <Tooltip title={uploadDetail ?? ""} disableHoverListener={!uploadDetail}>
+            <span>
+              <Button
+                variant="outlined"
+                startIcon={<ImmichIcon uploaded={Boolean(displayedClip?.immich_asset_id)} />}
+                disabled={!displayedClip || uploading}
+                onClick={() => displayedClip && uploadMutation.mutate(displayedClip)}
+              >
+                {uploadLabel}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         <Button
           color="error"
           variant="outlined"
@@ -211,6 +221,11 @@ export function JobStatus({
         </Button>
       </Stack>
     </Stack>}
+    {uploadMutation.error && (
+      <Alert severity="error" onClose={() => uploadMutation.reset()}>
+        {uploadMutation.error.message}
+      </Alert>
+    )}
     {clip.error && <Alert severity="error">{clip.error.message}</Alert>}
     {deleted && <Alert severity="success">The generated clip was deleted.</Alert>}
     {deleteWarnings.length > 0 && <Alert severity="warning">{deleteWarnings.join(" ")}</Alert>}
