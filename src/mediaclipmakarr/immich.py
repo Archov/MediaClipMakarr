@@ -375,6 +375,33 @@ async def upsert_immich_tags(
             await active_client.aclose()
 
 
+def _require_bulk_success(
+    payload: object, asset_id: str, *, acceptable_errors: set[str], action: str
+) -> None:
+    """Check one asset's entry in a bulk tag/untag response array.
+
+    HTTP 200 from these endpoints only means the request was well-formed — each
+    asset gets its own `{id, success, error?}` result, and a `success: false`
+    entry (e.g. `no_permission`, `validation`) must not be treated as done just
+    because the surrounding request succeeded.
+    """
+    if not isinstance(payload, list):
+        raise ImmichInvalidResponseError(f"Immich did not return a result list while {action}.")
+    entry = next(
+        (item for item in payload if isinstance(item, dict) and item.get("id") == asset_id),
+        None,
+    )
+    if entry is None:
+        raise ImmichInvalidResponseError(
+            f"Immich did not report a result for the asset while {action}."
+        )
+    if entry.get("success") is True or entry.get("error") in acceptable_errors:
+        return
+    raise ImmichInvalidResponseError(
+        f"Immich reported failure ({entry.get('error') or 'unknown'}) while {action}."
+    )
+
+
 async def tag_immich_assets(
     asset_id: str,
     tag_ids: list[str],
@@ -403,6 +430,18 @@ async def tag_immich_assets(
             raise ImmichInvalidResponseError(
                 f"Immich returned HTTP {response.status_code} while tagging the asset."
             )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while tagging the asset."
+            ) from error
+        # HTTP 200 only means the request was well-formed — each requested asset
+        # gets its own success/error entry, and a false success here would let the
+        # runner durably record a tag id as applied when it never actually was.
+        _require_bulk_success(
+            payload, asset_id, acceptable_errors={"duplicate"}, action="tagging the asset"
+        )
     finally:
         if owns_client:
             await active_client.aclose()
@@ -440,6 +479,22 @@ async def untag_immich_assets(
         if response.status_code != 200:
             raise ImmichInvalidResponseError(
                 f"Immich returned HTTP {response.status_code} while removing a tag."
+            )
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ImmichInvalidResponseError(
+                "Immich did not return a valid JSON response while removing a tag."
+            ) from error
+        for target_asset_id in asset_ids:
+            # "not_found" here means the asset already didn't have this tag — the
+            # goal (tag not applied) is already achieved, so that's an acceptable
+            # outcome, not a failure to report.
+            _require_bulk_success(
+                payload,
+                target_asset_id,
+                acceptable_errors={"not_found", "duplicate"},
+                action="removing a tag",
             )
     finally:
         if owns_client:

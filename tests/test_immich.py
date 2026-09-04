@@ -398,6 +398,47 @@ async def test_tag_immich_assets_raises_invalid_response_on_http_error() -> None
 
 
 @pytest.mark.asyncio
+async def test_tag_immich_assets_treats_a_duplicate_result_as_success() -> None:
+    # HTTP 200 with a per-asset "already tagged" result must not be reported as
+    # a failure — it's the desired end state, just not newly achieved this call.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "duplicate"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await tag_immich_assets(
+            "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_raises_on_a_per_asset_failure_despite_http_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "no_permission"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await tag_immich_assets(
+                "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_tag_immich_assets_raises_when_the_asset_is_missing_from_the_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": "some-other-asset", "success": True}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await tag_immich_assets(
+                "asset-123", ["tag-1"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
 async def test_untag_immich_assets_succeeds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
@@ -415,6 +456,35 @@ async def test_untag_immich_assets_succeeds() -> None:
 async def test_untag_immich_assets_raises_invalid_response_on_http_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            await untag_immich_assets(
+                "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+            )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_treats_not_found_as_success() -> None:
+    # The asset already didn't have this tag — the goal (tag not applied) is
+    # already achieved, so this must not be reported as a failure.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "not_found"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await untag_immich_assets(
+            "tag-1", ["asset-123"], "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_untag_immich_assets_raises_on_a_per_asset_failure_despite_http_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"id": "asset-123", "success": False, "error": "no_permission"}]
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ImmichInvalidResponseError):

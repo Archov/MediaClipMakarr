@@ -634,7 +634,16 @@ def build_immich_tag_paths(
 
     show_appended = False
     if tag_show:
-        level_two = _clean(clip.get("show_name") or clip.get("movie_title"))
+        # Select strictly by the clip's current media_type, not by whichever
+        # field happens to be non-empty — a clip reclassified from episode to
+        # movie (or vice versa) can still carry a stale show_name/movie_title
+        # from before the change, and that must not leak into the tag path.
+        media_type = clip.get("media_type")
+        level_two = None
+        if media_type == "episode":
+            level_two = _clean(clip.get("show_name"))
+        elif media_type == "movie":
+            level_two = _clean(clip.get("movie_title"))
         if level_two:
             segments.append(_sanitize_tag_segment(level_two))
             show_appended = True

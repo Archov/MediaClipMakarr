@@ -128,3 +128,36 @@ def test_missing_season_or_episode_number_still_uses_the_title_alone() -> None:
         tag_episode=True,
     )
     assert paths == ["Breaking Bad/Cat's in the Bag..."]
+
+
+def test_reclassified_episode_ignores_a_stale_movie_title() -> None:
+    # A clip reclassified from movie to episode can still carry the old
+    # movie_title in the row — it must not leak into the (now episode) path.
+    clip = _episode_clip(movie_title="Some Stale Movie Title")
+    paths = build_immich_tag_paths(
+        clip, default_tag="", tag_library=False, tag_show=True, tag_episode=True
+    )
+    assert paths == ["Breaking Bad/S01E02 - Cat's in the Bag..."]
+
+
+def test_reclassified_movie_ignores_a_stale_show_name() -> None:
+    # And the reverse: a clip reclassified from episode to movie can still
+    # carry the old show_name — the movie tag path must not use it.
+    clip = _movie_clip(show_name="Some Stale Show")
+    paths = build_immich_tag_paths(
+        clip, default_tag="", tag_library=False, tag_show=True, tag_episode=True
+    )
+    assert paths == ["Inception"]
+
+
+def test_video_media_type_gets_no_show_level_from_either_field() -> None:
+    clip = {
+        "library": "Home Movies",
+        "media_type": "video",
+        "show_name": "Leftover Show",
+        "movie_title": "Leftover Movie",
+    }
+    paths = build_immich_tag_paths(
+        clip, default_tag="", tag_library=True, tag_show=True, tag_episode=True
+    )
+    assert paths == ["Home Movies"]

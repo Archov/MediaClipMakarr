@@ -783,7 +783,11 @@ export function SettingsForm({
                           // parent for a stale "Episode was on" setting to nest
                           // under, so cascade it off too rather than leaving it
                           // silently armed for whenever Show gets re-enabled.
-                          if (!checked) setImmichTagEpisode(false);
+                          // Skip this when Episode is environment-managed: autosave
+                          // never persists a managed field, so a local-only "false"
+                          // here would just diverge from the real (managed) value
+                          // until a resync happens to overwrite it back.
+                          if (!checked && !managed("immich_tag_episode")) setImmichTagEpisode(false);
                         }}
                       />
                     }

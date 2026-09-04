@@ -730,7 +730,16 @@ class JobRunner:
             tag_show=immich_settings.tag_show,
             tag_episode=immich_settings.tag_episode,
         )
-        previous_tag_ids = parse_stored_immich_tag_ids(clip.get("immich_tag_ids"))
+        # Stored tag ids belong to whatever server they were last applied on. When
+        # this run uploaded fresh (a new asset, possibly on a different server —
+        # see `reusing` above), those ids are foreign to it: sending them to
+        # `untag_immich_assets` against a server that never issued them would
+        # fail (or worse, silently target an unrelated tag that happens to share
+        # the id). Only trust the cache when we're continuing against the same
+        # asset+server association it was recorded for.
+        previous_tag_ids = (
+            parse_stored_immich_tag_ids(clip.get("immich_tag_ids")) if reusing else []
+        )
         # What we believe is actually applied right now — seeded from the durable
         # record and updated as each add/remove call succeeds, so a failure partway
         # through still leaves an accurate record for the next run to diff against,

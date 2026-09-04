@@ -886,3 +886,72 @@ async def test_immich_upload_removes_stale_tags_no_longer_resolved(
     assert json.loads(clip_after_second["immich_tag_ids"]) == ["tag-id-for-Anime"]
     assert second_snapshot is not None
     assert second_snapshot.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_does_not_carry_stale_tag_ids_across_a_server_change(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        return f"asset-for-{url}"
+
+    async def fake_set_description(asset_id, description, url, api_key):
+        return None
+
+    async def fake_upsert_tags(tag_paths, url, api_key):
+        return {path: f"tag-id-for-{url}" for path in tag_paths}
+
+    async def fake_tag_assets(asset_id, tag_ids, url, api_key):
+        return None
+
+    untag_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_untag_assets(tag_id, asset_ids, url, api_key):
+        untag_calls.append((tag_id, asset_ids))
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    monkeypatch.setattr(runner_module, "upsert_immich_tags", fake_upsert_tags)
+    monkeypatch.setattr(runner_module, "tag_immich_assets", fake_tag_assets)
+    monkeypatch.setattr(runner_module, "untag_immich_assets", fake_untag_assets)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner_a = _make_runner(engine, tmp_path, immich_url=IMMICH_URL, tag_library=True)
+        await runner_a._execute_claimed_job(claimed)
+        clip_after_first = await get_clip(engine, "clip-one", clip_root)
+
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        second_plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, second_plan)
+        second_claimed = await _claim_immich_upload_job(engine, "run-two")
+        runner_b = _make_runner(
+            engine, tmp_path, immich_url=OTHER_IMMICH_URL, tag_library=True
+        )
+        await runner_b._execute_claimed_job(second_claimed)
+        clip_after_second = await get_clip(engine, "clip-one", clip_root)
+    finally:
+        await engine.dispose()
+
+    assert clip_after_first is not None
+    assert json.loads(clip_after_first["immich_tag_ids"]) == [f"tag-id-for-{IMMICH_URL}"]
+
+    # The fresh upload to the second server must never have tried to remove a
+    # tag id that only ever existed on the first server.
+    assert untag_calls == []
+    assert clip_after_second is not None
+    assert json.loads(clip_after_second["immich_tag_ids"]) == [f"tag-id-for-{OTHER_IMMICH_URL}"]
