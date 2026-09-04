@@ -8,6 +8,7 @@ import logging
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,8 +16,10 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mediaclipmakarr.application_settings import normalize_immich_url
 from mediaclipmakarr.clip_library import (
     ClipRevisionConflict,
+    ImmichUploadJobPlan,
     MetadataEditJobPlan,
     ThumbnailJobPlan,
     build_thumbnail_job_plan,
@@ -24,15 +27,21 @@ from mediaclipmakarr.clip_library import (
     rewrite_clip_metadata,
     thumbnail_path,
 )
-from mediaclipmakarr.clips import get_clip, insert_clip
+from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
 from mediaclipmakarr.concurrency import MediaProcessGate
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.immich import (
+    ImmichApiError,
+    ImmichAssetNotFoundError,
+    set_immich_asset_description,
+    upload_immich_asset_sync,
+)
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
 
 from .events import JobEventBroker
 from .finalization import install_metadata_revision, install_rendered_clip, remove_superseded_clip
-from .models import BlockingRunner, ClaimedJob, JobSnapshot
+from .models import BlockingRunner, ClaimedJob, JobError, JobSnapshot
 from .recovery import fail_abandoned_jobs, recover_finalizing_jobs
 from .repository import (
     _live_progress_snapshot,
@@ -43,6 +52,7 @@ from .repository import (
     enqueue_thumbnail_job,
     fail_job,
     finish_job_success,
+    finish_running_job_partial,
     finish_running_job_success,
     get_job_snapshot,
     transition_to_finalizing,
@@ -55,6 +65,26 @@ STALE_WORKDIR_REAP_INTERVAL_SECONDS = 3_600
 STALE_WORKDIR_AGE_SECONDS = 24 * 3_600
 ClipRenderer = Callable[..., Awaitable[RenderedClipFile]]
 PlexTokenLoader = Callable[[], Awaitable[str | None]]
+ImmichSettingsLoader = Callable[[], Awaitable[tuple[str | None, str | None]]]
+
+
+def _as_utc_datetime(value: Any) -> datetime:
+    """Clip rows come back from raw SQL as either a `datetime` or an ISO string,
+    always naive-but-UTC per this codebase's `utc_now()` convention — normalize
+    either shape into a timezone-aware UTC datetime."""
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+class _ImmichNotConfiguredError(RuntimeError):
+    """Immich URL/API key were missing when the upload job actually ran.
+
+    The API route already checks this before enqueueing; this only covers a
+    settings change landing between enqueue and execution.
+    """
+
+    job_error_code = "IMMICH_NOT_CONFIGURED"
+    job_retryable = True
 
 
 def _remove_job_workdir(workdir: Path) -> None:
@@ -94,6 +124,7 @@ class JobRunner:
         events: JobEventBroker,
         renderer: ClipRenderer = render_clip_file,
         plex_token_loader: PlexTokenLoader | None = None,
+        immich_settings_loader: ImmichSettingsLoader | None = None,
         progress_persist_interval_seconds: float = 1.0,
         media_process_gate: MediaProcessGate | None = None,
     ) -> None:
@@ -103,6 +134,7 @@ class JobRunner:
         self.events = events
         self.renderer = renderer
         self.plex_token_loader = plex_token_loader
+        self.immich_settings_loader = immich_settings_loader
         self.progress_persist_interval_seconds = progress_persist_interval_seconds
         self.media_process_gate = media_process_gate or MediaProcessGate()
         self._wake = asyncio.Event()
@@ -155,8 +187,15 @@ class JobRunner:
                 continue
             await self._publish_durable_job_update(claimed.id)
             try:
-                async with self.media_process_gate.slot():
+                # Immich uploads are a long-lived network call with no ffmpeg/CPU
+                # cost — holding the media-process gate for their duration would
+                # stall unrelated interactive media work (e.g. on-demand thumbnail
+                # generation) behind them for no reason.
+                if claimed.type == "immich_upload":
                     await self._execute_claimed_job(claimed)
+                else:
+                    async with self.media_process_gate.slot():
+                        await self._execute_claimed_job(claimed)
             except asyncio.CancelledError:
                 await self._cleanup_job_workdir(claimed.id, "application shutdown")
                 with contextlib.suppress(Exception):
@@ -242,6 +281,9 @@ class JobRunner:
             return
         if claimed.type == "clip_metadata_edit":
             await self._execute_metadata_edit_job(claimed)
+            return
+        if claimed.type == "immich_upload":
+            await self._execute_immich_upload_job(claimed)
             return
         plan = claimed.render_plan
         if not isinstance(plan, ClipRenderPlan):
@@ -520,6 +562,121 @@ class JobRunner:
         )
         await self._publish_durable_job_update(thumbnail_job.id)
         self.wake()
+
+
+    async def _execute_immich_upload_job(self, claimed: ClaimedJob) -> None:
+        plan = claimed.render_plan
+        if not isinstance(plan, ImmichUploadJobPlan):
+            raise TypeError("Immich upload job has an invalid durable plan.")
+        clip = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if clip is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        immich_url, immich_api_key = (
+            await self.immich_settings_loader() if self.immich_settings_loader else (None, None)
+        )
+        if not immich_url or not immich_api_key:
+            raise _ImmichNotConfiguredError("Immich is not configured.")
+
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="uploading_asset",
+            progress=0.1,
+            current_stage_progress=0.1,
+            message="Uploading clip to Immich.",
+        )
+        await self._publish_durable_job_update(claimed.id)
+
+        normalized_url = normalize_immich_url(immich_url)
+        reusing = (
+            bool(clip.get("immich_asset_id")) and clip.get("immich_server_url") == normalized_url
+        )
+
+        if reusing:
+            asset_id = str(clip["immich_asset_id"])
+        else:
+            source = Path(str(clip["file_path"]))
+            source_stat = await self.run_blocking(source.stat)
+            asset_id = await self.run_blocking(
+                upload_immich_asset_sync,
+                source,
+                normalized_url,
+                immich_api_key,
+                file_created_at=_as_utc_datetime(clip["created_at"]),
+                file_modified_at=datetime.fromtimestamp(source_stat.st_mtime, tz=UTC),
+            )
+            try:
+                await set_clip_immich_asset_id(
+                    self.engine, plan.clip_id, asset_id, normalized_url
+                )
+            except Exception as error:
+                await finish_running_job_partial(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
+                    error=JobError(
+                        code=getattr(error, "job_error_code", "IMMICH_ASSET_ASSOCIATION_FAILED"),
+                        message=str(error),
+                        retryable=getattr(error, "job_retryable", False),
+                    ),
+                    message="Uploaded to Immich, but the local association could not be recorded.",
+                )
+                await self._publish_durable_job_update(claimed.id)
+                return
+
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="setting_description",
+            progress=0.7,
+            current_stage_progress=0.7,
+            message="Setting the Immich asset description.",
+        )
+        await self._publish_durable_job_update(claimed.id)
+
+        try:
+            await set_immich_asset_description(
+                asset_id, str(clip["title"]), normalized_url, immich_api_key
+            )
+        except ImmichApiError as error:
+            if reusing and isinstance(error, ImmichAssetNotFoundError):
+                # Nothing new was created this run — a PARTIAL result would wrongly
+                # imply a confirmed asset. The stale `immich_asset_id` is left as-is;
+                # relinking it is a P4-05 concern.
+                await fail_job(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    code=error.job_error_code,
+                    message=str(error),
+                    retryable=error.job_retryable,
+                )
+                await self._publish_durable_job_update(claimed.id)
+                return
+            await finish_running_job_partial(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
+                error=JobError(
+                    code=error.job_error_code, message=str(error), retryable=error.job_retryable
+                ),
+                message="Uploaded to Immich, but the description could not be set.",
+            )
+            await self._publish_durable_job_update(claimed.id)
+            return
+
+        await finish_running_job_success(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
+            message="Clip uploaded to Immich.",
+        )
+        await self._publish_durable_job_update(claimed.id)
 
 
 def _metadata_paths_are_safe(

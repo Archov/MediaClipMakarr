@@ -95,6 +95,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async def load_cached_plex_token() -> str | None:
                 return app.state.effective_application_settings.plex_token
 
+            async def load_cached_immich_settings() -> tuple[str | None, str | None]:
+                settings = app.state.effective_application_settings
+                return settings.immich_url, settings.immich_api_key
+
             app.state.plex_session_poller = PlexSessionPoller(
                 load_cached_application_settings
             )
@@ -113,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 run_blocking=executor.run,
                 events=app.state.job_events,
                 plex_token_loader=load_cached_plex_token,
+                immich_settings_loader=load_cached_immich_settings,
                 media_process_gate=app.state.media_process_gate,
             )
             await app.state.job_runner.start()

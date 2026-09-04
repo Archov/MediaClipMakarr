@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.clip_library import (
     ClipRevisionConflict,
+    ImmichUploadJobPlan,
+    ImmichUploadJobSummary,
     MetadataEditJobPlan,
     ThumbnailJobPlan,
 )
@@ -46,6 +48,15 @@ async def enqueue_metadata_edit_job(
     return await _enqueue_job(
         engine, "clip_metadata_edit", plan, "Clip metadata update is queued."
     )
+
+
+async def enqueue_immich_upload_job(
+    engine: AsyncEngine, plan: ImmichUploadJobPlan
+) -> JobSnapshot:
+    existing = await _find_active_job(engine, "immich_upload", plan.operation_hash)
+    if existing is not None:
+        return existing
+    return await _enqueue_job(engine, "immich_upload", plan, "Immich upload is queued.")
 
 
 async def _enqueue_job(
@@ -153,6 +164,7 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
         "clip_create": ClipRenderPlan,
         "thumbnail_generate": ThumbnailJobPlan,
         "clip_metadata_edit": MetadataEditJobPlan,
+        "immich_upload": ImmichUploadJobPlan,
     }.get(job_type)
     if plan_class is None:
         raise ValueError(f"Unsupported queued job type: {job_type}")
@@ -364,6 +376,81 @@ async def finish_running_job_success(
         )
         if result.rowcount != 1:
             raise JobUpdateConflict(f"Job {job_id} could not be completed.")
+
+
+async def finish_running_job_partial(
+    engine: AsyncEngine,
+    job_id: str,
+    run_token: str,
+    *,
+    result_payload: dict[str, Any],
+    error: JobError,
+    message: str,
+) -> None:
+    finished_at = utc_now()
+    async with engine.begin() as connection:
+        result = await connection.execute(
+            text(
+                "UPDATE jobs SET state = 'PARTIAL', stage = 'complete', progress = 1, "
+                "current_stage_progress = 1, finished_at = :finished_at, run_token = NULL, "
+                "result_json = :result_json, error_json = :error_json, message = :message "
+                "WHERE id = :id AND state = 'RUNNING' AND run_token = :run_token"
+            ),
+            {
+                "id": job_id,
+                "run_token": run_token,
+                "finished_at": finished_at,
+                "result_json": _dump_json(result_payload),
+                "error_json": _dump_json(error.model_dump(mode="json")),
+                "message": message,
+            },
+        )
+        if result.rowcount != 1:
+            raise JobUpdateConflict(f"Job {job_id} could not be marked partially complete.")
+
+
+async def get_latest_jobs_for_operations(
+    engine: AsyncEngine, job_type: str, operation_hashes: list[str]
+) -> dict[str, ImmichUploadJobSummary]:
+    """Batched "latest job per operation hash" lookup — one query, not one per id.
+
+    For `immich_upload` jobs, `render_plan_hash` is the clip id (see
+    `ImmichUploadJobPlan.operation_hash`), so this answers "what's the latest upload
+    job for each of these clips" directly from the durable jobs table.
+    """
+    if not operation_hashes:
+        return {}
+    async with engine.connect() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    text(
+                        "SELECT * FROM ("
+                        "  SELECT *, ROW_NUMBER() OVER ("
+                        "    PARTITION BY render_plan_hash ORDER BY created_at DESC"
+                        "  ) AS rn "
+                        "  FROM jobs WHERE type = :type AND render_plan_hash IN :hashes"
+                        ") WHERE rn = 1"
+                    ).bindparams(bindparam("hashes", expanding=True)),
+                    {"type": job_type, "hashes": operation_hashes},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    summaries: dict[str, ImmichUploadJobSummary] = {}
+    for row in rows:
+        error_payload = _load_json(row.get("error_json"))
+        summaries[str(row["render_plan_hash"])] = ImmichUploadJobSummary(
+            id=str(row["id"]),
+            state=str(row["state"]),
+            stage=str(row["stage"]),
+            progress=float(row["progress"]),
+            message=str(row["message"]),
+            result=_load_json(row.get("result_json")),
+            error=error_payload,
+        )
+    return summaries
 
 
 async def create_pending_operation(

@@ -266,6 +266,8 @@ export type JobStage =
   | "rendering"
   | "generating_thumbnail"
   | "updating_metadata"
+  | "uploading_asset"
+  | "setting_description"
   | "finalizing"
   | "complete"
   | "failed";
@@ -279,9 +281,14 @@ export interface ClipJobResult {
   download_url: string;
 }
 
+export interface ImmichUploadJobResult {
+  clip_id: string;
+  immich_asset_id: string;
+}
+
 export interface JobSnapshot {
   id: string;
-  type: "clip_create" | "thumbnail_generate" | "clip_metadata_edit";
+  type: "clip_create" | "thumbnail_generate" | "clip_metadata_edit" | "immich_upload";
   state: JobState;
   stage: JobStage;
   progress: number;
@@ -289,11 +296,24 @@ export interface JobSnapshot {
   elapsed_ms: number | null;
   queue_position: number | null;
   message: string;
-  result: ClipJobResult | null;
+  result: ClipJobResult | ImmichUploadJobResult | null;
   error: StructuredError | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+// A lean, read-only view of a clip's latest Immich-upload job, embedded directly in
+// the clip list/detail response (see ClipRecord.immich_upload_job) rather than
+// fetched per-clip.
+export interface ImmichUploadJobSummary {
+  id: string;
+  state: JobState;
+  stage: JobStage;
+  progress: number;
+  message: string;
+  result: ImmichUploadJobResult | null;
+  error: StructuredError | null;
 }
 
 export interface ClipRecord {
@@ -319,6 +339,8 @@ export interface ClipRecord {
   thumbnail_url: string;
   play_url: string;
   download_url: string;
+  immich_asset_id: string | null;
+  immich_upload_job: ImmichUploadJobSummary | null;
 }
 
 export interface ClipPage {

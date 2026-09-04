@@ -105,6 +105,38 @@ async def get_clip(
     return clip
 
 
+class ImmichAssetAssociationConflict(RuntimeError):
+    """Raised when a clip already has a different Immich asset recorded for this server."""
+
+    job_error_code = "IMMICH_ASSET_ASSOCIATION_FAILED"
+    job_retryable = False
+
+
+async def set_clip_immich_asset_id(
+    engine: AsyncEngine, clip_id: str, asset_id: str, server_url: str
+) -> None:
+    """Durably record a new Immich asset association for a clip.
+
+    Refuses to silently overwrite an association already recorded for the *same*
+    server (a genuine conflict, e.g. a concurrent duplicate run landing between this
+    caller's read and this write) while still allowing replacement when the
+    configured server has changed.
+    """
+    async with engine.begin() as connection:
+        result = await connection.execute(
+            text(
+                "UPDATE clips SET immich_asset_id = :asset_id, immich_server_url = :server_url "
+                "WHERE id = :id AND "
+                "(immich_asset_id IS NULL OR immich_server_url IS NOT :server_url)"
+            ),
+            {"id": clip_id, "asset_id": asset_id, "server_url": server_url},
+        )
+        if result.rowcount != 1:
+            raise ImmichAssetAssociationConflict(
+                f"Clip {clip_id} already has a different Immich asset recorded for this server."
+            )
+
+
 async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
     """Persist a newly installed managed clip."""
     async with engine.begin() as connection:

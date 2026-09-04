@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 
+from mediaclipmakarr.immich import (
+    ImmichAssetNotFoundError,
+    ImmichAuthError,
+    ImmichInvalidResponseError,
+    set_immich_asset_description,
+    upload_immich_asset_sync,
+)
 from mediaclipmakarr.immich import test_immich_connection as check_immich_connection
 
 
@@ -147,3 +156,130 @@ async def test_unsupported_api_response_is_distinguished_from_http_error() -> No
     assert invalid_response.code == "IMMICH_INVALID_RESPONSE"
     assert server_error.code == "IMMICH_HTTP_ERROR"
     assert invalid_response.code != server_error.code
+
+
+def test_upload_immich_asset_returns_asset_id_on_success(tmp_path) -> None:
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake mp4 bytes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/assets"
+        assert request.headers["x-api-key"] == "valid-key"
+        return httpx.Response(201, json={"id": "asset-123", "status": "created"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        asset_id = upload_immich_asset_sync(
+            clip_path,
+            "http://immich.example:2283",
+            "valid-key",
+            file_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            file_modified_at=datetime(2026, 1, 2, tzinfo=UTC),
+            client=client,
+        )
+
+    assert asset_id == "asset-123"
+
+
+def test_upload_immich_asset_treats_duplicate_status_as_success(tmp_path) -> None:
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake mp4 bytes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "existing-asset", "status": "duplicate"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        asset_id = upload_immich_asset_sync(
+            clip_path,
+            "http://immich.example:2283",
+            "valid-key",
+            file_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            file_modified_at=datetime(2026, 1, 2, tzinfo=UTC),
+            client=client,
+        )
+
+    assert asset_id == "existing-asset"
+
+
+def test_upload_immich_asset_raises_invalid_response_on_missing_id(tmp_path) -> None:
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake mp4 bytes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={"status": "created"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichInvalidResponseError):
+            upload_immich_asset_sync(
+                clip_path,
+                "http://immich.example:2283",
+                "valid-key",
+                file_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                file_modified_at=datetime(2026, 1, 2, tzinfo=UTC),
+                client=client,
+            )
+
+
+def test_upload_immich_asset_raises_auth_error_on_401(tmp_path) -> None:
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake mp4 bytes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAuthError):
+            upload_immich_asset_sync(
+                clip_path,
+                "http://immich.example:2283",
+                "bad-key",
+                file_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                file_modified_at=datetime(2026, 1, 2, tzinfo=UTC),
+                client=client,
+            )
+
+
+@pytest.mark.asyncio
+async def test_set_immich_asset_description_succeeds() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/assets/asset-123"
+        assert request.method == "PATCH"
+        return httpx.Response(200, json={"id": "asset-123", "description": "My clip"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await set_immich_asset_description(
+            "asset-123", "My clip", "http://immich.example:2283", "valid-key", client=client
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_immich_asset_description_raises_not_found_on_404() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAssetNotFoundError):
+            await set_immich_asset_description(
+                "missing-asset",
+                "My clip",
+                "http://immich.example:2283",
+                "valid-key",
+                client=client,
+            )
+
+
+@pytest.mark.asyncio
+async def test_set_immich_asset_description_raises_not_found_on_400() -> None:
+    # Confirmed against a live server: this deprecated endpoint reports a
+    # missing/invalid asset id as HTTP 400, not 404.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ImmichAssetNotFoundError):
+            await set_immich_asset_description(
+                "missing-asset",
+                "My clip",
+                "http://immich.example:2283",
+                "valid-key",
+                client=client,
+            )
