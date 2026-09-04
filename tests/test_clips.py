@@ -24,6 +24,7 @@ from mediaclipmakarr.database import create_database_engine, upgrade_database
 from mediaclipmakarr.health import MediaToolInspection
 from mediaclipmakarr.immich import (
     ImmichAssetNotFoundError,
+    ImmichAuthError,
     ImmichInvalidResponseError,
 )
 from mediaclipmakarr.jobs import claim_next_job
@@ -371,6 +372,39 @@ def test_check_immich_asset_returns_missing_permission_without_asset_read(
 
     # A missing-permission result never confirms the asset is actually gone,
     # so the association must be left alone.
+    untouched = asyncio.run(get_clip(engine, "clip-one", clip_root))
+    assert untouched is not None
+    assert untouched["immich_asset_id"] == "asset-1"
+
+
+def test_check_immich_asset_returns_missing_permission_on_auth_error(
+    tmp_path, monkeypatch
+) -> None:
+    # A live server was observed returning 401/403 (ImmichAuthError), not the
+    # not-found-shaped 400/404 the original disambiguation assumed, when the
+    # API key's `asset.read` scope specifically is revoked. Both shapes must
+    # trigger the same permission-check disambiguation.
+    engine, clip_root = _seed_clip(tmp_path)
+    asyncio.run(set_clip_immich_asset_id(engine, "clip-one", "asset-1", IMMICH_URL))
+    settings = Settings(_env_file=None, clip_dir=clip_root)
+
+    async def fake_read(asset_id, url, api_key):
+        raise ImmichAuthError("Immich rejected the configured API key while reading the asset.")
+
+    async def fake_permissions(url, api_key):
+        return ["asset.upload"]
+
+    monkeypatch.setattr(clips_api, "read_immich_asset", fake_read)
+    monkeypatch.setattr(clips_api, "fetch_immich_api_key_permissions", fake_permissions)
+    app = _build_clips_app(settings, engine, _effective_settings())
+    with TestClient(app) as client:
+        response = client.post("/api/clips/clip-one/immich-check")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "missing_permission"
+    assert body["settings_url"] == f"{IMMICH_URL}/user-settings?isOpen=api-keys"
+
     untouched = asyncio.run(get_clip(engine, "clip-one", clip_root))
     assert untouched is not None
     assert untouched["immich_asset_id"] == "asset-1"

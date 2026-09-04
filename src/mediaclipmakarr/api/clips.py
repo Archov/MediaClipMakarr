@@ -42,6 +42,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.immich import (
     ImmichApiError,
     ImmichAssetNotFoundError,
+    ImmichAuthError,
     build_immich_api_key_settings_url,
     build_immich_asset_url,
     delete_immich_asset,
@@ -240,7 +241,12 @@ def build_router(application_settings: Settings) -> APIRouter:
             )
         try:
             await read_immich_asset(str(asset_id), normalized_url, effective.immich_api_key)
-        except ImmichAssetNotFoundError:
+        except (ImmichAssetNotFoundError, ImmichAuthError):
+            # A missing `asset.read` scope surfaces from this endpoint as either
+            # shape depending on server version — a not-found-shaped 400/404, or
+            # (confirmed against a live server) a 401/403 auth rejection. Either
+            # way, the actual cause is ambiguous until checked against the key's
+            # own granted permissions below.
             try:
                 permissions = set(
                     await fetch_immich_api_key_permissions(
