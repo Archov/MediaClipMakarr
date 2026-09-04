@@ -673,6 +673,19 @@ class JobRunner:
             raise _ImmichNotConfiguredError("Immich is not configured.")
         clip_id = str(clip["id"])
 
+        # The caller may be working from a clip snapshot fetched well before
+        # this actually runs — in particular the bulk job, which can now
+        # execute concurrently with the rest of the job queue (see `_run`),
+        # so a metadata edit for this same clip can land in the gap between
+        # that snapshot and this call. Re-fetch fresh immediately before doing
+        # anything Immich-side so this always associates/describes/tags using
+        # the clip's current title, library, file path, and fingerprint —
+        # never a stale pre-edit snapshot.
+        current = await get_clip(self.engine, clip_id, self.settings.resolved_clip_dir)
+        if current is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        clip = current
+
         await report_stage("uploading_asset", 0.1, "Uploading clip to Immich.")
 
         normalized_url = normalize_immich_url(immich_url)

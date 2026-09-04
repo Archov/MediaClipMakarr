@@ -1855,3 +1855,71 @@ async def test_get_latest_jobs_for_operations_orders_by_completion_not_enqueue_t
 
     assert per_clip["clip-one"].id == "job-retry-row"
     assert per_clip["clip-one"].state == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_upload_and_organize_uses_freshly_fetched_clip_not_a_stale_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    """A caller may pass a clip snapshot captured before this actually runs — in
+    particular the bulk job, which can now execute concurrently with the rest of
+    the job queue, so a metadata edit for the same clip can land in that gap.
+    This must associate/describe using the clip's current state, not the stale
+    snapshot the caller happened to be holding."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    description_calls: list[str] = []
+
+    async def fake_set_description(
+        asset_id, description, url, api_key, *, date_time_original=None
+    ):
+        description_calls.append(description)
+
+    monkeypatch.setattr(runner_module, "set_immich_asset_description", fake_set_description)
+    try:
+        await insert_clip(engine, clip_payload(source, clip_id="clip-one", title="Pilot"))
+        await set_clip_immich_asset_id(engine, "clip-one", "asset-one", IMMICH_URL)
+        stale_clip = await get_clip(engine, "clip-one", clip_root)
+        assert stale_clip is not None
+        assert stale_clip["title"] == "Pilot"
+
+        # A concurrent metadata edit lands after the snapshot above was captured
+        # but before the upload/organize call below actually runs.
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE clips SET title = :title, custom_title = :title "
+                    "WHERE id = 'clip-one'"
+                ),
+                {"title": "Renamed While Bulk Was Running"},
+            )
+
+        runner = _make_runner(engine, tmp_path, immich_url=IMMICH_URL)
+
+        async def noop_report_stage(_stage, _progress, _message):
+            return None
+
+        immich_settings = ImmichJobSettings(
+            url=IMMICH_URL,
+            api_key="test-key",
+            default_tag="",
+            tag_library=False,
+            tag_show=False,
+            tag_episode=False,
+            auto_upload=False,
+            timezone="UTC",
+        )
+        result = await runner._upload_and_organize_clip(
+            stale_clip, immich_settings, report_stage=noop_report_stage
+        )
+    finally:
+        await engine.dispose()
+
+    assert result.state == "SUCCEEDED"
+    assert description_calls == ["Renamed While Bulk Was Running"]
