@@ -270,11 +270,12 @@ def upload_immich_asset_sync(
             raise ImmichInvalidResponseError(
                 "Immich did not return a valid JSON response after upload."
             ) from error
+        # Only require a non-empty id — documented response shapes for this
+        # endpoint have varied between a `status` enum and a `duplicate` bool
+        # across Immich versions, and neither is needed for our own logic.
         asset_id = payload.get("id") if isinstance(payload, dict) else None
-        if not asset_id or not isinstance(payload.get("status"), str):
-            raise ImmichInvalidResponseError(
-                "Immich did not return an asset id and status after upload."
-            )
+        if not asset_id:
+            raise ImmichInvalidResponseError("Immich did not return an asset id after upload.")
         return str(asset_id)
     finally:
         if owns_client:

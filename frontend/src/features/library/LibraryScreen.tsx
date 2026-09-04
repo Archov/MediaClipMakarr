@@ -532,6 +532,7 @@ export function LibraryScreen() {
         </Stack>
       </Collapse>
       {deleteNotice && <Alert severity="warning" onClose={() => setDeleteNotice(null)}>{deleteNotice}</Alert>}
+      {uploadMutation.error && <Alert severity="error" onClose={() => uploadMutation.reset()}>{uploadMutation.error.message}</Alert>}
       {clips.error && <Alert severity="error">{clips.error.message}</Alert>}
       {!clips.isLoading && visibleClips.length === 0 && <Alert severity="info">No clips match the current filters.</Alert>}
       {visibleClips.length > 0 && groupMode === "none" && renderClipCards(visibleClips)}

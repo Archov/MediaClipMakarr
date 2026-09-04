@@ -165,7 +165,7 @@ def test_upload_immich_asset_returns_asset_id_on_success(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/assets"
         assert request.headers["x-api-key"] == "valid-key"
-        return httpx.Response(201, json={"id": "asset-123", "status": "created"})
+        return httpx.Response(201, json={"id": "asset-123", "duplicate": False})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         asset_id = upload_immich_asset_sync(
@@ -180,12 +180,15 @@ def test_upload_immich_asset_returns_asset_id_on_success(tmp_path) -> None:
     assert asset_id == "asset-123"
 
 
-def test_upload_immich_asset_treats_duplicate_status_as_success(tmp_path) -> None:
+def test_upload_immich_asset_treats_duplicate_response_as_success(tmp_path) -> None:
     clip_path = tmp_path / "clip.mp4"
     clip_path.write_bytes(b"fake mp4 bytes")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"id": "existing-asset", "status": "duplicate"})
+        # The documented response shape for a duplicate upload (id + duplicate
+        # bool) — only `id` matters to us, so this must still succeed even
+        # though it carries no `status` field.
+        return httpx.Response(200, json={"id": "existing-asset", "duplicate": True})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         asset_id = upload_immich_asset_sync(
@@ -205,7 +208,7 @@ def test_upload_immich_asset_raises_invalid_response_on_missing_id(tmp_path) -> 
     clip_path.write_bytes(b"fake mp4 bytes")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(201, json={"status": "created"})
+        return httpx.Response(201, json={"duplicate": False})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ImmichInvalidResponseError):

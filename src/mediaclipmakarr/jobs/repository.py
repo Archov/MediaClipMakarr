@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.clip_library import (
@@ -56,7 +57,17 @@ async def enqueue_immich_upload_job(
     existing = await _find_active_job(engine, "immich_upload", plan.operation_hash)
     if existing is not None:
         return existing
-    return await _enqueue_job(engine, "immich_upload", plan, "Immich upload is queued.")
+    try:
+        return await _enqueue_job(engine, "immich_upload", plan, "Immich upload is queued.")
+    except IntegrityError:
+        # Lost a race with a concurrent request for the same clip: the partial
+        # unique index on active immich_upload jobs (see migration
+        # 0007_immich_upload_active_unique) rejected our insert. Whoever won
+        # is the job to return instead of raising.
+        winner = await _find_active_job(engine, "immich_upload", plan.operation_hash)
+        if winner is None:
+            raise
+        return winner
 
 
 async def _enqueue_job(

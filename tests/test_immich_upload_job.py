@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
+import mediaclipmakarr.jobs.repository as repository_module
 import mediaclipmakarr.jobs.runner as runner_module
-from mediaclipmakarr.clip_library import build_immich_upload_plan
+from mediaclipmakarr.clip_library import ClipRevisionConflict, build_immich_upload_plan
 from mediaclipmakarr.clips import get_clip, insert_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
@@ -361,3 +362,101 @@ async def test_immich_upload_fails_without_clearing_stale_asset_on_reuse_path(
     assert snapshot.error.code == "IMMICH_ASSET_NOT_FOUND"
     assert clip is not None
     assert clip["immich_asset_id"] == "already-stored-asset"
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_rejects_a_fingerprint_mismatch_before_uploading(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"clip bytes")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(url)
+        return "should-not-upload"
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        # The managed file changes in place after the clip row was read but
+        # before the (durable) upload actually runs.
+        source.write_bytes(b"different bytes entirely")
+
+        runner = _make_runner(engine, tmp_path)
+        with pytest.raises(ClipRevisionConflict):
+            await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_enqueue_immich_upload_job_returns_winner_on_index_conflict(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        # Pre-seed an active job for this clip, simulating a concurrent request
+        # that already won, then force the app-level "already active" check to
+        # miss on its first call so our own insert genuinely races the DB-level
+        # partial unique index instead of being short-circuited by it.
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs (id, type, state, stage, progress, "
+                    "current_stage_progress, message, attempt, render_plan_json, "
+                    "render_plan_hash, created_at) "
+                    "VALUES ('job-winner', 'immich_upload', 'QUEUED', 'queued', 0, 0, "
+                    "'Immich upload is queued.', 0, '{}', 'clip-one', :created_at)"
+                ),
+                {"created_at": datetime(2026, 1, 1)},
+            )
+
+        real_find_active_job = repository_module._find_active_job
+        calls = {"count": 0}
+
+        async def flaky_find_active_job(engine_, job_type, operation_hash):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return None
+            return await real_find_active_job(engine_, job_type, operation_hash)
+
+        original = repository_module._find_active_job
+        repository_module._find_active_job = flaky_find_active_job
+        try:
+            plan = build_immich_upload_plan({"id": "clip-one"})
+            result = await enqueue_immich_upload_job(engine, plan)
+        finally:
+            repository_module._find_active_job = original
+
+        row_count = await engine_scalar(
+            engine,
+            "SELECT COUNT(*) FROM jobs WHERE render_plan_hash = 'clip-one' "
+            "AND type = 'immich_upload'",
+        )
+    finally:
+        await engine.dispose()
+
+    assert result.id == "job-winner"
+    assert calls["count"] == 2
+    # Our own insert must not have persisted alongside the pre-seeded winner.
+    assert row_count == 1
+
+
+async def engine_scalar(engine, sql: str):
+    async with engine.connect() as connection:
+        return await connection.scalar(text(sql))

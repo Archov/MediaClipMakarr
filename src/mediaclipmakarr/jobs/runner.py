@@ -598,6 +598,13 @@ class JobRunner:
         else:
             source = Path(str(clip["file_path"]))
             source_stat = await self.run_blocking(source.stat)
+            if (
+                source_stat.st_size != clip.get("file_size_bytes")
+                or source_stat.st_mtime_ns != clip.get("file_modified_ns")
+            ):
+                raise ClipRevisionConflict(
+                    "The clip file changed before it could be uploaded to Immich."
+                )
             asset_id = await self.run_blocking(
                 upload_immich_asset_sync,
                 source,
