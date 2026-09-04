@@ -1,7 +1,16 @@
 import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
-import { Alert, Box, Button, Chip, CircularProgress, LinearProgress, Stack } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  LinearProgress,
+  Stack,
+  Tooltip,
+} from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
@@ -12,15 +21,58 @@ import {
   updateClipMetadata,
 } from "../../api";
 import { formatTimestampMs } from "../../timestamps";
-import type { ClipMetadataUpdate, ClipRecord, JobSnapshot, JobState } from "../../types";
+import type {
+  ClipMetadataUpdate,
+  ClipRecord,
+  ImmichUploadJobSummary,
+  JobSnapshot,
+  JobState,
+} from "../../types";
 import { DeleteClipDialog, MetadataDialog } from "../library/ClipDialogs";
 import { MediaErrorAlert } from "./MediaErrorAlert";
+
+const NONTERMINAL_JOB_STATES = new Set(["QUEUED", "RUNNING", "FINALIZING"]);
 
 function severity(state: JobState): "success" | "info" | "warning" | "error" {
   if (state === "SUCCEEDED") return "success";
   if (state === "PARTIAL") return "warning";
   if (state === "FAILED") return "error";
   return "info";
+}
+
+// Auto-upload (and any prior manual upload) runs as its own independent job —
+// the clip-create job is already durably SUCCEEDED before it's even enqueued,
+// so its outcome has to be surfaced separately rather than folded into `job`.
+function ImmichUploadIndicator({
+  uploadJob,
+}: {
+  uploadJob: ImmichUploadJobSummary | null | undefined;
+}) {
+  if (!uploadJob) return null;
+  if (NONTERMINAL_JOB_STATES.has(uploadJob.state)) {
+    return (
+      <Chip
+        size="small"
+        variant="outlined"
+        icon={<CircularProgress size={12} />}
+        label="Uploading to Immich…"
+      />
+    );
+  }
+  if (uploadJob.state === "PARTIAL" || uploadJob.state === "FAILED") {
+    const label = uploadJob.state === "PARTIAL" ? "Immich upload partial" : "Immich upload failed";
+    const detail = uploadJob.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : label;
+    return (
+      <Tooltip title={detail}>
+        <Chip
+          size="small"
+          color={uploadJob.state === "PARTIAL" ? "warning" : "error"}
+          label={label}
+        />
+      </Tooltip>
+    );
+  }
+  return null;
 }
 
 export function JobStatus({
@@ -50,6 +102,13 @@ export function JobStatus({
     queryKey: ["clip", jobClipId],
     queryFn: () => fetchClip(jobClipId!),
     enabled: Boolean(jobClipId && !deleted),
+    // Auto-upload (or a prior manual upload) runs as its own job, independent
+    // of the clip-create job this screen otherwise tracks — poll while it's
+    // still in flight so its outcome shows up without a manual refresh.
+    refetchInterval: (query) => {
+      const state = query.state.data?.immich_upload_job?.state;
+      return state && NONTERMINAL_JOB_STATES.has(state) ? 1_000 : false;
+    },
   });
   const editJob = useQuery({
     queryKey: ["job", editJobId],
@@ -128,6 +187,7 @@ export function JobStatus({
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         <Chip label={title} color="success" variant="outlined" />
         <Chip label={formatTimestampMs(durationMs) || "--:--"} variant="outlined" />
+        <ImmichUploadIndicator uploadJob={displayedClip?.immich_upload_job} />
         <Button href={downloadUrl} variant="outlined" startIcon={<ArrowDownwardRounded />}>Download</Button>
         <Button
           variant="outlined"

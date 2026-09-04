@@ -77,9 +77,22 @@ async def enqueue_bulk_immich_upload_job(
     existing = await _find_active_job(engine, "bulk_immich_upload", plan.operation_hash)
     if existing is not None:
         return existing
-    return await _enqueue_job(
-        engine, "bulk_immich_upload", plan, "Bulk Immich upload is queued."
-    )
+    try:
+        return await _enqueue_job(
+            engine, "bulk_immich_upload", plan, "Bulk Immich upload is queued."
+        )
+    except IntegrityError:
+        # Lost a race with a concurrent request: the partial unique index on
+        # active bulk_immich_upload jobs (see migration
+        # 0009_bulk_immich_upload_active_unique) rejected our insert. Whoever
+        # won is the job to return instead of raising — bulk jobs now run
+        # concurrently with the rest of the queue (see JobRunner._run), so two
+        # bulk jobs racing here could otherwise both classify the same clips
+        # as unlinked and upload them at the same time.
+        winner = await _find_active_job(engine, "bulk_immich_upload", plan.operation_hash)
+        if winner is None:
+            raise
+        return winner
 
 
 async def _enqueue_job(

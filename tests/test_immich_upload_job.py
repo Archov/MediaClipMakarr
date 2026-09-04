@@ -522,6 +522,66 @@ async def engine_scalar(engine, sql: str):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_bulk_immich_upload_job_returns_winner_on_index_conflict(
+    tmp_path,
+) -> None:
+    """Bulk jobs now run concurrently with the rest of the queue (see
+    JobRunner._run), so a duplicate concurrent enqueue is no longer just
+    redundant re-validation after the fact — it can race a genuinely
+    in-flight bulk job. The DB-level partial unique index must close that."""
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        # Pre-seed an active bulk job, simulating a concurrent request that
+        # already won, then force the app-level "already active" check to
+        # miss on its first call so our own insert genuinely races the
+        # DB-level partial unique index instead of being short-circuited.
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs (id, type, state, stage, progress, "
+                    "current_stage_progress, message, attempt, render_plan_json, "
+                    "render_plan_hash, created_at) "
+                    "VALUES ('job-bulk-winner', 'bulk_immich_upload', 'QUEUED', 'queued', 0, "
+                    "0, 'Bulk Immich upload is queued.', 0, '{}', "
+                    "'bulk_immich_upload', :created_at)"
+                ),
+                {"created_at": datetime(2026, 1, 1)},
+            )
+
+        real_find_active_job = repository_module._find_active_job
+        calls = {"count": 0}
+
+        async def flaky_find_active_job(engine_, job_type, operation_hash):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return None
+            return await real_find_active_job(engine_, job_type, operation_hash)
+
+        original = repository_module._find_active_job
+        repository_module._find_active_job = flaky_find_active_job
+        try:
+            plan = build_bulk_immich_upload_plan(["clip-one", "clip-two"])
+            result = await enqueue_bulk_immich_upload_job(engine, plan)
+        finally:
+            repository_module._find_active_job = original
+
+        row_count = await engine_scalar(
+            engine,
+            "SELECT COUNT(*) FROM jobs WHERE render_plan_hash = 'bulk_immich_upload' "
+            "AND type = 'bulk_immich_upload'",
+        )
+    finally:
+        await engine.dispose()
+
+    assert result.id == "job-bulk-winner"
+    assert calls["count"] == 2
+    # Our own insert must not have persisted alongside the pre-seeded winner.
+    assert row_count == 1
+
+
+@pytest.mark.asyncio
 async def test_immich_upload_applies_default_and_hierarchy_tags_on_success(
     tmp_path, monkeypatch
 ) -> None:
