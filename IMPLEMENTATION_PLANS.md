@@ -514,9 +514,16 @@ Users can manually or automatically upload clips to Immich, organize them with t
 
 **Implementation:**
 
-- Add Open in Immich using a server-generated safe asset URL.
-- Attempt description updates after local title edits and report remote failure as a warning without rolling back the local edit.
+- Update the blue Immich icon on library cards of asset linked clips to "Open in Immich" rather than "RE-UPLOAD TO IMMICH".
+  - This should perform a read first before opening,
+    - if the read cannot find the asset check the API Key permissions to ensure that asset.read has been granted,
+    - if it has not, Inform the user that the configured API Key needs  asset.read permissions, the dialog should provide a link to the  /user-settings?isOpen=api-keys on the immich server.
+      - https://claude.ai/design/p/a3e1fd9b-74c6-4f76-9b59-ccec383954e7?file=Immich+Permission+Error+Dialog.dc.html&via=share
+    - if it does, show a dialog prompting reupload, else open as normal.
+      - https://claude.ai/design/p/a3e1fd9b-74c6-4f76-9b59-ccec383954e7?file=Immich+Asset+Not+Found+Dialog.dc.html&via=share
+- After manual clip metadata edits (title, library, , perform a PATCH  updateAsset and report remote failure as a warning without rolling back  the local edit.
 - When remote management is enabled, offer an explicit remote-delete choice during local deletion.
+  - Follow this design https://claude.ai/design/p/a3e1fd9b-74c6-4f76-9b59-ccec383954e7?file=Delete+Dialog+Remote+Toggle.dc.html
 - Clear or update embedded Immich association metadata after confirmed remote changes.
 
 **Acceptance criteria:**
