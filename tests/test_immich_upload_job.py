@@ -777,7 +777,10 @@ async def test_immich_upload_falls_back_to_embedded_identity_when_no_fingerprint
     clip_root = tmp_path / "clips"
     source = clip_root / "TV Shows" / "Pilot.mp4"
     source.parent.mkdir(parents=True)
-    source.write_bytes(b'clip bytes MediaClipMakarr {"clipId":"clip-one","revision":1}')
+    source.write_bytes(
+        b'clip bytes MediaClipMakarr {"application":"MediaClipMakarr","schemaVersion":4,'
+        b'"clipId":"clip-one","revision":1}'
+    )
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
@@ -823,6 +826,47 @@ async def test_immich_upload_rejects_unknown_identity_when_no_fingerprint_baseli
     source = clip_root / "TV Shows" / "Pilot.mp4"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"unrelated bytes with no identity envelope")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    upload_calls: list[str] = []
+
+    def fake_upload(source_path, url, api_key, *, file_created_at, file_modified_at):
+        upload_calls.append(str(source_path))
+        return "asset-remote-1"
+
+    monkeypatch.setattr(runner_module, "upload_immich_asset_sync", fake_upload)
+    try:
+        payload = clip_payload(source)
+        payload["file_size_bytes"] = None
+        payload["file_modified_ns"] = None
+        await insert_clip(engine, payload)
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_immich_upload_plan(row)
+        await enqueue_immich_upload_job(engine, plan)
+        claimed = await _claim_immich_upload_job(engine, "run-one")
+
+        runner = _make_runner(engine, tmp_path)
+        with pytest.raises(ClipRevisionConflict):
+            await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert upload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_immich_upload_rejects_a_fabricated_two_field_identity_envelope(
+    tmp_path, monkeypatch
+) -> None:
+    """A marker followed by only clipId/revision (no application/schemaVersion) is
+    not a genuine recovery envelope and must not be accepted as identity proof."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'clip bytes MediaClipMakarr {"clipId":"clip-one","revision":1}')
     upgrade_database(database_path)
     engine = create_database_engine(database_path)
 
