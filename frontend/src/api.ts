@@ -224,6 +224,15 @@ export async function fetchClip(clipId: string): Promise<ClipRecord> {
   return parseResponse<ClipRecord>(response, "Clip detail request");
 }
 
+export async function fetchClipTrimInfo(
+  clipId: string,
+): Promise<import("./types").ClipTrimInfo> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/trim-info`, {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<import("./types").ClipTrimInfo>(response, "Clip trim information request");
+}
+
 export async function fetchClipLibraries(): Promise<string[]> {
   const response = await apiFetch("/api/clips/libraries", {
     headers: { Accept: "application/json" },

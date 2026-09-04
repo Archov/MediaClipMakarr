@@ -12,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from mediaclipmakarr.api.clip_trim import build_router as build_clip_trim_router
 from mediaclipmakarr.api.clips import build_router as build_clips_router
 from mediaclipmakarr.api.health import build_router as build_health_router
 from mediaclipmakarr.api.jobs import build_router as build_jobs_router
@@ -161,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(build_settings_router(application_settings))
     app.include_router(build_plex_router(application_settings))
     app.include_router(build_clips_router(application_settings))
+    app.include_router(build_clip_trim_router(application_settings))
     app.include_router(build_jobs_router())
 
     @app.exception_handler(RequestValidationError)

@@ -378,6 +378,15 @@ export interface ClipPage {
   pages: number;
 }
 
+export interface ClipTrimInfo {
+  id: string;
+  title: string;
+  duration_ms: number;
+  revision: number;
+  play_url: string;
+  frame_rate: number | null;
+}
+
 export interface ClipFilterOptions {
   libraries: string[];
   movies: string[];
