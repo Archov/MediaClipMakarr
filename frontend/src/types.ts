@@ -268,6 +268,7 @@ export type JobStage =
   | "updating_metadata"
   | "uploading_asset"
   | "setting_description"
+  | "applying_tags"
   | "finalizing"
   | "complete"
   | "failed";
@@ -284,6 +285,8 @@ export interface ClipJobResult {
 export interface ImmichUploadJobResult {
   clip_id: string;
   immich_asset_id: string;
+  description_set: boolean;
+  tags_applied: string[];
 }
 
 export interface JobSnapshot {

@@ -8,6 +8,7 @@ import logging
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,19 +23,29 @@ from mediaclipmakarr.clip_library import (
     ImmichUploadJobPlan,
     MetadataEditJobPlan,
     ThumbnailJobPlan,
+    build_immich_tag_paths,
     build_thumbnail_job_plan,
     generate_thumbnail,
     rewrite_clip_metadata,
     thumbnail_path,
 )
-from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
+from mediaclipmakarr.clips import (
+    get_clip,
+    insert_clip,
+    parse_stored_immich_tag_ids,
+    set_clip_immich_asset_id,
+    set_clip_immich_tag_ids,
+)
 from mediaclipmakarr.concurrency import MediaProcessGate
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.immich import (
     ImmichApiError,
     ImmichAssetNotFoundError,
     set_immich_asset_description,
+    tag_immich_assets,
+    untag_immich_assets,
     upload_immich_asset_sync,
+    upsert_immich_tags,
 )
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
@@ -65,7 +76,19 @@ STALE_WORKDIR_REAP_INTERVAL_SECONDS = 3_600
 STALE_WORKDIR_AGE_SECONDS = 24 * 3_600
 ClipRenderer = Callable[..., Awaitable[RenderedClipFile]]
 PlexTokenLoader = Callable[[], Awaitable[str | None]]
-ImmichSettingsLoader = Callable[[], Awaitable[tuple[str | None, str | None]]]
+
+
+@dataclass(frozen=True, slots=True)
+class ImmichJobSettings:
+    url: str | None
+    api_key: str | None
+    default_tag: str
+    tag_library: bool
+    tag_show: bool
+    tag_episode: bool
+
+
+ImmichSettingsLoader = Callable[[], Awaitable[ImmichJobSettings]]
 
 
 def _as_utc_datetime(value: Any) -> datetime:
@@ -571,11 +594,13 @@ class JobRunner:
         clip = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
         if clip is None:
             raise ClipRevisionConflict("The clip no longer exists.")
-        immich_url, immich_api_key = (
-            await self.immich_settings_loader() if self.immich_settings_loader else (None, None)
+        immich_settings = (
+            await self.immich_settings_loader() if self.immich_settings_loader else None
         )
-        if not immich_url or not immich_api_key:
+        if immich_settings is None or not immich_settings.url or not immich_settings.api_key:
             raise _ImmichNotConfiguredError("Immich is not configured.")
+        immich_url = immich_settings.url
+        immich_api_key = immich_settings.api_key
 
         await update_running_job(
             self.engine,
@@ -598,9 +623,19 @@ class JobRunner:
         else:
             source = Path(str(clip["file_path"]))
             source_stat = await self.run_blocking(source.stat)
+            recorded_size = clip.get("file_size_bytes")
+            recorded_modified_ns = clip.get("file_modified_ns")
+            # Older clips (recorded before these columns existed, or inserted
+            # through a path that never populated them) have no fingerprint to
+            # compare against — nothing to detect drift against, so there's
+            # nothing to reject. Only compare when both are actually recorded.
             if (
-                source_stat.st_size != clip.get("file_size_bytes")
-                or source_stat.st_mtime_ns != clip.get("file_modified_ns")
+                recorded_size is not None
+                and recorded_modified_ns is not None
+                and (
+                    source_stat.st_size != recorded_size
+                    or source_stat.st_mtime_ns != recorded_modified_ns
+                )
             ):
                 raise ClipRevisionConflict(
                     "The clip file changed before it could be uploaded to Immich."
@@ -622,7 +657,12 @@ class JobRunner:
                     self.engine,
                     claimed.id,
                     claimed.run_token,
-                    result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
+                    result_payload={
+                        "clip_id": plan.clip_id,
+                        "immich_asset_id": asset_id,
+                        "description_set": False,
+                        "tags_applied": [],
+                    },
                     error=JobError(
                         code=getattr(error, "job_error_code", "IMMICH_ASSET_ASSOCIATION_FAILED"),
                         message=str(error),
@@ -638,12 +678,17 @@ class JobRunner:
             claimed.id,
             claimed.run_token,
             stage="setting_description",
-            progress=0.7,
-            current_stage_progress=0.7,
+            progress=0.6,
+            current_stage_progress=0.6,
             message="Setting the Immich asset description.",
         )
         await self._publish_durable_job_update(claimed.id)
 
+        # Description and tagging are independent optional steps — neither
+        # short-circuits the other, so a failure in one never hides a success in
+        # the other. The one exception: a confirmed-missing asset on the reuse
+        # path means nothing further is worth attempting against it.
+        description_error: JobError | None = None
         try:
             await set_immich_asset_description(
                 asset_id, str(clip["title"]), normalized_url, immich_api_key
@@ -663,26 +708,112 @@ class JobRunner:
                 )
                 await self._publish_durable_job_update(claimed.id)
                 return
+            description_error = JobError(
+                code=error.job_error_code, message=str(error), retryable=error.job_retryable
+            )
+
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="applying_tags",
+            progress=0.85,
+            current_stage_progress=0.85,
+            message="Applying Immich tags.",
+        )
+        await self._publish_durable_job_update(claimed.id)
+
+        tag_paths = build_immich_tag_paths(
+            clip,
+            default_tag=immich_settings.default_tag,
+            tag_library=immich_settings.tag_library,
+            tag_show=immich_settings.tag_show,
+            tag_episode=immich_settings.tag_episode,
+        )
+        previous_tag_ids = parse_stored_immich_tag_ids(clip.get("immich_tag_ids"))
+        # What we believe is actually applied right now — seeded from the durable
+        # record and updated as each add/remove call succeeds, so a failure partway
+        # through still leaves an accurate record for the next run to diff against,
+        # rather than an all-or-nothing guess.
+        applied_tag_ids = list(previous_tag_ids)
+        tags_applied: list[str] = []
+        tag_error: JobError | None = None
+        if tag_paths or previous_tag_ids:
+            try:
+                new_tag_ids: list[str] = []
+                if tag_paths:
+                    upserted = await upsert_immich_tags(
+                        tag_paths, normalized_url, immich_api_key
+                    )
+                    new_tag_ids = [upserted[path] for path in tag_paths if path in upserted]
+                    if new_tag_ids:
+                        await tag_immich_assets(
+                            asset_id, new_tag_ids, normalized_url, immich_api_key
+                        )
+                        applied_tag_ids = list(dict.fromkeys([*applied_tag_ids, *new_tag_ids]))
+                        tags_applied = tag_paths
+                # Anything previously applied that the current configuration no
+                # longer resolves to (a renamed library/show, a disabled toggle,
+                # a cleared default tag) is stale — remove it rather than leaving
+                # it to accumulate forever.
+                for stale_tag_id in previous_tag_ids:
+                    if stale_tag_id in new_tag_ids:
+                        continue
+                    await untag_immich_assets(
+                        stale_tag_id, [asset_id], normalized_url, immich_api_key
+                    )
+                    applied_tag_ids = [tid for tid in applied_tag_ids if tid != stale_tag_id]
+            except ImmichApiError as error:
+                tag_error = JobError(
+                    code=error.job_error_code, message=str(error), retryable=error.job_retryable
+                )
+            finally:
+                if applied_tag_ids != previous_tag_ids:
+                    await set_clip_immich_tag_ids(self.engine, plan.clip_id, applied_tag_ids)
+
+        result_payload = {
+            "clip_id": plan.clip_id,
+            "immich_asset_id": asset_id,
+            "description_set": description_error is None,
+            "tags_applied": tags_applied,
+        }
+
+        if description_error is not None and tag_error is not None:
+            failure = JobError(
+                code="IMMICH_ORGANIZE_FAILED",
+                message=(
+                    f"Description: {description_error.message} Tagging: {tag_error.message}"
+                ),
+                retryable=description_error.retryable or tag_error.retryable,
+            )
+            message = "Uploaded to Immich, but the description and tags could not be applied."
+        elif description_error is not None:
+            failure = description_error
+            message = "Uploaded to Immich, but the description could not be set."
+        elif tag_error is not None:
+            failure = tag_error
+            message = "Uploaded to Immich, but the tags could not be applied."
+        else:
+            failure = None
+            message = "Clip uploaded and organized in Immich."
+
+        if failure is not None:
             await finish_running_job_partial(
                 self.engine,
                 claimed.id,
                 claimed.run_token,
-                result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
-                error=JobError(
-                    code=error.job_error_code, message=str(error), retryable=error.job_retryable
-                ),
-                message="Uploaded to Immich, but the description could not be set.",
+                result_payload=result_payload,
+                error=failure,
+                message=message,
             )
-            await self._publish_durable_job_update(claimed.id)
-            return
-
-        await finish_running_job_success(
-            self.engine,
-            claimed.id,
-            claimed.run_token,
-            result_payload={"clip_id": plan.clip_id, "immich_asset_id": asset_id},
-            message="Clip uploaded to Immich.",
-        )
+        else:
+            await finish_running_job_success(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                result_payload=result_payload,
+                message=message,
+            )
         await self._publish_durable_job_update(claimed.id)
 
 
