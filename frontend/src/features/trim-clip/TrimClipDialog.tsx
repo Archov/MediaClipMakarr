@@ -377,10 +377,20 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     <>
     <Dialog open onClose={onClose} fullScreen={fullScreen} fullWidth maxWidth="lg" aria-labelledby="trim-dialog-title">
       <DialogTitle id="trim-dialog-title" sx={{ pr: 7 }}>
-        Trim {trimInfo?.title ?? clip.title}
-        <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1.5 }}>
-          Revision {expectedRevision ?? clip.revision}
-        </Typography>
+        <Tooltip title={`Trim ${trimInfo?.title ?? clip.title}`} enterTouchDelay={0}>
+          <Box
+            component="span"
+            sx={{
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            Trim {trimInfo?.title ?? clip.title}
+          </Box>
+        </Tooltip>
         <IconButton aria-label="Close trim editor" onClick={onClose} sx={{ position: "absolute", right: 12, top: 12 }}>
           <CloseRounded />
         </IconButton>
