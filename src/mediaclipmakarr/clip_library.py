@@ -46,6 +46,7 @@ class ClipRecord(BaseModel):
     media_type: str
     duration_ms: int
     revision: int
+    parent_clip_id: str | None = None
     movie_title: str | None = None
     movie_year: int | None = None
     show_name: str | None = None
@@ -194,13 +195,20 @@ class ImmichUploadJobPlan(BaseModel):
     # Also doubles as the dedup key for `_find_active_job` — only one upload job may
     # be in flight per clip at a time, mirroring the thumbnail job's hash-based dedup.
     operation_hash: str
+    # Set when this upload supersedes a still-live asset (e.g. a trim replace on a
+    # clip that was already linked to Immich) — deleted, best-effort, once the new
+    # upload and its association are durably committed.
+    superseded_asset_id: str | None = None
 
 
-def build_immich_upload_plan(clip: dict[str, Any]) -> ImmichUploadJobPlan:
+def build_immich_upload_plan(
+    clip: dict[str, Any], *, superseded_asset_id: str | None = None
+) -> ImmichUploadJobPlan:
     return ImmichUploadJobPlan(
         job_id=f"job-{uuid4()}",
         clip_id=str(clip["id"]),
         operation_hash=str(clip["id"]),
+        superseded_asset_id=superseded_asset_id,
     )
 
 
@@ -904,7 +912,12 @@ def thumbnail_is_current(row: dict[str, Any], source_stat: os.stat_result) -> bo
     )
 
 
-def embedded_revision_matches(path: Path, clip_id: str, revision: int) -> bool:
+def embedded_revision_matches(
+    path: Path,
+    clip_id: str,
+    revision: int,
+    render_plan_hash: str | None = None,
+) -> bool:
     """Inspect bounded MP4 regions for the current recovery envelope."""
     marker = b"MediaClipMakarr "
     try:
@@ -936,10 +949,20 @@ def embedded_revision_matches(path: Path, clip_id: str, revision: int) -> bool:
                 and isinstance(payload.get("schemaVersion"), int)
                 and payload.get("clipId") == clip_id
                 and payload.get("revision") == revision
+                and (
+                    render_plan_hash is None
+                    or payload.get("renderPlanHash") == render_plan_hash
+                )
             ):
                 return True
             start = chunk.find(marker, payload_start)
     return False
+
+
+def embedded_render_matches(
+    path: Path, clip_id: str, revision: int, render_plan_hash: str
+) -> bool:
+    return embedded_revision_matches(path, clip_id, revision, render_plan_hash)
 
 
 def _clean(value: object) -> str | None:

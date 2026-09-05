@@ -554,8 +554,8 @@ Users can trim clips, save edits as new clips, safely replace clips, extend rang
 **Implementation:**
 
 - Add HTML5 playback, range controls, millisecond inputs, Set Start/End to playhead, duration, and client-side Preview Selection.
+- Add controls for nudging trim bounds using the same control block as the make clip start/end time nudge controls, except the default unit should be frames not seconds.
 - Load the clip's current revision when opening the editor.
-- Enforce a minimum range of 100 milliseconds and bounds within the current clip.
 - Keep routine playhead/range interaction client-side; submit only the final operation.
 
 **Acceptance criteria:**

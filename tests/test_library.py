@@ -657,6 +657,97 @@ async def test_pending_metadata_edit_recovers_before_install_boundary(tmp_path) 
     assert not source.exists()
 
 
+@pytest.mark.asyncio
+async def test_metadata_edit_failure_after_swap_leaves_job_finalizing_for_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Mirrors the trim-replace boundary: install_metadata_revision's file
+    swap is atomic and irreversible, so a failure after it (e.g. a database
+    write dying) must leave the job FINALIZING rather than FAILED — marking
+    it FAILED would strand the database's stale revision permanently out of
+    sync with the already-swapped file."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old clip")
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def fake_rewrite(_source, output, metadata, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        envelope = json.dumps(
+            {
+                "application": "MediaClipMakarr",
+                "schemaVersion": 4,
+                "clipId": metadata["id"],
+                "revision": metadata["revision"],
+            }
+        )
+        output.write_bytes(b"new clip MediaClipMakarr " + envelope.encode())
+
+    async def failing_commit(*_args, **_kwargs):
+        raise RuntimeError("database is unavailable")
+
+    monkeypatch.setattr(runner_module, "rewrite_clip_metadata", fake_rewrite)
+    monkeypatch.setattr(runner_module, "commit_metadata_edit", failing_commit)
+    settings = Settings(
+        _env_file=None,
+        work_dir=tmp_path / "work",
+        clip_dir=clip_root,
+        thumbnail_dir=tmp_path / "thumbnails",
+    )
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_metadata_edit_plan(
+            row,
+            ClipMetadataUpdate(expected_revision=1, custom_title="Renamed"),
+            clip_root,
+        )
+        queued = await enqueue_metadata_edit_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-one")
+        assert claimed is not None
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+        )
+        await runner._execute_and_finalize(claimed)
+        snapshot = await get_job_snapshot(engine, queued.id)
+        stored = await get_clip(engine, "clip-one", clip_root)
+        workdir = settings.resolved_work_dir / "jobs" / queued.id
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None and snapshot.state == "FINALIZING"
+    assert stored is not None and stored["revision"] == 1
+    assert Path(plan.destination).read_bytes().startswith(b"new clip")
+    assert workdir.exists()
+
+    # Recovery reconciles the database with the already-swapped file on the
+    # next startup, rather than this being stuck forever.
+    recovery_engine = create_database_engine(database_path)
+    try:
+        recovered = await recover_finalizing_jobs(
+            recovery_engine,
+            run_blocking,
+            clip_root=clip_root,
+            work_root=settings.resolved_work_dir,
+        )
+        final_snapshot = await get_job_snapshot(recovery_engine, queued.id)
+        final_clip = await get_clip(recovery_engine, "clip-one", clip_root)
+    finally:
+        await recovery_engine.dispose()
+
+    assert recovered == [queued.id]
+    assert final_snapshot is not None and final_snapshot.state == "SUCCEEDED"
+    assert final_clip is not None and final_clip["revision"] == 2
+    assert not source.exists()
+
+
 def test_media_endpoint_supports_ranges_and_rejects_outside_database_paths(
     tmp_path, monkeypatch
 ) -> None:

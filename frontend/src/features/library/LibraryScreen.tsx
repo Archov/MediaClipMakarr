@@ -1,5 +1,6 @@
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import CollectionsRounded from "@mui/icons-material/CollectionsRounded";
+import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
@@ -54,6 +55,7 @@ import {
   uploadClipToImmich,
 } from "../../api";
 import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
+import { TrimClipDialog } from "../trim-clip/TrimClipDialog";
 import {
   DeleteClipDialog,
   ImmichAssetMissingDialog,
@@ -163,7 +165,7 @@ function ImmichStatusChip({ clip }: { clip: ClipRecord }) {
   return null;
 }
 
-function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onEdit, onDelete, onUploadImmich, onOpenImmich, immichConfigured }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void; onUploadImmich: (clip: ClipRecord) => void; onOpenImmich: (clip: ClipRecord) => void; immichConfigured: boolean }) {
+function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, onPlay, onTrim, onEdit, onDelete, onUploadImmich, onOpenImmich, immichConfigured }: { clip: ClipRecord; mode: ViewMode; size: ThumbnailSize; listThumbnailWidth: number; expanded: boolean; onToggle: () => void; onPlay: (clip: ClipRecord) => void; onTrim: (clip: ClipRecord) => void; onEdit: (clip: ClipRecord) => void; onDelete: (clip: ClipRecord) => void; onUploadImmich: (clip: ClipRecord) => void; onOpenImmich: (clip: ClipRecord) => void; immichConfigured: boolean }) {
   const metadata = clipMetadata(clip);
   const uploadJob = clip.immich_upload_job;
   const uploading = Boolean(uploadJob && NONTERMINAL_JOB_STATES.has(uploadJob.state));
@@ -212,6 +214,7 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
         <Collapse in={detailsVisible} unmountOnExit>
           <CardActions sx={{ px: 0.5, pt: 0, pb: 0.5, gap: size === "large" ? 0 : 0.25, flexWrap: "wrap", alignItems: "center" }}>
             <ClipAction label="Play" icon={<PlayArrowRounded />} large={size === "large"} onClick={() => onPlay(clip)} />
+            <ClipAction label="Trim" icon={<ContentCutRounded />} large={size === "large"} onClick={() => onTrim(clip)} />
             <ClipAction label="Edit" icon={<EditRounded />} large={size === "large"} onClick={() => onEdit(clip)} />
             <ClipAction label="Download" icon={<DownloadRounded />} large={size === "large"} href={clip.download_url} />
             {immichConfigured && (
@@ -253,6 +256,7 @@ export function LibraryScreen() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expandedClipId, setExpandedClipId] = useState<string | null>(null);
   const [playing, setPlaying] = useState<ClipRecord | null>(null);
+  const [trimming, setTrimming] = useState<ClipRecord | null>(null);
   const [editing, setEditing] = useState<ClipRecord | null>(null);
   const [deleting, setDeleting] = useState<ClipRecord | null>(null);
   const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
@@ -531,7 +535,7 @@ export function LibraryScreen() {
       {columnize(items, gridColumnCount).map((column, columnIndex) => (
         <Stack key={columnIndex} spacing={{ xs: 0.75, sm: 1.25 }} sx={{ minWidth: 0, maxWidth: "100%" }}>
           {column.map((clip) => (
-            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
+            <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onTrim={setTrimming} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
           ))}
         </Stack>
       ))}
@@ -539,7 +543,7 @@ export function LibraryScreen() {
   ) : (
     <Box sx={{ display: "grid", alignItems: "start", alignSelf: "center", gap: 1, width: "100%", maxWidth: listRowWidth, mx: "auto" }}>
       {items.map((clip) => (
-        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
+        <ClipCard key={clip.id} clip={clip} mode={mode} size={size} listThumbnailWidth={listThumbnailWidth} expanded={expandedClipId === clip.id} onToggle={() => setExpandedClipId((current) => current === clip.id ? null : clip.id)} onPlay={openPlayer} onTrim={setTrimming} onEdit={setEditing} onDelete={(target) => { deleteMutation.reset(); setDeleting(target); }} onUploadImmich={(target) => uploadMutation.mutate(target)} onOpenImmich={(target) => checkImmichMutation.mutate(target)} immichConfigured={immichConfigured} />
       ))}
     </Box>
   );
@@ -668,6 +672,7 @@ export function LibraryScreen() {
       })}
       {(clips.data?.pages ?? 1) > 1 && <Pagination page={page} count={clips.data?.pages ?? 1} onChange={(_, value) => { setPage(value); writeParams({ page: value === 1 ? null : String(value) }); }} />}
       {playing && <PlaybackDialog clip={playing} onClose={closePlayer} />}
+      {trimming && <TrimClipDialog clip={trimming} onClose={() => setTrimming(null)} />}
       {editing && <MetadataDialog clip={editing} busy={editMutation.isPending || Boolean(editJobId)} error={editMutation.error?.message ?? editJob.data?.error?.message ?? null} onClose={() => setEditing(null)} onSave={(update) => editMutation.mutate({ clip: editing, update })} />}
       {deleting && (
         <DeleteClipDialog

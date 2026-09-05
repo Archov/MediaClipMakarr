@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mediaclipmakarr.application_settings import normalize_immich_url
+from mediaclipmakarr.clip_edits import trim_source_matches, validate_trim_rendered_output
 from mediaclipmakarr.clip_library import (
     BulkImmichUploadJobPlan,
     ClipRevisionConflict,
@@ -47,6 +48,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.immich import (
     ImmichApiError,
     ImmichAssetNotFoundError,
+    delete_immich_asset,
     fetch_immich_api_key_permissions,
     read_immich_asset,
     set_immich_asset_description,
@@ -65,9 +67,11 @@ from .recovery import fail_abandoned_jobs, recover_finalizing_jobs
 from .repository import (
     _live_progress_snapshot,
     claim_next_job,
+    commit_clip_replacement,
     commit_metadata_edit,
     create_pending_metadata_operation,
     create_pending_operation,
+    create_pending_replacement_operation,
     enqueue_immich_upload_job,
     enqueue_thumbnail_job,
     fail_job,
@@ -133,6 +137,27 @@ class _ImmichNotConfiguredError(RuntimeError):
 
     job_error_code = "IMMICH_NOT_CONFIGURED"
     job_retryable = True
+
+
+class _PostSwapFinalizationError(Exception):
+    """A failure landed after a rendered file was already swapped onto disk
+    (trim replace or metadata edit) but before the matching database commit
+    and job-success write both durably completed.
+
+    `install_metadata_revision`'s `Path.replace` is atomic, so once it
+    returns, the file on disk already embeds the new revision — there is no
+    going back. Marking the job FAILED at that point (the generic handler's
+    usual response) would leave the database's stale revision permanently
+    out of sync with the file: `recover_finalizing_jobs` only reconciles jobs
+    still in FINALIZING, and only runs at startup. `_execute_and_finalize`
+    catches this instead of letting it fall into the generic handler, and
+    deliberately does *not* fail the job or clean up its work directory —
+    both are left exactly as they are for the next startup's recovery pass.
+    """
+
+    def __init__(self, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.original = original
 
 
 def _remove_job_workdir(workdir: Path) -> None:
@@ -283,6 +308,19 @@ class JobRunner:
                 )
                 await self._publish_durable_job_update(claimed.id)
             raise
+        except _PostSwapFinalizationError as error:
+            # Deliberately no fail_job and no workdir cleanup — see
+            # _PostSwapFinalizationError's docstring. Leave the job FINALIZING
+            # and its work directory intact for recover_finalizing_jobs to
+            # reconcile on next startup.
+            logger.exception(
+                "Job %s failed after its file was already installed; leaving it "
+                "FINALIZING for reconciliation on next startup: %s",
+                claimed.id,
+                error.original,
+            )
+            with contextlib.suppress(Exception):
+                await self._publish_durable_job_update(claimed.id)
         except Exception as error:
             await self._cleanup_job_workdir(claimed.id, "job failure")
             logger.exception("Clip render job %s failed.", claimed.id)
@@ -365,6 +403,8 @@ class JobRunner:
         plan = claimed.render_plan
         if not isinstance(plan, ClipRenderPlan):
             raise TypeError("Clip creation job has an invalid durable plan.")
+        if plan.operation != "create":
+            await self._validate_trim_source(plan)
         await update_running_job(
             self.engine,
             claimed.id,
@@ -420,12 +460,24 @@ class JobRunner:
                 update={"plex_token": await self.plex_token_loader()}
             )
         rendered = await self.renderer(plan, renderer_settings, progress=render_progress)
-        destination = await self.run_blocking(
-            resolve_unique_clip_path,
-            self.settings.resolved_clip_dir,
-            plan.library,
-            plan.title,
-        )
+        parent_clip: dict[str, Any] | None = None
+        if plan.operation != "create":
+            await validate_trim_rendered_output(
+                rendered,
+                plan,
+                self.settings,
+                run_blocking=self.run_blocking,
+            )
+            parent_clip = await self._validate_trim_source(plan)
+        if plan.operation == "trim_replace":
+            destination = Path(plan.source_media.local_path)
+        else:
+            destination = await self.run_blocking(
+                resolve_unique_clip_path,
+                self.settings.resolved_clip_dir,
+                plan.library,
+                plan.title,
+            )
         rendered_stat = await self.run_blocking(rendered.path.stat)
         clip = _clip_payload(plan, rendered.duration_ms, destination, rendered_stat)
 
@@ -438,24 +490,64 @@ class JobRunner:
             destination=destination,
             render_plan_hash=plan.render_plan_hash,
         )
-        await create_pending_operation(
-            self.engine,
-            job_id=claimed.id,
-            plan=plan,
-            rendered_path=rendered.path,
-            destination=destination,
-            clip=clip,
-        )
+        if plan.operation == "trim_replace":
+            await create_pending_replacement_operation(
+                self.engine,
+                job_id=claimed.id,
+                plan=plan,
+                rendered_path=rendered.path,
+                source_path=destination,
+                clip=clip,
+            )
+        else:
+            await create_pending_operation(
+                self.engine,
+                job_id=claimed.id,
+                plan=plan,
+                rendered_path=rendered.path,
+                destination=destination,
+                clip=clip,
+            )
         latest_snapshot = await self._publish_durable_job_update(claimed.id)
 
-        await self.run_blocking(
-            install_rendered_clip,
-            rendered.path,
-            destination,
-            self.settings.preserve_job_workdirs,
-        )
-        await insert_clip(self.engine, clip)
-        await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
+        if plan.operation == "trim_replace":
+            await self.run_blocking(
+                install_metadata_revision,
+                rendered.path,
+                destination,
+                destination,
+            )
+            # Point of no return: the file now embeds the new revision. A
+            # failure from here on must not reach the generic handler — see
+            # _PostSwapFinalizationError.
+            try:
+                installed_stat = await self.run_blocking(destination.stat)
+                clip["file_size_bytes"] = installed_stat.st_size
+                clip["file_modified_ns"] = installed_stat.st_mtime_ns
+                await commit_clip_replacement(
+                    self.engine,
+                    clip,
+                    expected_revision=int(plan.expected_revision or 0),
+                )
+                await finish_job_success(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    clip=clip,
+                    message="Clip replacement completed.",
+                )
+                await self._cleanup_job_workdir(claimed.id, "clip replacement completion")
+            except Exception as error:
+                raise _PostSwapFinalizationError(error) from error
+        else:
+            await self.run_blocking(
+                install_rendered_clip,
+                rendered.path,
+                destination,
+                self.settings.preserve_job_workdirs,
+            )
+            await insert_clip(self.engine, clip)
+            await finish_job_success(self.engine, claimed.id, claimed.run_token, clip=clip)
         await self._publish_durable_job_update(claimed.id)
         installed_stat = await self.run_blocking(destination.stat)
         thumbnail_job = await enqueue_thumbnail_job(
@@ -467,18 +559,47 @@ class JobRunner:
         immich_settings = (
             await self.immich_settings_loader() if self.immich_settings_loader else None
         )
-        if (
-            immich_settings is not None
-            and immich_settings.auto_upload
-            and immich_settings.url
-            and immich_settings.api_key
-        ):
-            upload_job = await enqueue_immich_upload_job(
-                self.engine, build_immich_upload_plan(clip)
-            )
-            await self._publish_durable_job_update(upload_job.id)
+        if immich_settings is not None and immich_settings.url and immich_settings.api_key:
+            if plan.operation == "trim_replace":
+                # A trim replace never touches immich_asset_id/immich_server_url (see
+                # commit_clip_replacement's field whitelist) — a clip already linked
+                # before the replace is still linked to the now-stale asset after it.
+                # Re-upload unconditionally (independent of auto_upload, which only
+                # gates *newly created* clips) so an already-linked clip stays in sync.
+                existing_asset_id = parent_clip.get("immich_asset_id") if parent_clip else None
+                existing_server = parent_clip.get("immich_server_url") if parent_clip else None
+                normalized_server = normalize_immich_url(immich_settings.url)
+                if existing_asset_id and existing_server == normalized_server:
+                    cleared = await clear_clip_immich_asset_id(
+                        self.engine, str(clip["id"]), expected_asset_id=str(existing_asset_id)
+                    )
+                    if cleared:
+                        upload_job = await enqueue_immich_upload_job(
+                            self.engine,
+                            build_immich_upload_plan(
+                                clip, superseded_asset_id=str(existing_asset_id)
+                            ),
+                        )
+                        await self._publish_durable_job_update(upload_job.id)
+            elif immich_settings.auto_upload:
+                upload_job = await enqueue_immich_upload_job(
+                    self.engine, build_immich_upload_plan(clip)
+                )
+                await self._publish_durable_job_update(upload_job.id)
 
         self.wake()
+
+    async def _validate_trim_source(self, plan: ClipRenderPlan) -> dict[str, Any]:
+        parent_id = plan.clip_id if plan.operation == "trim_replace" else plan.parent_clip_id
+        if not parent_id:
+            raise ClipRevisionConflict("The trim render plan has no parent clip identity.")
+        clip = await get_clip(self.engine, parent_id, self.settings.resolved_clip_dir)
+        if clip is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        stat = await self.run_blocking(Path(str(clip["file_path"])).stat)
+        if not trim_source_matches(plan, clip, stat):
+            raise ClipRevisionConflict("The clip changed after the trim editor was opened.")
+        return clip
 
     async def _execute_thumbnail_job(self, claimed: ClaimedJob) -> None:
         plan = claimed.render_plan
@@ -632,21 +753,27 @@ class JobRunner:
         )
         await self._publish_durable_job_update(claimed.id)
         await self.run_blocking(install_metadata_revision, temp, source, destination)
-        installed_stat = await self.run_blocking(destination.stat)
-        proposed["file_size_bytes"] = installed_stat.st_size
-        proposed["file_modified_ns"] = installed_stat.st_mtime_ns
-        await commit_metadata_edit(
-            self.engine, proposed, expected_revision=plan.expected_revision
-        )
-        await self.run_blocking(remove_superseded_clip, source, destination)
-        await finish_job_success(
-            self.engine,
-            claimed.id,
-            claimed.run_token,
-            clip=proposed,
-            message="Clip metadata update completed.",
-        )
-        await self._cleanup_job_workdir(claimed.id, "metadata update completion")
+        # Point of no return: the file now embeds the new revision. A failure
+        # from here on must not reach the generic handler — see
+        # _PostSwapFinalizationError.
+        try:
+            installed_stat = await self.run_blocking(destination.stat)
+            proposed["file_size_bytes"] = installed_stat.st_size
+            proposed["file_modified_ns"] = installed_stat.st_mtime_ns
+            await commit_metadata_edit(
+                self.engine, proposed, expected_revision=plan.expected_revision
+            )
+            await self.run_blocking(remove_superseded_clip, source, destination)
+            await finish_job_success(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                clip=proposed,
+                message="Clip metadata update completed.",
+            )
+            await self._cleanup_job_workdir(claimed.id, "metadata update completion")
+        except Exception as error:
+            raise _PostSwapFinalizationError(error) from error
         await self._publish_durable_job_update(claimed.id)
         thumbnail_job = await enqueue_thumbnail_job(
             self.engine,
@@ -992,6 +1119,30 @@ class JobRunner:
             clip, immich_settings, report_stage=report_stage
         )
 
+        if plan.superseded_asset_id and result.state != "FAILED":
+            try:
+                await delete_immich_asset(
+                    plan.superseded_asset_id, immich_settings.url, immich_settings.api_key
+                )
+            except ImmichAssetNotFoundError:
+                pass
+            except ImmichApiError as error:
+                if result.state == "SUCCEEDED":
+                    result = dataclasses.replace(
+                        result,
+                        state="PARTIAL",
+                        error=JobError(
+                            code="IMMICH_SUPERSEDED_ASSET_DELETE_FAILED",
+                            message=(
+                                "The clip now points at the new Immich asset, but the "
+                                f"previous asset ({plan.superseded_asset_id}) could not be "
+                                f"removed: {error}"
+                            ),
+                            retryable=False,
+                        ),
+                    )
+                # Already PARTIAL/etc. — leave as-is rather than hide the earlier issue.
+
         if result.state == "FAILED":
             error = result.error or JobError(code="IMMICH_ORGANIZE_FAILED", message=result.message)
             await fail_job(
@@ -1183,7 +1334,10 @@ class JobRunner:
                     stage="validating",
                     progress=(index / len(already_linked_ids)) * 0.5,
                     current_stage_progress=index / len(already_linked_ids),
-                    message=f"Validating {index + 1} of {len(already_linked_ids)} existing uploads.",
+                    message=(
+                        f"Validating {index + 1} of {len(already_linked_ids)} "
+                        "existing uploads."
+                    ),
                 )
                 await self._publish_durable_job_update(claimed.id)
 
@@ -1534,6 +1688,30 @@ def _clip_payload(
     rendered_stat: Any | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
+    source_start_ms = (
+        plan.provenance_start_ms
+        if plan.provenance_start_ms is not None
+        else plan.source_start_ms
+    )
+    source_end_ms = (
+        plan.provenance_end_ms if plan.provenance_end_ms is not None else plan.source_end_ms
+    )
+    source_path = plan.provenance_source_path or plan.source_media.local_path
+    source_size_bytes = (
+        plan.provenance_source_size_bytes
+        if plan.provenance_source_size_bytes is not None
+        else plan.source_media.fingerprint.size_bytes
+    )
+    source_modified_at = (
+        plan.provenance_source_modified_at
+        if plan.provenance_source_modified_at is not None
+        else plan.source_media.fingerprint.modified_at
+    )
+    audio_stream_index = (
+        plan.provenance_audio_stream_index
+        if plan.provenance_audio_stream_index is not None
+        else plan.selected_audio_stream.stream_index
+    )
     return {
         "id": plan.clip_id,
         "title": plan.title,
@@ -1552,15 +1730,21 @@ def _clip_payload(
         "file_path": str(destination),
         "duration_ms": rendered_duration_ms,
         "revision": plan.revision,
-        "source_start_ms": plan.source_start_ms,
-        "source_end_ms": plan.source_end_ms,
-        "source_path": plan.source_media.local_path,
-        "source_size_bytes": plan.source_media.fingerprint.size_bytes,
-        "source_modified_at": plan.source_media.fingerprint.modified_at.replace(tzinfo=None),
-        "selected_audio_stream_index": plan.selected_audio_stream.stream_index,
+        "parent_clip_id": plan.parent_clip_id,
+        "source_start_ms": source_start_ms,
+        "source_end_ms": source_end_ms,
+        "source_path": source_path,
+        "source_size_bytes": source_size_bytes,
+        "source_modified_at": source_modified_at.replace(tzinfo=None),
+        "selected_audio_stream_index": audio_stream_index,
         "render_plan_hash": plan.render_plan_hash,
         "file_size_bytes": rendered_stat.st_size if rendered_stat is not None else None,
         "file_modified_ns": rendered_stat.st_mtime_ns if rendered_stat is not None else None,
-        "created_at": now,
+        "thumbnail_path": None,
+        "thumbnail_source_size": None,
+        "thumbnail_source_modified_ns": None,
+        "created_at": (
+            plan.clip_created_at.replace(tzinfo=None) if plan.clip_created_at else now
+        ),
         "updated_at": now,
     }

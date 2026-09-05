@@ -648,6 +648,31 @@ def _packet_time_ms(packet: dict[str, object]) -> int | None:
 
 
 def _metadata_envelope(plan: ClipRenderPlan) -> str:
+    source_path = plan.provenance_source_path or plan.source_media.local_path
+    source_start_ms = (
+        plan.provenance_start_ms
+        if plan.provenance_start_ms is not None
+        else plan.source_start_ms
+    )
+    source_end_ms = (
+        plan.provenance_end_ms if plan.provenance_end_ms is not None else plan.source_end_ms
+    )
+    source_modified_at = (
+        plan.provenance_source_modified_at
+        if plan.provenance_source_modified_at is not None
+        else plan.source_media.fingerprint.modified_at
+    )
+    source_fingerprint = {
+        "size_bytes": (
+            plan.provenance_source_size_bytes
+            if plan.provenance_source_size_bytes is not None
+            else plan.source_media.fingerprint.size_bytes
+        ),
+        "modified_at": source_modified_at.isoformat(),
+    }
+    selected_audio = plan.selected_audio_stream.model_dump(mode="json")
+    if plan.provenance_audio_stream_index is not None:
+        selected_audio["stream_index"] = plan.provenance_audio_stream_index
     payload = {
         "schemaVersion": 2,
         "application": "MediaClipMakarr",
@@ -671,12 +696,12 @@ def _metadata_envelope(plan: ClipRenderPlan) -> str:
             "plex_username": plan.plex_user,
         },
         "source": {
-            "path": plan.source_media.local_path,
-            "startMs": plan.source_start_ms,
-            "endMs": plan.source_end_ms,
-            "fingerprint": plan.source_media.fingerprint.model_dump(mode="json"),
+            "path": source_path,
+            "startMs": source_start_ms,
+            "endMs": source_end_ms,
+            "fingerprint": source_fingerprint,
         },
-        "selectedAudioStream": plan.selected_audio_stream.model_dump(mode="json"),
+        "selectedAudioStream": selected_audio,
         "selectedSubtitle": plan.selected_subtitle.model_dump(mode="json"),
         "renderProfile": plan.output_profile,
         "renderPlanHash": plan.render_plan_hash,
