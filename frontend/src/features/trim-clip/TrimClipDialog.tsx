@@ -376,7 +376,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   return (
     <>
     <Dialog open onClose={onClose} fullScreen={fullScreen} fullWidth maxWidth="lg" aria-labelledby="trim-dialog-title">
-      <DialogTitle id="trim-dialog-title" sx={{ pr: 7 }}>
+      <DialogTitle id="trim-dialog-title" sx={{ pr: 7, py: 1, fontSize: "1rem", fontWeight: 600, lineHeight: 1.3 }}>
         <Tooltip title={`Trim ${trimInfo?.title ?? clip.title}`} enterTouchDelay={0}>
           <Box
             component="span"
