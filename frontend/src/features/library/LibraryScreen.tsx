@@ -239,6 +239,11 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
             <ClipAction label="Delete" icon={<DeleteOutlineRounded />} large={size === "large"} color="error" onClick={() => onDelete(clip)} />
             <ImmichStatusChip clip={clip} />
           </CardActions>
+          {gifExport.error && (
+            <Alert severity="error" sx={{ mx: 0.5, mb: 0.5, py: 0 }}>
+              {gifExport.error}
+            </Alert>
+          )}
         </Collapse>
       </Box>
     </Card>

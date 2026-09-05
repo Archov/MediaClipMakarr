@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { fetchJob, requestClipGif } from "../../api";
 import type { GifExportRange } from "../../api";
@@ -28,11 +28,19 @@ function isGifResult(result: unknown): result is GifJobResult {
  * job. */
 export function useGifExport(clipId: string | null) {
   const [jobId, setJobId] = useState<string | null>(null);
+  // The POST can resolve after the caller has already moved on to a
+  // different clip (e.g. the trim dialog reopened against clip B while
+  // clip A's export was still in flight) — a ref (not state) lets onSuccess
+  // read the *current* clipId without depending on the render that scheduled
+  // the mutation.
+  const latestClipId = useRef(clipId);
+  latestClipId.current = clipId;
 
   const requestMutation = useMutation({
     mutationFn: ({ id, range }: { id: string; range?: GifExportRange }) =>
       requestClipGif(id, range),
-    onSuccess: (response) => {
+    onSuccess: (response, variables) => {
+      if (variables.id !== latestClipId.current) return;
       if (response.status === "cached" && response.gif_url) {
         triggerDownload(response.gif_url);
         setJobId(null);
@@ -66,9 +74,13 @@ export function useGifExport(clipId: string | null) {
   }, [clipId]);
 
   const jobState = job.data?.state;
-  const busy = requestMutation.isPending || (Boolean(jobId) && jobState !== undefined && NONTERMINAL_JOB_STATES.has(jobState));
+  const busy =
+    requestMutation.isPending ||
+    (Boolean(jobId) &&
+      (job.isPending || (jobState !== undefined && NONTERMINAL_JOB_STATES.has(jobState))));
   const error =
     requestMutation.error?.message ??
+    job.error?.message ??
     (jobState === "FAILED" ? job.data?.error?.message ?? "GIF export failed." : null);
 
   return {
