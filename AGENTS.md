@@ -21,6 +21,7 @@ Preserve the product behavior defined in the repository design documents unless 
 - Never expose secrets in API responses, logs, errors, fixtures, or generated artifacts.
 - Prefer incremental changes that leave the application runnable and easy to manually verify.
 - Reuse proven media-processing behavior where appropriate, but do not copy legacy code wholesale merely because it already exists.
+- When reviewing code, evaluate threats with the understanding that the estimated max daily concurrent user count for the application is between 0 and 1. 
 
 ## Testing
 
