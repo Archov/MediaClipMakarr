@@ -195,13 +195,20 @@ class ImmichUploadJobPlan(BaseModel):
     # Also doubles as the dedup key for `_find_active_job` — only one upload job may
     # be in flight per clip at a time, mirroring the thumbnail job's hash-based dedup.
     operation_hash: str
+    # Set when this upload supersedes a still-live asset (e.g. a trim replace on a
+    # clip that was already linked to Immich) — deleted, best-effort, once the new
+    # upload and its association are durably committed.
+    superseded_asset_id: str | None = None
 
 
-def build_immich_upload_plan(clip: dict[str, Any]) -> ImmichUploadJobPlan:
+def build_immich_upload_plan(
+    clip: dict[str, Any], *, superseded_asset_id: str | None = None
+) -> ImmichUploadJobPlan:
     return ImmichUploadJobPlan(
         job_id=f"job-{uuid4()}",
         clip_id=str(clip["id"]),
         operation_hash=str(clip["id"]),
+        superseded_asset_id=superseded_asset_id,
     )
 
 

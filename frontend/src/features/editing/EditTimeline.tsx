@@ -1,4 +1,3 @@
-import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import { Box, Typography } from "@mui/material";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -140,7 +139,7 @@ function BoundaryHandle({
           content: '""',
           position: "absolute",
           left: "50%",
-          top: 8,
+          top: 2,
           bottom: 0,
           width: 4,
           transform: "translateX(-50%)",
@@ -229,7 +228,7 @@ export function EditTimeline({
       <Box
         sx={{
           position: "relative",
-          height: 34,
+          height: 22,
           mx: 0.5,
           borderBottom: 1,
           borderColor: "divider",
@@ -246,7 +245,7 @@ export function EditTimeline({
                   color="text.secondary"
                   sx={{
                     position: "absolute",
-                    bottom: 9,
+                    bottom: 7,
                     transform: "translateX(-50%)",
                     whiteSpace: "nowrap",
                     fontVariantNumeric: "tabular-nums",
@@ -256,7 +255,7 @@ export function EditTimeline({
                   {formatRulerTime(tick.valueMs)}
                 </Typography>
               )}
-              <Box sx={{ width: 1, height: tick.major ? 9 : 5, bgcolor: tick.major ? "text.secondary" : "divider" }} />
+              <Box sx={{ width: 1, height: tick.major ? 7 : 4, bgcolor: tick.major ? "text.secondary" : "divider" }} />
             </Box>
           );
         })}
@@ -282,7 +281,7 @@ export function EditTimeline({
         }}
         sx={{
           position: "relative",
-          height: 76,
+          height: 14,
           bgcolor: "#090d14",
           border: 1,
           borderColor: "divider",
@@ -303,8 +302,8 @@ export function EditTimeline({
               position: "absolute",
               left: `${timeToTimelinePercent(visibleReference.startMs, viewportRange)}%`,
               width: `${timeToTimelinePercent(visibleReference.endMs, viewportRange) - timeToTimelinePercent(visibleReference.startMs, viewportRange)}%`,
-              top: 10,
-              height: 8,
+              top: 1,
+              height: 2,
               bgcolor: "rgba(255,255,255,.2)",
               borderRadius: 1,
               pointerEvents: "none",
@@ -312,7 +311,7 @@ export function EditTimeline({
           />
         )}
 
-        <Box sx={{ position: "absolute", inset: "22px 0 14px", bgcolor: "rgba(0,0,0,.38)" }} />
+        <Box sx={{ position: "absolute", inset: "2px 0 2px", bgcolor: "rgba(0,0,0,.38)" }} />
         {visibleSelection && (
           <Box
             aria-label="Selected clip range"
@@ -320,12 +319,8 @@ export function EditTimeline({
               position: "absolute",
               left: `${timeToTimelinePercent(visibleSelection.startMs, viewportRange)}%`,
               width: `${timeToTimelinePercent(visibleSelection.endMs, viewportRange) - timeToTimelinePercent(visibleSelection.startMs, viewportRange)}%`,
-              top: 22,
-              bottom: 14,
-              display: "flex",
-              alignItems: "center",
-              gap: 0.75,
-              px: 1.5,
+              top: 2,
+              bottom: 2,
               bgcolor: "rgba(96,165,250,.34)",
               borderTop: 1,
               borderBottom: 1,
@@ -333,15 +328,7 @@ export function EditTimeline({
               overflow: "hidden",
               pointerEvents: "none",
             }}
-          >
-            <ContentCutRounded sx={{ fontSize: 17, flex: "0 0 auto", color: "primary.light" }} />
-            <Typography
-              variant="caption"
-              sx={{ color: "common.white", fontWeight: 700, letterSpacing: ".08em", whiteSpace: "nowrap" }}
-            >
-              SELECTION
-            </Typography>
-          </Box>
+          />
         )}
 
         <BoundaryHandle
@@ -375,19 +362,51 @@ export function EditTimeline({
 
         {playheadVisible && (
           <Box
+            component="button"
+            type="button"
             aria-label="Playhead"
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              onActiveBoundaryChange?.(null);
+              onInteractionStart?.();
+              updatePlayheadFromPointer(event.clientX);
+            }}
+            onPointerMove={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) updatePlayheadFromPointer(event.clientX);
+            }}
+            onPointerUp={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
             sx={{
-              pointerEvents: "none",
+              appearance: "none",
               position: "absolute",
               zIndex: 6,
               left: `${timeToTimelinePercent(playheadMs, viewportRange)}%`,
-              top: -12,
+              top: -6,
               bottom: 0,
-              width: 2,
+              width: 20,
+              p: 0,
               transform: "translateX(-50%)",
-              bgcolor: "warning.main",
-              boxShadow: "0 0 0 1px rgba(0,0,0,.45)",
+              border: 0,
+              bgcolor: "transparent",
+              cursor: "ew-resize",
+              touchAction: "none",
               "&::before": {
+                content: '""',
+                position: "absolute",
+                left: "50%",
+                top: 0,
+                bottom: 0,
+                width: 2,
+                transform: "translateX(-50%)",
+                bgcolor: "warning.main",
+                boxShadow: "0 0 0 1px rgba(0,0,0,.45)",
+              },
+              "&::after": {
                 content: '""',
                 position: "absolute",
                 top: 0,
@@ -397,6 +416,10 @@ export function EditTimeline({
                 transform: "translate(-50%, -50%) rotate(45deg)",
                 bgcolor: "warning.main",
                 borderRadius: "2px 0 2px 0",
+                boxShadow: "0 0 0 1px rgba(0,0,0,.45)",
+              },
+              "&:focus-visible": {
+                outline: "none",
               },
             }}
           />

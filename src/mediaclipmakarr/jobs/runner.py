@@ -48,6 +48,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.immich import (
     ImmichApiError,
     ImmichAssetNotFoundError,
+    delete_immich_asset,
     fetch_immich_api_key_permissions,
     read_immich_asset,
     set_immich_asset_description,
@@ -425,6 +426,7 @@ class JobRunner:
                 update={"plex_token": await self.plex_token_loader()}
             )
         rendered = await self.renderer(plan, renderer_settings, progress=render_progress)
+        parent_clip: dict[str, Any] | None = None
         if plan.operation != "create":
             await validate_trim_rendered_output(
                 rendered,
@@ -432,7 +434,7 @@ class JobRunner:
                 self.settings,
                 run_blocking=self.run_blocking,
             )
-            await self._validate_trim_source(plan)
+            parent_clip = await self._validate_trim_source(plan)
         if plan.operation == "trim_replace":
             destination = Path(plan.source_media.local_path)
         else:
@@ -517,17 +519,33 @@ class JobRunner:
         immich_settings = (
             await self.immich_settings_loader() if self.immich_settings_loader else None
         )
-        if (
-            immich_settings is not None
-            and immich_settings.auto_upload
-            and immich_settings.url
-            and immich_settings.api_key
-            and plan.operation != "trim_replace"
-        ):
-            upload_job = await enqueue_immich_upload_job(
-                self.engine, build_immich_upload_plan(clip)
-            )
-            await self._publish_durable_job_update(upload_job.id)
+        if immich_settings is not None and immich_settings.url and immich_settings.api_key:
+            if plan.operation == "trim_replace":
+                # A trim replace never touches immich_asset_id/immich_server_url (see
+                # commit_clip_replacement's field whitelist) — a clip already linked
+                # before the replace is still linked to the now-stale asset after it.
+                # Re-upload unconditionally (independent of auto_upload, which only
+                # gates *newly created* clips) so an already-linked clip stays in sync.
+                existing_asset_id = parent_clip.get("immich_asset_id") if parent_clip else None
+                existing_server = parent_clip.get("immich_server_url") if parent_clip else None
+                normalized_server = normalize_immich_url(immich_settings.url)
+                if existing_asset_id and existing_server == normalized_server:
+                    cleared = await clear_clip_immich_asset_id(
+                        self.engine, str(clip["id"]), expected_asset_id=str(existing_asset_id)
+                    )
+                    if cleared:
+                        upload_job = await enqueue_immich_upload_job(
+                            self.engine,
+                            build_immich_upload_plan(
+                                clip, superseded_asset_id=str(existing_asset_id)
+                            ),
+                        )
+                        await self._publish_durable_job_update(upload_job.id)
+            elif immich_settings.auto_upload:
+                upload_job = await enqueue_immich_upload_job(
+                    self.engine, build_immich_upload_plan(clip)
+                )
+                await self._publish_durable_job_update(upload_job.id)
 
         self.wake()
 
@@ -1054,6 +1072,30 @@ class JobRunner:
         result = await self._upload_and_organize_clip(
             clip, immich_settings, report_stage=report_stage
         )
+
+        if plan.superseded_asset_id and result.state != "FAILED":
+            try:
+                await delete_immich_asset(
+                    plan.superseded_asset_id, immich_settings.url, immich_settings.api_key
+                )
+            except ImmichAssetNotFoundError:
+                pass
+            except ImmichApiError as error:
+                if result.state == "SUCCEEDED":
+                    result = dataclasses.replace(
+                        result,
+                        state="PARTIAL",
+                        error=JobError(
+                            code="IMMICH_SUPERSEDED_ASSET_DELETE_FAILED",
+                            message=(
+                                "The clip now points at the new Immich asset, but the "
+                                f"previous asset ({plan.superseded_asset_id}) could not be "
+                                f"removed: {error}"
+                            ),
+                            retryable=False,
+                        ),
+                    )
+                # Already PARTIAL/etc. — leave as-is rather than hide the earlier issue.
 
         if result.state == "FAILED":
             error = result.error or JobError(code="IMMICH_ORGANIZE_FAILED", message=result.message)

@@ -1,9 +1,13 @@
 import AddLocationAltRounded from "@mui/icons-material/AddLocationAltRounded";
+import ArrowBackIosRounded from "@mui/icons-material/ArrowBackIosRounded";
+import ArrowForwardIosRounded from "@mui/icons-material/ArrowForwardIosRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SaveRounded from "@mui/icons-material/SaveRounded";
+import VolumeOffRounded from "@mui/icons-material/VolumeOffRounded";
+import VolumeUpRounded from "@mui/icons-material/VolumeUpRounded";
 import {
   Alert,
   Box,
@@ -24,6 +28,7 @@ import {
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { fetchClipTrimInfo, saveClipTrim } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
@@ -37,9 +42,94 @@ import {
 } from "../editing/timelineMath";
 import { clampTrimRange, shouldStopPreview, validateTrimValue } from "./trimSelection";
 
+// Matches the theme-matched accent blue used elsewhere in the app (see
+// IMMICH_ICON_BLUE in LibraryScreen.tsx).
+const ACCENT_BLUE = "#61a6fa";
+
 interface TrimClipDialogProps {
   clip: ClipRecord;
   onClose: () => void;
+}
+
+interface TimestampFieldProps {
+  id: string;
+  label: string;
+  value: string;
+  error: string | null;
+  onChange: (value: string) => void;
+  onFocus: () => void;
+  onBlur: () => void;
+  startAdornment?: ReactNode;
+  endAdornment?: ReactNode;
+}
+
+function TimestampField({
+  id,
+  label,
+  value,
+  error,
+  onChange,
+  onFocus,
+  onBlur,
+  startAdornment,
+  endAdornment,
+}: TimestampFieldProps) {
+  return (
+    <TextField
+      id={id}
+      label={label}
+      value={value}
+      error={Boolean(error)}
+      helperText={error}
+      onChange={(event) => onChange(event.target.value)}
+      onFocus={onFocus}
+      onBlur={onBlur}
+      size="small"
+      slotProps={{
+        input: { startAdornment, endAdornment },
+        htmlInput: {
+          style: { width: "12ch", textAlign: "center", fontVariantNumeric: "tabular-nums" },
+        },
+      }}
+      sx={{
+        width: "fit-content",
+        // Centers the label over the input instead of MUI's default left-aligned
+        // notch, by centering the real notch (the fieldset's `legend`, which
+        // natively cuts the border gap) rather than hiding it behind a faked
+        // background patch — the latter can't match this theme's dark-mode Paper
+        // elevation overlay, which layers a translucent gradient over the base
+        // background color rather than being one flat color.
+        "& .MuiInputLabel-root": {
+          right: 0,
+          textAlign: "center",
+        },
+        "& .MuiInputLabel-shrink": {
+          left: 0,
+          right: 0,
+          width: "fit-content",
+          margin: "0 auto",
+          whiteSpace: "nowrap",
+          textAlign: "center",
+          // MUI's default shrink transform is translate(14px, -9px) scale(0.75).
+          // The -9px vertical offset is what correctly bisects the border line, so
+          // it's kept as-is; the 14px horizontal offset is dropped since it fights
+          // the left/right/margin centering above. transformOrigin must also move
+          // to the element's center — MUI's default is the top-left corner, which
+          // scales the box toward that corner instead of shrinking it in place,
+          // silently un-centering it.
+          transform: "translate(0, -9px) scale(0.75)",
+          transformOrigin: "center",
+        },
+        "& .MuiOutlinedInput-root legend": {
+          float: "none",
+          margin: "0 auto",
+          // MUI sets the notch width via an inline style, which needs !important
+          // to override.
+          width: "fit-content !important",
+        },
+      }}
+    />
+  );
 }
 
 interface FrameNudgeButtonProps {
@@ -55,20 +145,27 @@ function FrameNudgeButton({ boundary, direction, disabled, onClick, onArrowNudge
   return (
     <Tooltip title={`Move ${boundary} ${direction} one nominal frame`}>
       <span>
-        <Button
+        <IconButton
           aria-label={`Move ${boundary} ${direction} one frame`}
           disabled={disabled}
-          variant="outlined"
           onClick={onClick}
           onKeyDown={(event) => {
             if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
             event.preventDefault();
             onArrowNudge(event.key === "ArrowLeft" ? -1 : 1);
           }}
-          sx={{ minWidth: 44, width: 44, height: 56, px: 0.5, fontVariantNumeric: "tabular-nums" }}
+          size="small"
+          sx={{
+            p: 0,
+            color: disabled ? "text.disabled" : ACCENT_BLUE,
+          }}
         >
-          {backward ? "−1f" : "+1f"}
-        </Button>
+          {backward ? (
+            <ArrowBackIosRounded style={{ fontSize: 32 }} />
+          ) : (
+            <ArrowForwardIosRounded style={{ fontSize: 32 }} />
+          )}
+        </IconButton>
       </span>
     </Tooltip>
   );
@@ -90,6 +187,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const [playheadMs, setPlayheadMs] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [videoPlaying, setVideoPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
   const [activeBoundary, setActiveBoundary] = useState<"start" | "end" | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [expectedRevision, setExpectedRevision] = useState<number | null>(null);
@@ -181,12 +279,20 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     void queryClient.invalidateQueries({ queryKey: ["clips"] });
     void queryClient.invalidateQueries({ queryKey: ["clip", clip.id] });
     void queryClient.invalidateQueries({ queryKey: ["clip-libraries"] });
-  }, [activeJob?.state, clip.id, queryClient]);
+    onClose();
+  }, [activeJob?.state, clip.id, queryClient, onClose]);
 
   const cancelPreview = () => {
     videoRef.current?.pause();
     setPreviewing(false);
     setVideoPlaying(false);
+  };
+
+  const togglePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play();
+    else video.pause();
   };
 
   const seekPlayhead = (valueMs: number) => {
@@ -268,6 +374,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     || activeJob?.state === "SUCCEEDED";
 
   return (
+    <>
     <Dialog open onClose={onClose} fullScreen={fullScreen} fullWidth maxWidth="lg" aria-labelledby="trim-dialog-title">
       <DialogTitle id="trim-dialog-title" sx={{ pr: 7 }}>
         Trim {trimInfo?.title ?? clip.title}
@@ -287,13 +394,14 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
           <Alert severity="error">{info.error.message}</Alert>
         ) : trimInfo ? (
           <Stack spacing={2.5}>
-            <Box sx={{ bgcolor: "black", borderRadius: 1, overflow: "hidden", display: "grid", placeItems: "center" }}>
+            <Box sx={{ position: "relative", bgcolor: "black", borderRadius: 1, overflow: "hidden", display: "grid", placeItems: "center" }}>
               <Box
                 ref={videoRef}
                 component="video"
                 src={`${trimInfo.play_url}?revision=${trimInfo.revision}`}
-                controls
                 playsInline
+                muted={muted}
+                onClick={togglePlayback}
                 onTimeUpdate={(event) => setPlayheadMs(Math.min(durationMs, Math.round(event.currentTarget.currentTime * 1_000)))}
                 onSeeked={(event) => setPlayheadMs(Math.min(durationMs, Math.round(event.currentTarget.currentTime * 1_000)))}
                 onPlay={() => setVideoPlaying(true)}
@@ -301,8 +409,24 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   setVideoPlaying(false);
                   setPreviewing(false);
                 }}
-                sx={{ display: "block", width: "100%", maxHeight: "52dvh", objectFit: "contain" }}
+                sx={{ display: "block", width: "100%", maxHeight: "52dvh", objectFit: "contain", cursor: "pointer" }}
               />
+              <Tooltip title={muted ? "Unmute" : "Mute"}>
+                <IconButton
+                  aria-label={muted ? "Unmute" : "Mute"}
+                  onClick={() => setMuted((value) => !value)}
+                  sx={{
+                    position: "absolute",
+                    right: 8,
+                    bottom: 8,
+                    color: "common.white",
+                    bgcolor: "rgba(0, 0, 0, 0.5)",
+                    "&:hover": { bgcolor: "rgba(0, 0, 0, 0.7)" },
+                  }}
+                >
+                  {muted ? <VolumeOffRounded /> : <VolumeUpRounded />}
+                </IconButton>
+              </Tooltip>
             </Box>
 
             <EditTimeline
@@ -321,23 +445,15 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
               onPlayheadChange={seekPlayhead}
             />
 
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={2} justifyContent="center">
-              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
-                <Tooltip title="Set Start to playhead">
-                  <span>
-                    <IconButton
-                      aria-label="Set Start to playhead"
-                      disabled={playheadMs >= endMs}
-                      onClick={() => {
-                        setActiveBoundary("start");
-                        setBoundaryToPlayhead("start");
-                      }}
-                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
-                    >
-                      <AddLocationAltRounded />
-                    </IconButton>
-                  </span>
-                </Tooltip>
+            <Typography
+              color="text.secondary"
+              sx={{ textAlign: "center", fontVariantNumeric: "tabular-nums", fontSize: "0.85rem" }}
+            >
+              Length {formatTimestampMs(endMs - startMs)} · At {formatTimestampMs(playheadMs)}
+            </Typography>
+
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={0.25} alignItems="center" justifyContent="center">
+              <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="center">
                 {frameStepMs && (
                   <FrameNudgeButton
                     boundary="Start"
@@ -347,12 +463,12 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
                 )}
-                <TextField
+                <TimestampField
+                  id="trim-start-input"
                   label="Start"
                   value={startInput}
-                  error={Boolean(startError)}
-                  helperText={startError}
-                  onChange={(event) => setStartFromInput(event.target.value)}
+                  error={startError}
+                  onChange={setStartFromInput}
                   onFocus={() => setActiveBoundary("start")}
                   onBlur={() => {
                     if (startError) {
@@ -360,7 +476,28 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                       setStartError(null);
                     }
                   }}
-                  sx={{ width: "17ch" }}
+                  startAdornment={(
+                    <Tooltip title="Set Start to playhead">
+                      <span>
+                        <IconButton
+                          aria-label="Set Start to playhead"
+                          disabled={playheadMs >= endMs}
+                          onClick={() => {
+                            setActiveBoundary("start");
+                            setBoundaryToPlayhead("start");
+                          }}
+                          size="small"
+                          edge="start"
+                          sx={{
+                            p: 0.25,
+                            color: playheadMs >= endMs ? "text.disabled" : ACCENT_BLUE,
+                          }}
+                        >
+                          <AddLocationAltRounded fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  )}
                 />
                 {frameStepMs && (
                   <FrameNudgeButton
@@ -372,7 +509,19 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                   />
                 )}
               </Stack>
-              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
+              <Tooltip title="Reset to full clip">
+                <span>
+                  <IconButton
+                    aria-label="Reset to full clip"
+                    onClick={resetRange}
+                    size="small"
+                    sx={{ p: 0.25, color: ACCENT_BLUE }}
+                  >
+                    <RestartAltRounded />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="center">
                 {frameStepMs && (
                   <FrameNudgeButton
                     boundary="End"
@@ -382,12 +531,12 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />
                 )}
-                <TextField
+                <TimestampField
+                  id="trim-end-input"
                   label="End"
                   value={endInput}
-                  error={Boolean(endError)}
-                  helperText={endError}
-                  onChange={(event) => setEndFromInput(event.target.value)}
+                  error={endError}
+                  onChange={setEndFromInput}
                   onFocus={() => setActiveBoundary("end")}
                   onBlur={() => {
                     if (endError) {
@@ -395,7 +544,28 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                       setEndError(null);
                     }
                   }}
-                  sx={{ width: "17ch" }}
+                  endAdornment={(
+                    <Tooltip title="Set End to playhead">
+                      <span>
+                        <IconButton
+                          aria-label="Set End to playhead"
+                          disabled={playheadMs <= startMs}
+                          onClick={() => {
+                            setActiveBoundary("end");
+                            setBoundaryToPlayhead("end");
+                          }}
+                          size="small"
+                          edge="end"
+                          sx={{
+                            p: 0.25,
+                            color: playheadMs <= startMs ? "text.disabled" : ACCENT_BLUE,
+                          }}
+                        >
+                          <AddLocationAltRounded fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  )}
                 />
                 {frameStepMs && (
                   <FrameNudgeButton
@@ -406,21 +576,6 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />
                 )}
-                <Tooltip title="Set End to playhead">
-                  <span>
-                    <IconButton
-                      aria-label="Set End to playhead"
-                      disabled={playheadMs <= startMs}
-                      onClick={() => {
-                        setActiveBoundary("end");
-                        setBoundaryToPlayhead("end");
-                      }}
-                      sx={{ border: 1, borderColor: "divider", borderRadius: 1, minHeight: 56 }}
-                    >
-                      <AddLocationAltRounded />
-                    </IconButton>
-                  </span>
-                </Tooltip>
               </Stack>
             </Stack>
 
@@ -429,44 +584,19 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                 The clip's frame rate is unavailable, so nominal one-frame nudging is disabled.
               </Alert>
             )}
+
             <Box sx={{ textAlign: "center" }}>
-              <Button startIcon={<RestartAltRounded />} variant="outlined" onClick={resetRange}>
-                Reset
+              <Button
+                variant="contained"
+                startIcon={<PlayArrowRounded />}
+                disabled={!trimInfo || Boolean(startError || endError) || saving}
+                onClick={() => void previewSelection()}
+                sx={{ minWidth: 140 }}
+              >
+                {previewing ? "Restart" : "Preview"}
               </Button>
             </Box>
-            {trimInfo.frame_rate && (
-              <Typography variant="caption" color="text.secondary" sx={{ textAlign: "center" }}>
-                Frame nudges use a nominal {trimInfo.frame_rate.toFixed(3)} fps duration; decoded frame boundaries may vary for VFR media.
-              </Typography>
-            )}
-
-            <Typography color="text.secondary" sx={{ textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
-              Selected duration {formatTimestampMs(endMs - startMs)} · Playhead {formatTimestampMs(playheadMs)}
-            </Typography>
             {playbackError && <Alert severity="error">{playbackError}</Alert>}
-            {confirmingReplace && (
-              <Alert
-                severity="warning"
-                action={(
-                  <Stack direction="row" spacing={1}>
-                    <Button color="inherit" size="small" onClick={() => setConfirmingReplace(false)}>
-                      Cancel
-                    </Button>
-                    <Button
-                      color="error"
-                      variant="contained"
-                      size="small"
-                      onClick={() => saveMutation.mutate("replace")}
-                    >
-                      Confirm Replace
-                    </Button>
-                  </Stack>
-                )}
-              >
-                Replace the existing clip only after the new render passes validation. The clip
-                keeps its identity and advances to the next revision.
-              </Alert>
-            )}
             {activeJob && (
               <Alert severity={activeJob.state === "FAILED" ? "error" : activeJob.state === "SUCCEEDED" ? "success" : "info"}>
                 {activeJob.error?.message ?? activeJob.message}
@@ -484,15 +614,6 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
         ) : null}
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2, flexWrap: "wrap", gap: 1 }}>
-        <Button onClick={onClose}>Close</Button>
-        <Button
-          variant="outlined"
-          startIcon={<PlayArrowRounded />}
-          disabled={!trimInfo || Boolean(startError || endError) || saving}
-          onClick={() => void previewSelection()}
-        >
-          {previewing ? "Restart Preview" : "Preview Selection"}
-        </Button>
         <Button
           variant="contained"
           startIcon={<ContentCopyRounded />}
@@ -508,9 +629,38 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
           disabled={saveDisabled}
           onClick={() => setConfirmingReplace(true)}
         >
-          Replace Existing
+          Replace
         </Button>
       </DialogActions>
     </Dialog>
+    <Dialog
+      open={confirmingReplace}
+      onClose={() => setConfirmingReplace(false)}
+      maxWidth="sm"
+      fullWidth
+      aria-labelledby="confirm-replace-title"
+    >
+      <DialogTitle id="confirm-replace-title">Replace existing clip?</DialogTitle>
+      <DialogContent>
+        <Alert severity="warning">
+          Replace the existing clip only after the new render passes validation. The clip keeps
+          its identity and advances to the next revision.
+        </Alert>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setConfirmingReplace(false)}>Cancel</Button>
+        <Button
+          color="error"
+          variant="contained"
+          onClick={() => {
+            setConfirmingReplace(false);
+            saveMutation.mutate("replace");
+          }}
+        >
+          Confirm Replace
+        </Button>
+      </DialogActions>
+    </Dialog>
+    </>
   );
 }
