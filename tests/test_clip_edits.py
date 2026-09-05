@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,8 +16,10 @@ from mediaclipmakarr.hdr import VideoColorMetadata
 from mediaclipmakarr.jobs import (
     JobEventBroker,
     JobRunner,
+    claim_next_job,
     enqueue_clip_create_job,
     get_job_snapshot,
+    recover_finalizing_jobs,
 )
 from mediaclipmakarr.media_renderer import RenderedClipFile
 from mediaclipmakarr.source_media import (
@@ -254,3 +257,101 @@ async def test_replace_installs_validated_output_and_advances_revision(
     assert stored["duration_ms"] == 6_250
     assert (stored["source_start_ms"], stored["source_end_ms"]) == (51_250, 57_500)
     assert stored["thumbnail_path"] is None
+
+
+@pytest.mark.asyncio
+async def test_replace_failure_after_swap_leaves_job_finalizing_for_recovery(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`install_metadata_revision`'s file swap is atomic and irreversible — a
+    failure after it (e.g. a database write dying) must never be reported as a
+    plain FAILED job. Doing so would strand the database's stale revision
+    permanently out of sync with the file, since `recover_finalizing_jobs`
+    only reconciles jobs still in FINALIZING, and only runs at startup."""
+    database = tmp_path / "application.db"
+    clip_dir = tmp_path / "clips"
+    source = clip_dir / "Movies" / "Example.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"original bytes")
+    upgrade_database(database)
+    engine = create_database_engine(database)
+    parent = parent_payload(source)
+    await insert_clip(engine, parent)
+    plan = trim_plan(parent, source, "replace")
+    queued = await enqueue_clip_create_job(engine, plan)
+
+    async def renderer(plan, settings, *, progress):
+        await progress(1, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Recovery identifies an already-swapped file by scanning for this
+        # embedded envelope (see embedded_revision_matches) — a real render
+        # embeds one, so the fake output here must too, or recovery can never
+        # confirm the swap already happened and tell it apart from one that
+        # needs to be redone from a (by-then-consumed) temp file.
+        envelope = json.dumps(
+            {
+                "application": "MediaClipMakarr",
+                "schemaVersion": 4,
+                "clipId": plan.clip_id,
+                "revision": plan.revision,
+                "renderPlanHash": plan.render_plan_hash,
+            }
+        )
+        output.write_bytes(f"validated replacement MediaClipMakarr {envelope}".encode())
+        return RenderedClipFile(path=output, duration_ms=6_250)
+
+    async def accept_output(*_args, **_kwargs):
+        return None
+
+    async def failing_commit(*_args, **_kwargs):
+        raise RuntimeError("database is unavailable")
+
+    monkeypatch.setattr(runner_module, "validate_trim_rendered_output", accept_output)
+    monkeypatch.setattr(runner_module, "commit_clip_replacement", failing_commit)
+    settings = Settings(
+        _env_file=None,
+        clip_dir=clip_dir,
+        work_dir=tmp_path / "work",
+        thumbnail_dir=tmp_path / "thumbs",
+    )
+    runner = JobRunner(
+        engine,
+        settings,
+        run_blocking=run_blocking,
+        events=JobEventBroker(),
+        renderer=renderer,
+    )
+    claimed = await claim_next_job(engine, "run-token")
+    assert claimed is not None
+    try:
+        await runner._execute_and_finalize(claimed)
+        snapshot = await get_job_snapshot(engine, queued.id)
+        stored = await get_clip(engine, "clip-parent", clip_dir)
+        workdir = settings.resolved_work_dir / "jobs" / queued.id
+    finally:
+        await engine.dispose()
+
+    assert snapshot is not None and snapshot.state == "FINALIZING"
+    assert stored is not None and stored["revision"] == 3
+    assert source.read_bytes().startswith(b"validated replacement")
+    assert workdir.exists()
+
+    # Recovery reconciles the database with the already-swapped file on the
+    # next startup, rather than this being stuck forever.
+    recovery_engine = create_database_engine(database)
+    try:
+        recovered = await recover_finalizing_jobs(
+            recovery_engine,
+            run_blocking,
+            clip_root=clip_dir,
+            work_root=settings.resolved_work_dir,
+        )
+        final_snapshot = await get_job_snapshot(recovery_engine, queued.id)
+        final_clip = await get_clip(recovery_engine, "clip-parent", clip_dir)
+    finally:
+        await recovery_engine.dispose()
+
+    assert recovered == [queued.id]
+    assert final_snapshot is not None and final_snapshot.state == "SUCCEEDED"
+    assert final_clip is not None and final_clip["revision"] == 4

@@ -139,6 +139,27 @@ class _ImmichNotConfiguredError(RuntimeError):
     job_retryable = True
 
 
+class _PostSwapFinalizationError(Exception):
+    """A failure landed after a rendered file was already swapped onto disk
+    (trim replace or metadata edit) but before the matching database commit
+    and job-success write both durably completed.
+
+    `install_metadata_revision`'s `Path.replace` is atomic, so once it
+    returns, the file on disk already embeds the new revision — there is no
+    going back. Marking the job FAILED at that point (the generic handler's
+    usual response) would leave the database's stale revision permanently
+    out of sync with the file: `recover_finalizing_jobs` only reconciles jobs
+    still in FINALIZING, and only runs at startup. `_execute_and_finalize`
+    catches this instead of letting it fall into the generic handler, and
+    deliberately does *not* fail the job or clean up its work directory —
+    both are left exactly as they are for the next startup's recovery pass.
+    """
+
+    def __init__(self, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 def _remove_job_workdir(workdir: Path) -> None:
     shutil.rmtree(workdir, ignore_errors=True)
 
@@ -287,6 +308,19 @@ class JobRunner:
                 )
                 await self._publish_durable_job_update(claimed.id)
             raise
+        except _PostSwapFinalizationError as error:
+            # Deliberately no fail_job and no workdir cleanup — see
+            # _PostSwapFinalizationError's docstring. Leave the job FINALIZING
+            # and its work directory intact for recover_finalizing_jobs to
+            # reconcile on next startup.
+            logger.exception(
+                "Job %s failed after its file was already installed; leaving it "
+                "FINALIZING for reconciliation on next startup: %s",
+                claimed.id,
+                error.original,
+            )
+            with contextlib.suppress(Exception):
+                await self._publish_durable_job_update(claimed.id)
         except Exception as error:
             await self._cleanup_job_workdir(claimed.id, "job failure")
             logger.exception("Clip render job %s failed.", claimed.id)
@@ -483,22 +517,28 @@ class JobRunner:
                 destination,
                 destination,
             )
-            installed_stat = await self.run_blocking(destination.stat)
-            clip["file_size_bytes"] = installed_stat.st_size
-            clip["file_modified_ns"] = installed_stat.st_mtime_ns
-            await commit_clip_replacement(
-                self.engine,
-                clip,
-                expected_revision=int(plan.expected_revision or 0),
-            )
-            await finish_job_success(
-                self.engine,
-                claimed.id,
-                claimed.run_token,
-                clip=clip,
-                message="Clip replacement completed.",
-            )
-            await self._cleanup_job_workdir(claimed.id, "clip replacement completion")
+            # Point of no return: the file now embeds the new revision. A
+            # failure from here on must not reach the generic handler — see
+            # _PostSwapFinalizationError.
+            try:
+                installed_stat = await self.run_blocking(destination.stat)
+                clip["file_size_bytes"] = installed_stat.st_size
+                clip["file_modified_ns"] = installed_stat.st_mtime_ns
+                await commit_clip_replacement(
+                    self.engine,
+                    clip,
+                    expected_revision=int(plan.expected_revision or 0),
+                )
+                await finish_job_success(
+                    self.engine,
+                    claimed.id,
+                    claimed.run_token,
+                    clip=clip,
+                    message="Clip replacement completed.",
+                )
+                await self._cleanup_job_workdir(claimed.id, "clip replacement completion")
+            except Exception as error:
+                raise _PostSwapFinalizationError(error) from error
         else:
             await self.run_blocking(
                 install_rendered_clip,
@@ -713,21 +753,27 @@ class JobRunner:
         )
         await self._publish_durable_job_update(claimed.id)
         await self.run_blocking(install_metadata_revision, temp, source, destination)
-        installed_stat = await self.run_blocking(destination.stat)
-        proposed["file_size_bytes"] = installed_stat.st_size
-        proposed["file_modified_ns"] = installed_stat.st_mtime_ns
-        await commit_metadata_edit(
-            self.engine, proposed, expected_revision=plan.expected_revision
-        )
-        await self.run_blocking(remove_superseded_clip, source, destination)
-        await finish_job_success(
-            self.engine,
-            claimed.id,
-            claimed.run_token,
-            clip=proposed,
-            message="Clip metadata update completed.",
-        )
-        await self._cleanup_job_workdir(claimed.id, "metadata update completion")
+        # Point of no return: the file now embeds the new revision. A failure
+        # from here on must not reach the generic handler — see
+        # _PostSwapFinalizationError.
+        try:
+            installed_stat = await self.run_blocking(destination.stat)
+            proposed["file_size_bytes"] = installed_stat.st_size
+            proposed["file_modified_ns"] = installed_stat.st_mtime_ns
+            await commit_metadata_edit(
+                self.engine, proposed, expected_revision=plan.expected_revision
+            )
+            await self.run_blocking(remove_superseded_clip, source, destination)
+            await finish_job_success(
+                self.engine,
+                claimed.id,
+                claimed.run_token,
+                clip=proposed,
+                message="Clip metadata update completed.",
+            )
+            await self._cleanup_job_workdir(claimed.id, "metadata update completion")
+        except Exception as error:
+            raise _PostSwapFinalizationError(error) from error
         await self._publish_durable_job_update(claimed.id)
         thumbnail_job = await enqueue_thumbnail_job(
             self.engine,
