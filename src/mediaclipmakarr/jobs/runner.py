@@ -24,6 +24,7 @@ from mediaclipmakarr.clip_edits import trim_source_matches, validate_trim_render
 from mediaclipmakarr.clip_library import (
     BulkImmichUploadJobPlan,
     ClipRevisionConflict,
+    GifJobPlan,
     ImmichUploadJobPlan,
     MetadataEditJobPlan,
     ThumbnailJobPlan,
@@ -31,7 +32,11 @@ from mediaclipmakarr.clip_library import (
     build_immich_upload_plan,
     build_thumbnail_job_plan,
     embedded_revision_matches,
+    generate_gif,
     generate_thumbnail,
+    gif_path,
+    gif_url,
+    purge_gif_cache,
     rewrite_clip_metadata,
     thumbnail_path,
 )
@@ -391,6 +396,9 @@ class JobRunner:
         if claimed.type == "thumbnail_generate":
             await self._execute_thumbnail_job(claimed)
             return
+        if claimed.type == "gif_export":
+            await self._execute_gif_job(claimed)
+            return
         if claimed.type == "clip_metadata_edit":
             await self._execute_metadata_edit_job(claimed)
             return
@@ -539,6 +547,12 @@ class JobRunner:
                 await self._cleanup_job_workdir(claimed.id, "clip replacement completion")
             except Exception as error:
                 raise _PostSwapFinalizationError(error) from error
+            # Best-effort cache hygiene, not part of the atomic swap above: the
+            # replacement is already durably committed either way, and every
+            # GIF cached under the clip's now-superseded revision is stale.
+            await self.run_blocking(
+                purge_gif_cache, self.settings.resolved_gif_dir, str(clip["id"])
+            )
         else:
             await self.run_blocking(
                 install_rendered_clip,
@@ -672,6 +686,77 @@ class JobRunner:
         await self._cleanup_job_workdir(claimed.id, "thumbnail completion")
         await self._publish_durable_job_update(claimed.id)
 
+    async def _execute_gif_job(self, claimed: ClaimedJob) -> None:
+        plan = claimed.render_plan
+        if not isinstance(plan, GifJobPlan):
+            raise TypeError("GIF export job has an invalid durable plan.")
+        clip = await get_clip(self.engine, plan.clip_id, self.settings.resolved_clip_dir)
+        if clip is None:
+            raise ClipRevisionConflict("The clip no longer exists.")
+        source = Path(str(clip["file_path"]))
+        source_stat = await self.run_blocking(source.stat)
+        if (
+            int(clip["revision"]) != plan.clip_revision
+            or source_stat.st_size != plan.source_size
+            or source_stat.st_mtime_ns != plan.source_modified_ns
+        ):
+            raise ClipRevisionConflict("The clip changed before GIF export began.")
+        await update_running_job(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            stage="generating_gif",
+            progress=0.1,
+            current_stage_progress=0.1,
+            message="Generating a share-sized GIF.",
+        )
+        await self._publish_durable_job_update(claimed.id)
+        destination = gif_path(
+            self.settings.resolved_gif_dir,
+            plan.clip_id,
+            plan.clip_revision,
+            plan.source_size,
+            plan.source_modified_ns,
+            plan.size_limit_bytes,
+            plan.start_ms,
+            plan.end_ms,
+        )
+        workdir = self.settings.resolved_work_dir / "jobs" / claimed.id / "gif"
+        profile = await generate_gif(
+            source,
+            destination,
+            ffmpeg_path=self.settings.ffmpeg_path,
+            timeout_seconds=self.settings.media_preparation_timeout_seconds,
+            size_limit_bytes=plan.size_limit_bytes,
+            workdir=workdir,
+            start_ms=plan.start_ms,
+            end_ms=plan.end_ms,
+        )
+        current_stat = await self.run_blocking(source.stat)
+        if (
+            current_stat.st_size != plan.source_size
+            or current_stat.st_mtime_ns != plan.source_modified_ns
+        ):
+            await self.run_blocking(destination.unlink, missing_ok=True)
+            raise ClipRevisionConflict("The clip changed while its GIF was generated.")
+        destination_stat = await self.run_blocking(destination.stat)
+        await finish_running_job_success(
+            self.engine,
+            claimed.id,
+            claimed.run_token,
+            result_payload={
+                "clip_id": plan.clip_id,
+                "gif_url": gif_url(
+                    plan.clip_id, plan.size_limit_bytes, plan.start_ms, plan.end_ms
+                ),
+                "profile": profile.id,
+                "size_bytes": destination_stat.st_size,
+            },
+            message="GIF export completed.",
+        )
+        await self._cleanup_job_workdir(claimed.id, "gif export completion")
+        await self._publish_durable_job_update(claimed.id)
+
     async def _execute_metadata_edit_job(self, claimed: ClaimedJob) -> None:
         plan = claimed.render_plan
         if not isinstance(plan, MetadataEditJobPlan):
@@ -774,6 +859,12 @@ class JobRunner:
             await self._cleanup_job_workdir(claimed.id, "metadata update completion")
         except Exception as error:
             raise _PostSwapFinalizationError(error) from error
+        # Best-effort cache hygiene, not part of the atomic swap above: the edit
+        # is already durably committed either way, and every GIF cached under
+        # the clip's now-superseded revision is stale.
+        await self.run_blocking(
+            purge_gif_cache, self.settings.resolved_gif_dir, plan.clip_id
+        )
         await self._publish_durable_job_update(claimed.id)
         thumbnail_job = await enqueue_thumbnail_job(
             self.engine,

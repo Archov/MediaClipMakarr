@@ -8,6 +8,7 @@ import type {
   ClipTrimSaveRequest,
   ClipDeleteResult,
   ClipFilterOptions,
+  GifExportResponse,
   HealthResponse,
   ImmichAssetCheckResult,
   ImmichAssetDeleteResult,
@@ -244,6 +245,31 @@ export async function saveClipTrim(
     body: JSON.stringify(trim),
   });
   return parseResponse<JobSnapshot>(response, "Trim save request");
+}
+
+export interface GifExportRange {
+  startMs: number;
+  endMs: number;
+}
+
+export async function requestClipGif(
+  clipId: string,
+  range?: GifExportRange,
+): Promise<GifExportResponse> {
+  const params = new URLSearchParams();
+  if (range) {
+    params.set("start_ms", String(range.startMs));
+    params.set("end_ms", String(range.endMs));
+  }
+  const query = params.toString();
+  const response = await apiFetch(
+    `/api/clips/${encodeURIComponent(clipId)}/gif${query ? `?${query}` : ""}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    },
+  );
+  return parseResponse<GifExportResponse>(response, "GIF export request");
 }
 
 export async function fetchClipLibraries(): Promise<string[]> {

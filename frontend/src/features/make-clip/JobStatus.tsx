@@ -1,6 +1,7 @@
 import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
+import GifRounded from "@mui/icons-material/GifRounded";
 import {
   Alert,
   Box,
@@ -32,6 +33,7 @@ import type {
   JobSnapshot,
   JobState,
 } from "../../types";
+import { useGifExport } from "../gif-export/useGifExport";
 import {
   DeleteClipDialog,
   ImmichAssetMissingDialog,
@@ -181,6 +183,7 @@ export function JobStatus({
       setImmichIssue(null);
     },
   });
+  const gifExport = useGifExport(clipId);
 
   useEffect(() => {
     setEditing(false);
@@ -255,6 +258,14 @@ export function JobStatus({
         <Button href={downloadUrl} variant="outlined" startIcon={<ArrowDownwardRounded />}>Download</Button>
         <Button
           variant="outlined"
+          startIcon={<GifRounded />}
+          disabled={!clipId || gifExport.busy}
+          onClick={() => gifExport.exportGif()}
+        >
+          {gifExport.busy ? "Exporting GIF…" : "Export GIF"}
+        </Button>
+        <Button
+          variant="outlined"
           startIcon={<EditRounded />}
           disabled={!displayedClip}
           onClick={() => setEditing(true)}
@@ -308,6 +319,7 @@ export function JobStatus({
         {reuploadMutation.error.message}
       </Alert>
     )}
+    {gifExport.error && <Alert severity="error">{gifExport.error}</Alert>}
     {clip.error && <Alert severity="error">{clip.error.message}</Alert>}
     {deleted && <Alert severity="success">The generated clip was deleted.</Alert>}
     {deleteWarnings.length > 0 && <Alert severity="warning">{deleteWarnings.join(" ")}</Alert>}

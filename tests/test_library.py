@@ -265,6 +265,7 @@ async def test_delete_clip_removes_only_managed_assets_and_record(tmp_path) -> N
             1,
             clip_root=clip_root,
             thumbnail_root=thumbnail_root,
+            gif_root=tmp_path / "gifs",
             run_blocking=run_blocking,
         )
         remaining = await _scalar(engine, "SELECT COUNT(*) FROM clips")
@@ -307,6 +308,7 @@ async def test_delete_clip_rejects_outside_derived_path_before_removing_media(
                 1,
                 clip_root=clip_root,
                 thumbnail_root=thumbnail_root,
+                gif_root=tmp_path / "gifs",
                 run_blocking=run_blocking,
             )
         remaining = await _scalar(engine, "SELECT COUNT(*) FROM clips")

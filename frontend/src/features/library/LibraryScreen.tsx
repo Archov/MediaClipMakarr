@@ -6,6 +6,7 @@ import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
 import FilterAltOffRounded from "@mui/icons-material/FilterAltOffRounded";
+import GifRounded from "@mui/icons-material/GifRounded";
 import GridViewRounded from "@mui/icons-material/GridViewRounded";
 import ListRounded from "@mui/icons-material/ListRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
@@ -55,6 +56,7 @@ import {
   uploadClipToImmich,
 } from "../../api";
 import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
+import { useGifExport } from "../gif-export/useGifExport";
 import { TrimClipDialog } from "../trim-clip/TrimClipDialog";
 import {
   DeleteClipDialog,
@@ -178,6 +180,7 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
       : isLinked
         ? "Open in Immich"
         : "Upload to Immich";
+  const gifExport = useGifExport(clip.id);
   const isList = mode === "list";
   const detailsVisible = isList || expanded;
   const [playArmed, setPlayArmed] = useState(false);
@@ -217,6 +220,13 @@ function ClipCard({ clip, mode, size, listThumbnailWidth, expanded, onToggle, on
             <ClipAction label="Trim" icon={<ContentCutRounded />} large={size === "large"} onClick={() => onTrim(clip)} />
             <ClipAction label="Edit" icon={<EditRounded />} large={size === "large"} onClick={() => onEdit(clip)} />
             <ClipAction label="Download" icon={<DownloadRounded />} large={size === "large"} href={clip.download_url} />
+            <ClipAction
+              label={gifExport.busy ? "Exporting GIF…" : "Export GIF"}
+              icon={<GifRounded />}
+              large={size === "large"}
+              disabled={gifExport.busy}
+              onClick={gifExport.exportGif}
+            />
             {immichConfigured && (
               <ClipAction
                 label={uploadLabel}

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -186,6 +188,24 @@ class ThumbnailJobPlan(BaseModel):
     operation_hash: str
 
 
+class GifJobPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    job_id: str
+    clip_id: str
+    clip_revision: int
+    source_size: int
+    source_modified_ns: int
+    size_limit_bytes: int
+    # Set together for a trim-editor export of just the selected in/out
+    # range — the persisted clip is read but never re-rendered or replaced.
+    # Both None exports the whole clip, matching the library/create-clip screens.
+    start_ms: int | None = None
+    end_ms: int | None = None
+    operation_hash: str
+
+
 class ImmichUploadJobPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -258,6 +278,7 @@ async def delete_clip(
     *,
     clip_root: Path,
     thumbnail_root: Path,
+    gif_root: Path,
     run_blocking: Callable[..., Awaitable[Any]],
 ) -> ClipDeleteResult | None:
     """Delete only validated managed assets, then remove the durable clip record."""
@@ -283,6 +304,7 @@ async def delete_clip(
                 clip,
                 clip_root,
                 thumbnail_root,
+                gif_root,
             )
             result = await connection.execute(
                 text("DELETE FROM clips WHERE id = :id AND revision = :revision"),
@@ -302,7 +324,7 @@ async def delete_clip(
 
 
 def _delete_managed_clip_assets(
-    clip: dict[str, Any], clip_root: Path, thumbnail_root: Path
+    clip: dict[str, Any], clip_root: Path, thumbnail_root: Path, gif_root: Path
 ) -> list[str]:
     """Validate every deletion target together, then remove the managed files."""
     media = _validated_delete_target(
@@ -326,6 +348,10 @@ def _delete_managed_clip_assets(
             thumbnail.unlink()
         except OSError:
             warnings.append("The thumbnail could not be removed.")
+    # GIF cache entries are content-addressed (never stored on the clip row), so
+    # there's nothing to validate against a stored path — just sweep anything
+    # matching this clip id out of the cache directory.
+    purge_gif_cache(gif_root, str(clip["id"]))
     return warnings
 
 
@@ -666,6 +692,31 @@ def build_thumbnail_job_plan(row: dict[str, Any], source_stat: os.stat_result) -
     )
 
 
+def build_gif_job_plan(
+    row: dict[str, Any],
+    source_stat: os.stat_result,
+    size_limit_bytes: int,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> GifJobPlan:
+    range_key = f"{start_ms}-{end_ms}" if start_ms is not None and end_ms is not None else "full"
+    payload = (
+        f"{row['id']}:{row['revision']}:{source_stat.st_size}:{source_stat.st_mtime_ns}:"
+        f"{size_limit_bytes}:{range_key}:{GIF_PROFILE_SET_VERSION}"
+    )
+    return GifJobPlan(
+        job_id=f"job-{uuid4()}",
+        clip_id=str(row["id"]),
+        clip_revision=int(row["revision"]),
+        source_size=source_stat.st_size,
+        source_modified_ns=source_stat.st_mtime_ns,
+        size_limit_bytes=size_limit_bytes,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        operation_hash=hashlib.sha256(payload.encode()).hexdigest(),
+    )
+
+
 def display_title(metadata: dict[str, Any]) -> str:
     custom = _optional_sanitized(metadata.get("custom_title"))
     if custom:
@@ -910,6 +961,193 @@ def thumbnail_is_current(row: dict[str, Any], source_stat: os.stat_result) -> bo
         and row.get("thumbnail_source_size") == source_stat.st_size
         and row.get("thumbnail_source_modified_ns") == source_stat.st_mtime_ns
     )
+
+
+@dataclass(frozen=True, slots=True)
+class GifProfile:
+    id: str
+    width: int
+    fps: int
+    colors: int
+
+
+# Bumped whenever GIF_PROFILES (or the filters generate_gif builds from them)
+# changes in a way that would render a previously cached file stale even though
+# the clip and size limit it was cached under haven't changed.
+GIF_PROFILE_SET_VERSION = "v1"
+
+# Sequential palette-generation/palette-use profiles, tried in order until one
+# produces a result at or below the requested size limit. Each step shrinks
+# dimensions, frame rate, and palette size together.
+GIF_PROFILES: tuple[GifProfile, ...] = (
+    GifProfile(id="profile-1", width=480, fps=15, colors=256),
+    GifProfile(id="profile-2", width=360, fps=12, colors=192),
+    GifProfile(id="profile-3", width=240, fps=10, colors=128),
+    GifProfile(id="profile-4", width=160, fps=8, colors=64),
+)
+
+
+class GifSizeLimitExceededError(RuntimeError):
+    job_error_code = "GIF_SIZE_LIMIT_EXCEEDED"
+    job_retryable = False
+
+    def __init__(self, size_limit_bytes: int, attempts: list[dict[str, Any]]) -> None:
+        super().__init__(
+            f"No GIF profile produced a result at or below {size_limit_bytes} bytes."
+        )
+        self.context = {"size_limit_bytes": size_limit_bytes, "attempts": attempts}
+
+
+async def generate_gif(
+    source: Path,
+    output: Path,
+    *,
+    ffmpeg_path: Path,
+    timeout_seconds: float,
+    size_limit_bytes: int,
+    workdir: Path,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> GifProfile:
+    """Render a silent, looping GIF from `source` (optionally just the
+    `start_ms`-`end_ms` sub-range of it, for an export straight out of the trim
+    editor that never materializes a new clip), falling back through smaller
+    profiles until one fits `size_limit_bytes`. Raises
+    `GifSizeLimitExceededError` (with every attempt's size in its `context`)
+    if none do."""
+    await asyncio.to_thread(workdir.mkdir, parents=True, exist_ok=True)
+    range_args: list[str] = []
+    if start_ms is not None and end_ms is not None:
+        range_args = [
+            "-ss",
+            f"{start_ms / 1000:.3f}",
+            "-t",
+            f"{(end_ms - start_ms) / 1000:.3f}",
+        ]
+    attempts: list[dict[str, Any]] = []
+    for profile in GIF_PROFILES:
+        palette = workdir / f"{profile.id}-palette.png"
+        candidate = workdir / f"{profile.id}-candidate.gif"
+        scale = f"scale={profile.width}:-1:flags=lanczos"
+        await run_command(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-y",
+                *range_args,
+                "-i",
+                source,
+                "-vf",
+                f"fps={profile.fps},{scale},palettegen=max_colors={profile.colors}",
+                palette,
+            ],
+            timeout_seconds=timeout_seconds,
+        )
+        await run_command(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-y",
+                *range_args,
+                "-i",
+                source,
+                "-i",
+                palette,
+                "-filter_complex",
+                f"fps={profile.fps},{scale}[x];[x][1:v]paletteuse=dither=bayer[out]",
+                "-map",
+                "[out]",
+                "-loop",
+                "0",
+                "-an",
+                candidate,
+            ],
+            timeout_seconds=timeout_seconds,
+        )
+        candidate_stat = await asyncio.to_thread(candidate.stat)
+        attempts.append({"profile": profile.id, "size_bytes": candidate_stat.st_size})
+        if candidate_stat.st_size <= size_limit_bytes:
+            await asyncio.to_thread(output.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(candidate.replace, output)
+            return profile
+        await asyncio.to_thread(candidate.unlink, missing_ok=True)
+    raise GifSizeLimitExceededError(size_limit_bytes, attempts)
+
+
+def gif_url(
+    clip_id: str, size_limit_bytes: int, start_ms: int | None = None, end_ms: int | None = None
+) -> str:
+    """The download URL for a clip's GIF, carrying every query parameter that
+    `gif_path` also folds into the cache key — so this always points at
+    exactly the cached variant the caller just requested or was just told
+    succeeded."""
+    url = f"/api/clips/{clip_id}/gif?size_limit_bytes={size_limit_bytes}"
+    if start_ms is not None and end_ms is not None:
+        url += f"&start_ms={start_ms}&end_ms={end_ms}"
+    return url
+
+
+def _safe_clip_id(clip_id: str) -> str:
+    safe_id = "".join(
+        character for character in clip_id if character.isalnum() or character in "-_"
+    )
+    if not safe_id or safe_id != clip_id:
+        raise ValueError("Invalid clip identity for GIF storage.")
+    return safe_id
+
+
+def gif_path(
+    gif_root: Path,
+    clip_id: str,
+    revision: int,
+    source_size: int,
+    source_modified_ns: int,
+    size_limit_bytes: int,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> Path:
+    """A deterministic, content-addressed cache location for a clip's GIF.
+
+    Every input that should invalidate a cached GIF — clip identity, revision,
+    the source file's own fingerprint, the requested size limit, the exported
+    range (a trim-editor export of a sub-range gets its own cache slot,
+    distinct from the whole clip), and the current profile set — is folded
+    into the filename itself, so a cache hit is just "does this exact path
+    exist" and a stale entry never needs an explicit invalidation step; it
+    simply stops being the path anything asks for."""
+    safe_id = _safe_clip_id(clip_id)
+    range_key = f"{start_ms}-{end_ms}" if start_ms is not None and end_ms is not None else "full"
+    payload = (
+        f"{clip_id}:{revision}:{source_size}:{source_modified_ns}:"
+        f"{size_limit_bytes}:{range_key}:{GIF_PROFILE_SET_VERSION}"
+    )
+    token = hashlib.sha256(payload.encode()).hexdigest()[:24]
+    result = (gif_root / f"{safe_id}-{token}.gif").resolve(strict=False)
+    if not result.is_relative_to(gif_root.resolve(strict=False)):
+        raise ValueError("GIF path escaped the configured directory.")
+    return result
+
+
+def stale_gif_paths(gif_root: Path, clip_id: str, *, keep: Path | None = None) -> list[Path]:
+    """Every cached GIF file for `clip_id`, excluding `keep` if given."""
+    safe_id = _safe_clip_id(clip_id)
+    if not gif_root.is_dir():
+        return []
+    resolved_keep = keep.resolve(strict=False) if keep is not None else None
+    return [
+        candidate
+        for candidate in gif_root.glob(f"{safe_id}-*.gif")
+        if resolved_keep is None or candidate.resolve(strict=False) != resolved_keep
+    ]
+
+
+def purge_gif_cache(gif_root: Path, clip_id: str, keep: Path | None = None) -> None:
+    """Best-effort removal of every cached GIF for `clip_id` other than `keep` —
+    used after a delete (nothing to keep) or a trim replace/metadata edit (the
+    clip's revision just changed, so every previously cached GIF is stale)."""
+    for stale in stale_gif_paths(gif_root, clip_id, keep=keep):
+        with contextlib.suppress(OSError):
+            stale.unlink()
 
 
 def embedded_revision_matches(

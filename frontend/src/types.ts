@@ -265,6 +265,7 @@ export type JobStage =
   | "validating"
   | "rendering"
   | "generating_thumbnail"
+  | "generating_gif"
   | "updating_metadata"
   | "uploading_asset"
   | "setting_description"
@@ -280,6 +281,13 @@ export interface ClipJobResult {
   duration_ms: number;
   play_url: string;
   download_url: string;
+}
+
+export interface GifJobResult {
+  clip_id: string;
+  gif_url: string;
+  profile: string;
+  size_bytes: number;
 }
 
 export interface ImmichUploadJobResult {
@@ -313,6 +321,7 @@ export interface JobSnapshot {
   type:
     | "clip_create"
     | "thumbnail_generate"
+    | "gif_export"
     | "clip_metadata_edit"
     | "immich_upload"
     | "bulk_immich_upload";
@@ -323,11 +332,18 @@ export interface JobSnapshot {
   elapsed_ms: number | null;
   queue_position: number | null;
   message: string;
-  result: ClipJobResult | ImmichUploadJobResult | BulkImmichUploadJobResult | null;
+  result: ClipJobResult | GifJobResult | ImmichUploadJobResult | BulkImmichUploadJobResult | null;
   error: StructuredError | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface GifExportResponse {
+  status: "cached" | "queued";
+  gif_url: string | null;
+  size_bytes: number | null;
+  job: JobSnapshot | null;
 }
 
 // A lean, read-only view of a clip's latest Immich-upload job, embedded directly in

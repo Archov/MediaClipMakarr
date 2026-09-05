@@ -154,6 +154,7 @@ def initialize_writable_directories(settings: Settings) -> dict[str, str | None]
         ("work", settings.resolved_work_dir),
         ("clips", settings.resolved_clip_dir),
         ("thumbnails", settings.resolved_thumbnail_dir),
+        ("gifs", settings.resolved_gif_dir),
     ):
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -171,6 +172,7 @@ def inspect_directories(settings: Settings) -> list[DirectoryHealth]:
         ("work", settings.resolved_work_dir),
         ("clips", settings.resolved_clip_dir),
         ("thumbnails", settings.resolved_thumbnail_dir),
+        ("gifs", settings.resolved_gif_dir),
     ):
         reports.append(_inspect_writable_directory(name, path))
 
