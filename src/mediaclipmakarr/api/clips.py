@@ -2,11 +2,12 @@
 
 import secrets
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 from mediaclipmakarr.application_settings import normalize_immich_url
 from mediaclipmakarr.clip_library import (
@@ -23,10 +24,13 @@ from mediaclipmakarr.clip_library import (
     ImmichAssetDeleteResult,
     ImmichDeleteMissingPermission,
     build_bulk_immich_upload_plan,
+    build_gif_job_plan,
     build_immich_upload_plan,
     build_metadata_edit_plan,
     build_thumbnail_job_plan,
     delete_clip,
+    gif_path,
+    gif_url,
     list_all_clip_ids,
     list_clips,
     list_filter_options,
@@ -56,6 +60,7 @@ from mediaclipmakarr.jobs import (
     JobSnapshot,
     enqueue_bulk_immich_upload_job,
     enqueue_clip_create_job,
+    enqueue_gif_job,
     enqueue_immich_upload_job,
     enqueue_metadata_edit_job,
     enqueue_thumbnail_job,
@@ -64,6 +69,34 @@ from mediaclipmakarr.jobs import (
 from mediaclipmakarr.plex import PlexClient, PlexSessionError
 from mediaclipmakarr.render_plan import build_clip_render_plan
 from mediaclipmakarr.source_media import SourceMediaError, resolve_and_probe_source_media
+
+
+class GifExportResponse(BaseModel):
+    """A cache hit resolves synchronously (`status="cached"`); a miss enqueues a
+    `gif_export` job for the caller to poll like any other job, whose own result
+    payload carries the same `gif_url`/`size_bytes` shape once it succeeds."""
+
+    status: Literal["cached", "queued"]
+    gif_url: str | None = None
+    size_bytes: int | None = None
+    job: JobSnapshot | None = None
+
+
+def _validated_gif_range(
+    start_ms: int | None, end_ms: int | None, duration_ms: int
+) -> tuple[int, int] | None:
+    """Both-or-neither: `None` means "export the whole clip". Given both, they
+    must describe a valid, in-bounds sub-range (a trim-editor export of the
+    current selection, never a new clip file)."""
+    if start_ms is None and end_ms is None:
+        return None
+    if start_ms is None or end_ms is None:
+        raise HTTPException(
+            status_code=400, detail="start_ms and end_ms must be provided together."
+        )
+    if start_ms < 0 or end_ms <= start_ms or end_ms > duration_ms:
+        raise HTTPException(status_code=400, detail="The requested GIF range is invalid.")
+    return start_ms, end_ms
 
 
 def build_router(application_settings: Settings) -> APIRouter:
@@ -501,6 +534,7 @@ def build_router(application_settings: Settings) -> APIRouter:
                 deletion.expected_revision,
                 clip_root=application_settings.resolved_clip_dir,
                 thumbnail_root=application_settings.resolved_thumbnail_dir,
+                gif_root=application_settings.resolved_gif_dir,
                 run_blocking=request.app.state.blocking_io.run,
             )
         except ClipRevisionConflict as error:
@@ -615,6 +649,97 @@ def build_router(application_settings: Settings) -> APIRouter:
             content={"job_id": job.id, "message": "Thumbnail generation is queued."},
             headers={"Retry-After": "2", "Cache-Control": "no-store"},
         )
+
+    @router.post("/api/clips/{clip_id}/gif", response_model=GifExportResponse)
+    async def export_clip_gif(
+        clip_id: str,
+        request: Request,
+        size_limit_bytes: Annotated[int | None, Query(gt=0)] = None,
+        start_ms: Annotated[int | None, Query(ge=0)] = None,
+        end_ms: Annotated[int | None, Query(gt=0)] = None,
+    ) -> GifExportResponse:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        gif_range = _validated_gif_range(start_ms, end_ms, int(clip["duration_ms"]))
+        try:
+            source_stat = await request.app.state.blocking_io.run(
+                Path(str(clip["file_path"])).stat
+            )
+        except OSError as error:
+            raise HTTPException(status_code=404, detail="Clip media is unavailable.") from error
+        effective_limit = size_limit_bytes or application_settings.gif_size_limit_bytes
+        range_start, range_end = gif_range if gif_range else (None, None)
+        destination = gif_path(
+            application_settings.resolved_gif_dir,
+            clip_id,
+            int(clip["revision"]),
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+            effective_limit,
+            range_start,
+            range_end,
+        )
+        if await request.app.state.blocking_io.run(destination.is_file):
+            gif_stat = await request.app.state.blocking_io.run(destination.stat)
+            return GifExportResponse(
+                status="cached",
+                gif_url=gif_url(clip_id, effective_limit, range_start, range_end),
+                size_bytes=gif_stat.st_size,
+            )
+        plan = build_gif_job_plan(clip, source_stat, effective_limit, range_start, range_end)
+        job = await enqueue_gif_job(request.app.state.database_engine, plan)
+        await request.app.state.job_events.publish(job.id, job)
+        request.app.state.job_runner.wake()
+        return GifExportResponse(status="queued", job=job)
+
+    @router.get("/api/clips/{clip_id}/gif")
+    async def clip_gif(
+        clip_id: str,
+        request: Request,
+        size_limit_bytes: Annotated[int | None, Query(gt=0)] = None,
+        start_ms: Annotated[int | None, Query(ge=0)] = None,
+        end_ms: Annotated[int | None, Query(gt=0)] = None,
+    ) -> FileResponse:
+        clip = await get_clip(
+            request.app.state.database_engine,
+            clip_id,
+            application_settings.resolved_clip_dir,
+        )
+        if clip is None:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+        gif_range = _validated_gif_range(start_ms, end_ms, int(clip["duration_ms"]))
+        try:
+            source_stat = await request.app.state.blocking_io.run(
+                Path(str(clip["file_path"])).stat
+            )
+        except OSError as error:
+            raise HTTPException(status_code=404, detail="Clip media is unavailable.") from error
+        effective_limit = size_limit_bytes or application_settings.gif_size_limit_bytes
+        range_start, range_end = gif_range if gif_range else (None, None)
+        destination = gif_path(
+            application_settings.resolved_gif_dir,
+            clip_id,
+            int(clip["revision"]),
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+            effective_limit,
+            range_start,
+            range_end,
+        )
+        if not await request.app.state.blocking_io.run(destination.is_file):
+            raise HTTPException(status_code=404, detail="A GIF has not been generated yet.")
+        return FileResponse(
+            destination,
+            media_type="image/gif",
+            filename=f"{clip['title']}.gif",
+            content_disposition_type="attachment",
+        )
+
     @router.get("/api/clips/{clip_id}/media")
     async def play_clip(clip_id: str, request: Request) -> FileResponse:
         clip = await get_clip(

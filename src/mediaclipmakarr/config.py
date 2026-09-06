@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     work_dir: Path = Path("data/work")
     clip_dir: Path = Path("data/clips")
     thumbnail_dir: Path | None = None
+    gif_dir: Path | None = None
+    # ~9.5 MiB — a conservative margin under common 10 MB share-target limits.
+    gif_size_limit_bytes: int = Field(default=9_961_472, gt=0)
     source_dirs: list[Path] = Field(default_factory=lambda: [Path("data/sources")])
     database_filename: str = "mediaclipmakarr.db"
     process_lock_filename: str = "mediaclipmakarr.lock"
@@ -115,6 +118,12 @@ class Settings(BaseSettings):
         return self.resolve_path(self.thumbnail_dir)
 
     @property
+    def resolved_gif_dir(self) -> Path:
+        if self.gif_dir is None:
+            return self.resolved_private_data_dir / "gifs"
+        return self.resolve_path(self.gif_dir)
+
+    @property
     def resolved_source_dirs(self) -> list[Path]:
         return [self.resolve_path(path) for path in self.source_dirs]
 
@@ -178,3 +187,12 @@ def validate_path_layout(settings: Settings) -> None:
     for source_path in settings.resolved_source_dirs:
         if thumbnail_path == source_path or thumbnail_path.is_relative_to(source_path):
             raise ValueError("The thumbnail directory must not be inside a source directory.")
+
+    gif_path = settings.resolved_gif_dir
+    if gif_path == settings.resolved_clip_dir or gif_path.is_relative_to(
+        settings.resolved_clip_dir
+    ):
+        raise ValueError("The GIF directory must remain outside the clip directory.")
+    for source_path in settings.resolved_source_dirs:
+        if gif_path == source_path or gif_path.is_relative_to(source_path):
+            raise ValueError("The GIF directory must not be inside a source directory.")

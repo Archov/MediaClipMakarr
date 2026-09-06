@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mediaclipmakarr.clip_library import (
     BulkImmichUploadJobPlan,
+    GifJobPlan,
     ImmichUploadJobPlan,
     MetadataEditJobPlan,
     ThumbnailJobPlan,
@@ -19,6 +20,7 @@ JobState = Literal["QUEUED", "RUNNING", "FINALIZING", "SUCCEEDED", "PARTIAL", "F
 JobType = Literal[
     "clip_create",
     "thumbnail_generate",
+    "gif_export",
     "clip_metadata_edit",
     "immich_upload",
     "bulk_immich_upload",
@@ -28,6 +30,7 @@ JobStage = Literal[
     "validating",
     "rendering",
     "generating_thumbnail",
+    "generating_gif",
     "updating_metadata",
     "uploading_asset",
     "setting_description",
@@ -73,6 +76,7 @@ class ClaimedJob:
     render_plan: (
         ClipRenderPlan
         | ThumbnailJobPlan
+        | GifJobPlan
         | MetadataEditJobPlan
         | ImmichUploadJobPlan
         | BulkImmichUploadJobPlan

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from mediaclipmakarr.clip_library import (
     BulkImmichUploadJobPlan,
     ClipRevisionConflict,
+    GifJobPlan,
     ImmichUploadJobPlan,
     ImmichUploadJobSummary,
     MetadataEditJobPlan,
@@ -42,6 +43,13 @@ async def enqueue_thumbnail_job(
     return await _enqueue_job(
         engine, "thumbnail_generate", plan, "Thumbnail generation is queued."
     )
+
+
+async def enqueue_gif_job(engine: AsyncEngine, plan: GifJobPlan) -> JobSnapshot:
+    existing = await _find_active_job(engine, "gif_export", plan.operation_hash)
+    if existing is not None:
+        return existing
+    return await _enqueue_job(engine, "gif_export", plan, "GIF export is queued.")
 
 
 async def enqueue_metadata_edit_job(
@@ -101,6 +109,7 @@ async def _enqueue_job(
     plan: (
         ClipRenderPlan
         | ThumbnailJobPlan
+        | GifJobPlan
         | MetadataEditJobPlan
         | ImmichUploadJobPlan
         | BulkImmichUploadJobPlan
@@ -205,6 +214,7 @@ async def claim_next_job(engine: AsyncEngine, run_token: str) -> ClaimedJob | No
     plan_class = {
         "clip_create": ClipRenderPlan,
         "thumbnail_generate": ThumbnailJobPlan,
+        "gif_export": GifJobPlan,
         "clip_metadata_edit": MetadataEditJobPlan,
         "immich_upload": ImmichUploadJobPlan,
         "bulk_immich_upload": BulkImmichUploadJobPlan,

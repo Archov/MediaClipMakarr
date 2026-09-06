@@ -3,6 +3,7 @@ import ArrowBackIosRounded from "@mui/icons-material/ArrowBackIosRounded";
 import ArrowForwardIosRounded from "@mui/icons-material/ArrowForwardIosRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
+import GifRounded from "@mui/icons-material/GifRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
 import SaveRounded from "@mui/icons-material/SaveRounded";
@@ -34,6 +35,7 @@ import { fetchClipTrimInfo, saveClipTrim } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import type { ClipRecord } from "../../types";
 import { EditTimeline } from "../editing/EditTimeline";
+import { useGifExport } from "../gif-export/useGifExport";
 import { useJobSnapshot } from "../make-clip/hooks";
 import {
   canShiftTimelineBoundary,
@@ -218,6 +220,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     activeJob && ["QUEUED", "RUNNING", "FINALIZING"].includes(activeJob.state),
   );
   const saving = saveMutation.isPending || jobBusy;
+  const gifExport = useGifExport(clip.id);
 
   const info = useQuery({
     queryKey: ["clip-trim-info", clip.id, clip.revision],
@@ -613,6 +616,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
               </Alert>
             )}
             {saveMutation.error && <Alert severity="error">{saveMutation.error.message}</Alert>}
+            {gifExport.error && <Alert severity="error">{gifExport.error}</Alert>}
             {jobBusy && (
               <LinearProgress
                 variant="determinate"
@@ -624,6 +628,14 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
         ) : null}
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2, flexWrap: "wrap", gap: 1 }}>
+        <Button
+          variant="outlined"
+          startIcon={<GifRounded />}
+          disabled={gifExport.busy || endMs <= startMs}
+          onClick={() => gifExport.exportGif({ startMs, endMs })}
+        >
+          {gifExport.busy ? "Exporting GIF…" : "Export GIF"}
+        </Button>
         <Button
           variant="contained"
           startIcon={<ContentCopyRounded />}
