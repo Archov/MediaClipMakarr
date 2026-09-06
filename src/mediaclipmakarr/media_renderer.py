@@ -179,6 +179,19 @@ def build_ffmpeg_clip_args(
         os.fspath(settings.ffmpeg_path),
         "-hide_banner",
         "-y",
+    ]
+    if plan.encoder == "gpu_nvenc":
+        # NVDEC hardware decode. Deliberately not paired with
+        # -hwaccel_output_format cuda: frames come back to ordinary system
+        # memory just like software decode would, so the CPU-side filter
+        # chain below (scale, subtitle burn-in, HDR tonemap) needs no
+        # changes. This is the actual dominant cost for a 4K/HEVC source —
+        # h264_nvenc alone only offloads the encode, which is the smaller
+        # half of the work. ffmpeg's hwaccel negotiation falls back to
+        # software decode on its own for a source NVDEC can't handle, so
+        # this doesn't risk failing a render outright.
+        argv += ["-hwaccel", "cuda"]
+    argv += [
         "-ss",
         f"{start_seconds:.3f}",
         # Input option: decode only the requested range plus any subtitle preroll.

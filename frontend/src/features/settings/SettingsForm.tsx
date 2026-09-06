@@ -1221,10 +1221,11 @@ export function SettingsForm({
               </Stack>
               {videoEncoder === "gpu_nvenc" && (
                 <Alert severity="info">
-                  GPU encoding requires the host to pass an Nvidia GPU through to this
-                  container (device passthrough + nvidia-container-toolkit) and an ffmpeg
-                  build with h264_nvenc. Selecting this without that in place will make
-                  every render fail.
+                  GPU rendering (both decode and encode) requires the host to pass an
+                  Nvidia GPU through to this container (device passthrough +
+                  nvidia-container-toolkit) and an ffmpeg build with h264_nvenc/NVDEC
+                  support. Selecting this without that in place will make every render
+                  fail.
                 </Alert>
               )}
             </Stack>

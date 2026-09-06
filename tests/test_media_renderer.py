@@ -88,6 +88,8 @@ def test_cpu_x264_render_uses_crf_and_configured_preset(tmp_path) -> None:
     assert argv[argv.index("-preset") + 1] == "veryfast"
     assert "h264_nvenc" not in argv
     assert "-cq" not in argv
+    # CPU rendering never requests hardware decode — there's no GPU to assume.
+    assert "-hwaccel" not in argv
 
 
 def test_gpu_nvenc_render_uses_constant_quality_vbr(tmp_path) -> None:
@@ -104,3 +106,21 @@ def test_gpu_nvenc_render_uses_constant_quality_vbr(tmp_path) -> None:
     # NVENC uses its own preset scale (p1-p7) — never the x264 preset name.
     assert "-crf" not in argv
     assert "libx264" not in argv
+
+
+def test_gpu_nvenc_render_also_requests_hardware_decode(tmp_path) -> None:
+    """Encode-only GPU acceleration leaves the actual bottleneck (decoding a
+    4K/HEVC source) on the CPU — hwaccel cuda must be requested too, and
+    placed as an input option (before -i), or ffmpeg ignores it."""
+    plan = _plan(tmp_path, encoder="gpu_nvenc")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "-hwaccel" in argv
+    assert argv[argv.index("-hwaccel") + 1] == "cuda"
+    assert argv.index("-hwaccel") < argv.index("-i")
+    # Not paired with -hwaccel_output_format cuda: frames must land back in
+    # ordinary system memory so the existing CPU-side filter chain (scale,
+    # subtitle burn-in, HDR tonemap) keeps working unchanged.
+    assert "-hwaccel_output_format" not in argv
