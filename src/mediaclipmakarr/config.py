@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     source_path_mappings: str | None = None
     timezone: str | None = None
     x264_preset: str | None = None
+    video_decode: str | None = None
+    video_tonemap: str | None = None
     video_encoder: str | None = None
     video_quality: int | None = None
     immich_url: str | None = None
@@ -73,6 +75,8 @@ class Settings(BaseSettings):
         "source_path_mappings",
         "timezone",
         "x264_preset",
+        "video_decode",
+        "video_tonemap",
         "video_encoder",
         "immich_url",
         "immich_api_key",

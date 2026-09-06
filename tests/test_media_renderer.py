@@ -18,7 +18,14 @@ from mediaclipmakarr.source_media import (
 )
 
 
-def _plan(tmp_path: Path, *, encoder: str = "cpu_x264", video_quality: int = 18):
+def _plan(
+    tmp_path: Path,
+    *,
+    decode: str = "cpu",
+    tonemap: str = "cpu",
+    encoder: str = "cpu_x264",
+    video_quality: int = 18,
+):
     source_file = tmp_path / "Movie.mkv"
     source_file.write_bytes(b"media")
     source_media = ResolvedSourceMedia(
@@ -64,6 +71,8 @@ def _plan(tmp_path: Path, *, encoder: str = "cpu_x264", video_quality: int = 18)
         ),
         source_media=source_media,
         x264_preset="veryfast",
+        decode=decode,
+        tonemap=tonemap,
         encoder=encoder,
         video_quality=video_quality,
     )
@@ -112,11 +121,25 @@ def test_gpu_nvenc_render_uses_constant_qp(tmp_path) -> None:
     assert "libx264" not in argv
 
 
-def test_gpu_nvenc_render_also_requests_hardware_decode(tmp_path) -> None:
-    """Encode-only GPU acceleration leaves the actual bottleneck (decoding a
-    4K/HEVC source) on the CPU — hwaccel cuda must be requested too, and
-    placed as an input option (before -i), or ffmpeg ignores it."""
-    plan = _plan(tmp_path, encoder="gpu_nvenc")
+def _hdr_plan(tmp_path: Path, **overrides) -> object:
+    plan = _plan(tmp_path, **overrides)
+    hdr = HdrCapabilities(
+        hlg=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="arib-std-b67",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+    return plan.model_copy(update={"hdr": hdr, "hdr_strategy": "tone_map_hlg"})
+
+
+def test_gpu_decode_requests_hardware_decode_independent_of_encoder(tmp_path) -> None:
+    """Decode, tonemap, and encode are three independent settings — GPU
+    decode with CPU encode must still request NVDEC, placed as an input
+    option (before -i), or ffmpeg ignores it."""
+    plan = _plan(tmp_path, decode="gpu", encoder="cpu_x264")
     settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
 
     argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
@@ -128,31 +151,29 @@ def test_gpu_nvenc_render_also_requests_hardware_decode(tmp_path) -> None:
     # ordinary system memory so the existing CPU-side filter chain (scale,
     # subtitle burn-in, HDR tonemap) keeps working unchanged.
     assert "-hwaccel_output_format" not in argv
+    assert argv[argv.index("-c:v") + 1] == "libx264"
 
 
-def test_gpu_nvenc_hdr_render_uses_libplacebo_vulkan_decode_and_cpu_encode(
+def test_gpu_encoder_alone_does_not_imply_gpu_decode(tmp_path) -> None:
+    """The inverse of the above: GPU encode with CPU decode (the settings'
+    defaults) must not request any hwaccel."""
+    plan = _plan(tmp_path, decode="cpu", encoder="gpu_nvenc")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "-hwaccel" not in argv
+    assert argv[argv.index("-c:v") + 1] == "h264_nvenc"
+
+
+def test_hdr_tonemap_gpu_with_gpu_decode_uses_libplacebo_vulkan_decode(
     tmp_path,
 ) -> None:
-    """HDR content on the GPU encoder must route decode+tonemap through
-    libplacebo/Vulkan, not NVDEC+CPU-tonemap — tonemap_cuda produces badly
-    underexposed output on real HLG content regardless of parameters
-    (verified against a real broadcast file). The *encode* step, though,
-    stays on libx264 even here: NVENC's efficiency gap vs x264 on this
-    (Pascal-generation) hardware widens to ~1.7x on real grainy/high-motion
-    HDR broadcast footage (vs ~1.2x on clean SDR content) — decode/tonemap
-    was the actual bottleneck, not encode, so there's nothing to gain from
-    NVENC here and a real file-size cost to keeping it."""
-    plan = _plan(tmp_path, encoder="gpu_nvenc")
-    hdr = HdrCapabilities(
-        hlg=True,
-        color=VideoColorMetadata(
-            color_space="bt2020nc",
-            color_transfer="arib-std-b67",
-            color_primaries="bt2020",
-            color_range="tv",
-        ),
-    )
-    plan = plan.model_copy(update={"hdr": hdr, "hdr_strategy": "tone_map_hlg"})
+    """HDR content with GPU decode+tonemap must route through libplacebo/
+    Vulkan, not NVDEC+CPU-tonemap — tonemap_cuda produces badly underexposed
+    output on real HLG content regardless of parameters (verified against a
+    real broadcast file)."""
+    plan = _hdr_plan(tmp_path, decode="gpu", tonemap="gpu", encoder="cpu_x264")
     settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
 
     argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
@@ -165,6 +186,50 @@ def test_gpu_nvenc_hdr_render_uses_libplacebo_vulkan_decode_and_cpu_encode(
     assert "libplacebo=" in video_filter
     assert "tonemapping=mobius" in video_filter
     assert "tonemapx=" not in video_filter
-    assert argv[argv.index("-c:v") + 1] == "libx264"
-    assert argv[argv.index("-crf") + 1] == "18"
-    assert "h264_nvenc" not in argv
+
+
+def test_hdr_tonemap_gpu_with_cpu_decode_skips_decode_hwaccel(tmp_path) -> None:
+    """GPU tonemap with CPU decode: libplacebo uploads plain system-memory
+    frames to its own Vulkan device internally (verified working), so only
+    the device context is requested, not a decode hwaccel."""
+    plan = _hdr_plan(tmp_path, decode="cpu", tonemap="gpu")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert argv[argv.index("-init_hw_device") + 1] == "vulkan=vk:0"
+    assert argv[argv.index("-filter_hw_device") + 1] == "vk"
+    assert "-hwaccel" not in argv
+    assert "libplacebo=" in argv[argv.index("-vf") + 1]
+
+
+def test_hdr_tonemap_cpu_still_uses_nvdec_when_decode_is_gpu(tmp_path) -> None:
+    """CPU tonemap (tonemapx) with GPU decode: NVDEC decode (cuda hwaccel,
+    frames land in system memory) feeds the CPU tonemap filter directly, no
+    Vulkan device needed."""
+    plan = _hdr_plan(tmp_path, decode="gpu", tonemap="cpu")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert argv[argv.index("-hwaccel") + 1] == "cuda"
+    assert "-init_hw_device" not in argv
+    assert "-hwaccel_output_format" not in argv
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "tonemapx=" in video_filter
+    assert "libplacebo=" not in video_filter
+
+
+def test_hdr_render_can_use_gpu_encode_when_explicitly_selected(tmp_path) -> None:
+    """Encode is independent of decode/tonemap — HDR content with GPU encode
+    explicitly selected must actually use NVENC now (earlier behavior forced
+    libx264 for all HDR renders; the three-way split lets the user opt back
+    into NVENC if they want it despite the real bitrate cost measured on
+    grainy/high-motion HDR content)."""
+    plan = _hdr_plan(tmp_path, decode="gpu", tonemap="gpu", encoder="gpu_nvenc")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert argv[argv.index("-c:v") + 1] == "h264_nvenc"
+    assert argv[argv.index("-rc") + 1] == "constqp"

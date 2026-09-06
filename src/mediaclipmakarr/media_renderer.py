@@ -137,15 +137,16 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
     alone lets `-tune hq` chase quality well past what `<n>` implies
     (measured ~3.7x the bitrate of an equivalent x264 CRF on real content);
     `-rc constqp -qp <n>` is NVENC's actual constant-quality mode and
-    doesn't have that problem — but NVENC's remaining gap vs x264 on this
-    (Pascal-generation) hardware widens substantially on real, grainy/
+    doesn't have that problem. NVENC's remaining gap vs x264 on this
+    (Pascal-generation) hardware still widens substantially on real, grainy/
     high-motion footage (measured ~1.7x on a real HDR broadcast clip, vs
-    ~1.2x on clean animated SDR content), so HDR renders skip NVENC and
-    encode via libx264 regardless of `plan.encoder` — only the GPU
-    decode/tonemap upstream (the actual bottleneck) uses the GPU there.
+    ~1.2x on clean animated SDR content) — decode/tonemap/encode are three
+    independent settings for exactly this reason, so a user chasing file
+    size can pick GPU decode/tonemap with CPU encode instead of assuming
+    encoder choice must match the rest of the chain.
     """
     quality = str(plan.video_quality)
-    if plan.encoder == "gpu_nvenc" and not _uses_gpu_hdr_tonemap(plan):
+    if plan.encoder == "gpu_nvenc":
         return [
             "-c:v",
             "h264_nvenc",
@@ -168,8 +169,12 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
     ]
 
 
-def _uses_gpu_hdr_tonemap(plan: ClipRenderPlan) -> bool:
-    return plan.encoder == "gpu_nvenc" and plan.hdr_strategy != "sdr"
+def _tonemap_uses_gpu(plan: ClipRenderPlan) -> bool:
+    return plan.tonemap == "gpu" and plan.hdr_strategy != "sdr"
+
+
+def _decode_uses_gpu(plan: ClipRenderPlan) -> bool:
+    return plan.decode == "gpu"
 
 
 def build_ffmpeg_clip_args(
@@ -192,10 +197,12 @@ def build_ffmpeg_clip_args(
         "-hide_banner",
         "-y",
     ]
-    if _uses_gpu_hdr_tonemap(plan):
+    tonemap_gpu = _tonemap_uses_gpu(plan)
+    decode_gpu = _decode_uses_gpu(plan)
+    if tonemap_gpu and decode_gpu:
         # libplacebo needs its own Vulkan device context, separate from the
-        # NVDEC/CUDA path below — decode goes through Vulkan too so frames
-        # never leave GPU memory before libplacebo's tonemap+scale.
+        # NVDEC/CUDA hwaccel below — decode goes through Vulkan too so
+        # frames never leave GPU memory before libplacebo's tonemap+scale.
         argv += [
             "-init_hw_device",
             "vulkan=vk:0",
@@ -206,7 +213,12 @@ def build_ffmpeg_clip_args(
             "-hwaccel_output_format",
             "vulkan",
         ]
-    elif plan.encoder == "gpu_nvenc":
+    elif tonemap_gpu:
+        # GPU tonemap with CPU decode: libplacebo uploads plain system-memory
+        # frames to its own Vulkan device internally (verified working), so
+        # only the device context is needed here, not a decode hwaccel.
+        argv += ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"]
+    elif decode_gpu:
         # NVDEC hardware decode. Deliberately not paired with
         # -hwaccel_output_format cuda: frames come back to ordinary system
         # memory just like software decode would, so the CPU-side filter
@@ -296,7 +308,7 @@ def _subtitle_video_filter(
 ) -> VideoFilterPlan:
     base = (
         build_video_base_filter_gpu_hdr(plan.hdr, plan.hdr_strategy)
-        if _uses_gpu_hdr_tonemap(plan)
+        if _tonemap_uses_gpu(plan)
         else build_video_base_filter(plan.hdr, plan.hdr_strategy)
     )
     trim = (

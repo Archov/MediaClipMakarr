@@ -58,6 +58,14 @@ import type {
 } from "../../types";
 
 const x264Presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+const videoDecodes: { value: string; label: string }[] = [
+  { value: "cpu", label: "CPU" },
+  { value: "gpu", label: "GPU (NVDEC/Vulkan)" },
+];
+const videoTonemaps: { value: string; label: string }[] = [
+  { value: "cpu", label: "CPU (tonemapx)" },
+  { value: "gpu", label: "GPU (Vulkan/libplacebo)" },
+];
 const videoEncoders: { value: string; label: string }[] = [
   { value: "cpu_x264", label: "CPU (x264)" },
   { value: "gpu_nvenc", label: "GPU (NVENC)" },
@@ -156,6 +164,8 @@ export function SettingsForm({
   // guess over it — only an explicit selection from the control counts then.
   const [timezoneTouched, setTimezoneTouched] = useState(() => !settings.timezone_configured);
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
+  const [videoDecode, setVideoDecode] = useState(settings.video_decode);
+  const [videoTonemap, setVideoTonemap] = useState(settings.video_tonemap);
   const [videoEncoder, setVideoEncoder] = useState(settings.video_encoder);
   const [videoQuality, setVideoQuality] = useState(settings.video_quality);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
@@ -197,6 +207,8 @@ export function SettingsForm({
     mappings: settings.source_path_mappings,
     timezone: initialTimezone(settings),
     x264Preset: settings.x264_preset,
+    videoDecode: settings.video_decode,
+    videoTonemap: settings.video_tonemap,
     videoEncoder: settings.video_encoder,
     videoQuality: settings.video_quality,
     immichUrl: settings.immich_url,
@@ -245,6 +257,16 @@ export function SettingsForm({
       if (current !== known.x264Preset) return current;
       known.x264Preset = settings.x264_preset;
       return settings.x264_preset;
+    });
+    setVideoDecode((current) => {
+      if (current !== known.videoDecode) return current;
+      known.videoDecode = settings.video_decode;
+      return settings.video_decode;
+    });
+    setVideoTonemap((current) => {
+      if (current !== known.videoTonemap) return current;
+      known.videoTonemap = settings.video_tonemap;
+      return settings.video_tonemap;
     });
     setVideoEncoder((current) => {
       if (current !== known.videoEncoder) return current;
@@ -328,6 +350,12 @@ export function SettingsForm({
     if (!managed("x264_preset") && x264Preset !== settings.x264_preset) {
       update.x264_preset = x264Preset;
     }
+    if (!managed("video_decode") && videoDecode !== settings.video_decode) {
+      update.video_decode = videoDecode;
+    }
+    if (!managed("video_tonemap") && videoTonemap !== settings.video_tonemap) {
+      update.video_tonemap = videoTonemap;
+    }
     if (!managed("video_encoder") && videoEncoder !== settings.video_encoder) {
       update.video_encoder = videoEncoder;
     }
@@ -364,6 +392,8 @@ export function SettingsForm({
       if (update.source_path_mappings !== undefined) known.mappings = update.source_path_mappings;
       if (update.timezone !== undefined) known.timezone = update.timezone;
       if (update.x264_preset !== undefined) known.x264Preset = update.x264_preset;
+      if (update.video_decode !== undefined) known.videoDecode = update.video_decode;
+      if (update.video_tonemap !== undefined) known.videoTonemap = update.video_tonemap;
       if (update.video_encoder !== undefined) known.videoEncoder = update.video_encoder;
       if (update.video_quality !== undefined) known.videoQuality = update.video_quality;
       if (update.immich_url !== undefined) known.immichUrl = update.immich_url;
@@ -384,6 +414,8 @@ export function SettingsForm({
     timezone,
     timezoneTouched,
     x264Preset,
+    videoDecode,
+    videoTonemap,
     videoEncoder,
     videoQuality,
     immichUrl,
@@ -1161,14 +1193,53 @@ export function SettingsForm({
         <Card variant="outlined">
           <CardContent>
             <Stack spacing={3}>
-              <Typography variant="h5">Rendering</Typography>
+              <Box>
+                <Typography variant="h5">Transcode chain</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Decode, tonemap, and encode are independent — pick GPU for the ones
+                  that help and CPU for the ones that don&rsquo;t. Tonemap only runs
+                  (and only matters) for HDR sources; it&rsquo;s ignored otherwise.
+                </Typography>
+              </Box>
               <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
                 <Stack direction="row" spacing={1} alignItems="center" flex={1}>
+                  <FormControl fullWidth disabled={managed("video_decode")}>
+                    <InputLabel id="video-decode-label">Decode</InputLabel>
+                    <Select
+                      labelId="video-decode-label"
+                      label="Decode"
+                      value={videoDecode}
+                      onChange={(event) => setVideoDecode(event.target.value)}
+                    >
+                      {videoDecodes.map((decode) => (
+                        <MenuItem key={decode.value} value={decode.value}>{decode.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <ManagedLabel managed={managed("video_decode")} />
+                </Stack>
+                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
+                  <FormControl fullWidth disabled={managed("video_tonemap")}>
+                    <InputLabel id="video-tonemap-label">Tonemap (HDR)</InputLabel>
+                    <Select
+                      labelId="video-tonemap-label"
+                      label="Tonemap (HDR)"
+                      value={videoTonemap}
+                      onChange={(event) => setVideoTonemap(event.target.value)}
+                    >
+                      {videoTonemaps.map((tonemap) => (
+                        <MenuItem key={tonemap.value} value={tonemap.value}>{tonemap.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <ManagedLabel managed={managed("video_tonemap")} />
+                </Stack>
+                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
                   <FormControl fullWidth disabled={managed("video_encoder")}>
-                    <InputLabel id="video-encoder-label">Encoder</InputLabel>
+                    <InputLabel id="video-encoder-label">Encode</InputLabel>
                     <Select
                       labelId="video-encoder-label"
-                      label="Encoder"
+                      label="Encode"
                       value={videoEncoder}
                       onChange={(event) => setVideoEncoder(event.target.value)}
                     >
@@ -1178,6 +1249,25 @@ export function SettingsForm({
                     </Select>
                   </FormControl>
                   <ManagedLabel managed={managed("video_encoder")} />
+                </Stack>
+              </Stack>
+              <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
+                  <FormControl fullWidth disabled={managed("x264_preset") || videoEncoder !== "cpu_x264"}>
+                    <InputLabel id="x264-preset-label">x264 preset</InputLabel>
+                    <Select
+                      labelId="x264-preset-label"
+                      label="x264 preset"
+                      value={x264Preset}
+                      onChange={(event) => setX264Preset(event.target.value)}
+                    >
+                      {x264Presets.map((preset) => <MenuItem key={preset} value={preset}>{preset}</MenuItem>)}
+                    </Select>
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                      Only applies when Encode is CPU.
+                    </Typography>
+                  </FormControl>
+                  <ManagedLabel managed={managed("x264_preset")} />
                 </Stack>
                 <Stack direction="row" spacing={1} alignItems="center" flex={1}>
                   <TextField
@@ -1202,30 +1292,14 @@ export function SettingsForm({
                   <ManagedLabel managed={managed("video_quality")} />
                 </Stack>
               </Stack>
-              <Stack direction="row" spacing={1} alignItems="center">
-                <FormControl fullWidth disabled={managed("x264_preset") || videoEncoder !== "cpu_x264"}>
-                  <InputLabel id="x264-preset-label">x264 preset</InputLabel>
-                  <Select
-                    labelId="x264-preset-label"
-                    label="x264 preset"
-                    value={x264Preset}
-                    onChange={(event) => setX264Preset(event.target.value)}
-                  >
-                    {x264Presets.map((preset) => <MenuItem key={preset} value={preset}>{preset}</MenuItem>)}
-                  </Select>
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                    Only applies to the CPU encoder.
-                  </Typography>
-                </FormControl>
-                <ManagedLabel managed={managed("x264_preset")} />
-              </Stack>
-              {videoEncoder === "gpu_nvenc" && (
+              {(videoDecode === "gpu" || videoTonemap === "gpu" || videoEncoder === "gpu_nvenc") && (
                 <Alert severity="info">
-                  GPU rendering (both decode and encode) requires the host to pass an
-                  Nvidia GPU through to this container (device passthrough +
-                  nvidia-container-toolkit) and an ffmpeg build with h264_nvenc/NVDEC
-                  support. Selecting this without that in place will make every render
-                  fail.
+                  Any GPU stage requires the host to pass an Nvidia GPU through to this
+                  container (device passthrough + nvidia-container-toolkit) and an
+                  ffmpeg build with h264_nvenc/NVDEC support. GPU tonemap additionally
+                  needs a Vulkan-capable ffmpeg build and the Vulkan runtime libraries in
+                  the container. Selecting a GPU stage without that in place will make
+                  every render using it fail.
                 </Alert>
               )}
             </Stack>

@@ -162,6 +162,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
                 ),
                 "timezone": "Europe/London",
                 "x264_preset": "slow",
+                "video_decode": "gpu",
+                "video_tonemap": "gpu",
                 "video_encoder": "gpu_nvenc",
                 "video_quality": "24",
                 "immich_url": "http://database-immich:2283",
@@ -183,6 +185,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
             ),
             timezone="America/Chicago",
             x264_preset="fast",
+            video_decode="cpu",
+            video_tonemap="cpu",
             video_encoder="cpu_x264",
             video_quality=20,
             immich_url="http://environment-immich:2283/",
@@ -218,6 +222,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert effective.source_path_mappings[0].plex_prefix == "D:/Media"
     assert effective.timezone == "America/Chicago"
     assert effective.x264_preset == "fast"
+    assert effective.video_decode == "cpu"
+    assert effective.video_tonemap == "cpu"
     assert effective.video_encoder == "cpu_x264"
     assert effective.video_quality == 20
     assert effective.immich_url == "http://environment-immich:2283"
@@ -232,6 +238,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert empty_overrides.plex_url == "http://database-plex:32400"
     assert empty_overrides.plex_token == "database-secret"
     assert empty_overrides.x264_preset == "slow"
+    assert empty_overrides.video_decode == "gpu"
+    assert empty_overrides.video_tonemap == "gpu"
     assert empty_overrides.video_encoder == "gpu_nvenc"
     assert empty_overrides.video_quality == 24
     assert empty_overrides.immich_url == "http://database-immich:2283"

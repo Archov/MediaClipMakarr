@@ -32,6 +32,8 @@ export type ApplicationSettingField =
   | "source_path_mappings"
   | "timezone"
   | "x264_preset"
+  | "video_decode"
+  | "video_tonemap"
   | "video_encoder"
   | "video_quality"
   | "immich_url"
@@ -51,6 +53,8 @@ export interface ApplicationSettings {
   timezone_configured: boolean;
   available_timezones: string[];
   x264_preset: string;
+  video_decode: string;
+  video_tonemap: string;
   video_encoder: string;
   video_quality: number;
   immich_url: string;
@@ -71,6 +75,8 @@ export interface ApplicationSettingsUpdate {
   source_path_mappings?: SourcePathMapping[];
   timezone?: string;
   x264_preset?: string;
+  video_decode?: string;
+  video_tonemap?: string;
   video_encoder?: string;
   video_quality?: number;
   immich_url?: string;

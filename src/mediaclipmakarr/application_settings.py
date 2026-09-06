@@ -29,6 +29,13 @@ X264_PRESETS = (
 # and an ffmpeg build with h264_nvenc — neither of which this app can detect
 # for itself, so selecting it without that in place simply fails at render time.
 VIDEO_ENCODERS = ("cpu_x264", "gpu_nvenc")
+# Decode, tonemap, and encode are three independent stages of the transcode
+# chain, each choosable on its own (e.g. GPU decode + GPU tonemap + CPU
+# encode) — none of them implies the others. "gpu" for decode/tonemap
+# requires the same GPU passthrough as "gpu_nvenc" above, plus (for tonemap)
+# a Vulkan-capable ffmpeg build and Vulkan runtime libraries in the container.
+VIDEO_DECODES = ("cpu", "gpu")
+VIDEO_TONEMAPS = ("cpu", "gpu")
 VIDEO_QUALITY_MIN = 0
 VIDEO_QUALITY_MAX = 51
 SETTING_FIELDS = (
@@ -37,6 +44,8 @@ SETTING_FIELDS = (
     "source_path_mappings",
     "timezone",
     "x264_preset",
+    "video_decode",
+    "video_tonemap",
     "video_encoder",
     "video_quality",
     "immich_url",
@@ -131,6 +140,20 @@ def validate_video_encoder(value: str) -> str:
     return value
 
 
+def validate_video_decode(value: str) -> str:
+    value = value.strip().lower()
+    if value not in VIDEO_DECODES:
+        raise ValueError(f"Video decode must be one of: {', '.join(VIDEO_DECODES)}.")
+    return value
+
+
+def validate_video_tonemap(value: str) -> str:
+    value = value.strip().lower()
+    if value not in VIDEO_TONEMAPS:
+        raise ValueError(f"Video tonemap must be one of: {', '.join(VIDEO_TONEMAPS)}.")
+    return value
+
+
 def validate_video_quality(value: int) -> int:
     if not VIDEO_QUALITY_MIN <= value <= VIDEO_QUALITY_MAX:
         raise ValueError(
@@ -148,6 +171,8 @@ class ApplicationSettingsResponse(BaseModel):
     timezone_configured: bool
     available_timezones: list[str]
     x264_preset: str
+    video_decode: str
+    video_tonemap: str
     video_encoder: str
     video_quality: int
     immich_url: str
@@ -170,6 +195,8 @@ class ApplicationSettingsUpdate(BaseModel):
     source_path_mappings: list[SourcePathMapping] | None = None
     timezone: str | None = None
     x264_preset: str | None = None
+    video_decode: str | None = None
+    video_tonemap: str | None = None
     video_encoder: str | None = None
     video_quality: int | None = None
     immich_url: str | None = None
@@ -202,6 +229,16 @@ class ApplicationSettingsUpdate(BaseModel):
     def validate_preset(cls, value: str | None) -> str | None:
         return None if value is None else validate_x264_preset(value)
 
+    @field_validator("video_decode")
+    @classmethod
+    def validate_decode(cls, value: str | None) -> str | None:
+        return None if value is None else validate_video_decode(value)
+
+    @field_validator("video_tonemap")
+    @classmethod
+    def validate_tonemap(cls, value: str | None) -> str | None:
+        return None if value is None else validate_video_tonemap(value)
+
     @field_validator("video_encoder")
     @classmethod
     def validate_encoder(cls, value: str | None) -> str | None:
@@ -230,6 +267,8 @@ class EffectiveApplicationSettings:
     timezone_configured: bool
     x264_preset: str
     environment_managed: dict[str, bool]
+    video_decode: str = "cpu"
+    video_tonemap: str = "cpu"
     video_encoder: str = "cpu_x264"
     video_quality: int = 18
     immich_url: str = ""
@@ -250,6 +289,8 @@ class EffectiveApplicationSettings:
             timezone_configured=self.timezone_configured,
             available_timezones=AVAILABLE_TIMEZONES,
             x264_preset=self.x264_preset,
+            video_decode=self.video_decode,
+            video_tonemap=self.video_tonemap,
             video_encoder=self.video_encoder,
             video_quality=self.video_quality,
             immich_url=self.immich_url,
@@ -326,6 +367,8 @@ async def get_effective_application_settings(
         "source_path_mappings": environment_mappings,
         "timezone": bootstrap.timezone.strip() if bootstrap.timezone else None,
         "x264_preset": bootstrap.x264_preset.strip() if bootstrap.x264_preset else None,
+        "video_decode": bootstrap.video_decode.strip() if bootstrap.video_decode else None,
+        "video_tonemap": bootstrap.video_tonemap.strip() if bootstrap.video_tonemap else None,
         "video_encoder": bootstrap.video_encoder.strip() if bootstrap.video_encoder else None,
         "video_quality": bootstrap.video_quality,
         "immich_url": bootstrap.immich_url.strip() if bootstrap.immich_url else None,
@@ -363,6 +406,12 @@ async def get_effective_application_settings(
     x264_preset = validate_x264_preset(
         str(environment_values["x264_preset"] or persisted.get("x264_preset", "veryfast"))
     )
+    video_decode = validate_video_decode(
+        str(environment_values["video_decode"] or persisted.get("video_decode", "cpu"))
+    )
+    video_tonemap = validate_video_tonemap(
+        str(environment_values["video_tonemap"] or persisted.get("video_tonemap", "cpu"))
+    )
     video_encoder = validate_video_encoder(
         str(environment_values["video_encoder"] or persisted.get("video_encoder", "cpu_x264"))
     )
@@ -391,6 +440,8 @@ async def get_effective_application_settings(
         timezone=timezone,
         timezone_configured=managed["timezone"] or "timezone" in persisted,
         x264_preset=x264_preset,
+        video_decode=video_decode,
+        video_tonemap=video_tonemap,
         video_encoder=video_encoder,
         video_quality=video_quality,
         immich_url=immich_url,

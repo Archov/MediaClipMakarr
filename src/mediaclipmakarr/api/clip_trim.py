@@ -160,6 +160,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                 render_source,
                 source_stat,
                 x264_preset=request.app.state.effective_application_settings.x264_preset,
+                decode=request.app.state.effective_application_settings.video_decode,
+                tonemap=request.app.state.effective_application_settings.video_tonemap,
                 encoder=request.app.state.effective_application_settings.video_encoder,
                 video_quality=request.app.state.effective_application_settings.video_quality,
             )
