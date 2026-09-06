@@ -42,7 +42,7 @@ def test_thumbnail_frame_is_bounded_tone_mapped_and_has_no_subtitles() -> None:
     assert args[args.index("-ss") + 1] == "12.345"
     assert args[args.index("-map") + 1] == "0:2"
     assert "min(480,iw)" in video_filter
-    assert "tonemap=tonemap=mobius" in video_filter
+    assert "tonemapx=tonemap=mobius" in video_filter
     assert "-sn" in args
     assert "subtitles=" not in video_filter
     assert "overlay=" not in video_filter
@@ -62,7 +62,7 @@ def test_export_frame_keeps_full_source_resolution_and_bt709_tags() -> None:
 
     video_filter = args[args.index("-vf") + 1]
     assert "scale=w=" not in video_filter
-    assert "tonemap=tonemap=mobius" in video_filter
+    assert "tonemapx=tonemap=mobius" in video_filter
     assert args[args.index("-c:v") + 1] == "png"
     assert args[args.index("-update") + 1] == "1"
     assert video_filter.endswith("format=rgb24")

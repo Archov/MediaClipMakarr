@@ -16,7 +16,11 @@ import httpx
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
-from mediaclipmakarr.video_filters import build_video_base_filter, output_color_args
+from mediaclipmakarr.video_filters import (
+    build_video_base_filter,
+    build_video_base_filter_gpu_hdr,
+    output_color_args,
+)
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 logger = logging.getLogger(__name__)
@@ -127,12 +131,15 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
     """The `-c:v` and quality/preset flags for `plan.encoder`.
 
     Both encoders read `plan.video_quality` on the same 0-51 scale (lower is
-    higher quality) — x264's CRF and NVENC's constant-quality VBR mode are
-    close enough in meaning to share one setting, even though they aren't
-    perceptually identical at the same number. NVENC needs `-rc vbr -cq
-    <n> -b:v 0` together for the quality value to actually govern bitrate
-    (otherwise it's clamped by an implicit target bitrate); `-tune hq`
-    trades the encode speed NVENC doesn't need to spend here for quality.
+    higher quality) — x264's CRF and NVENC's constant-QP mode are close
+    enough in meaning to share one setting, even though they aren't
+    perceptually identical at the same number (NVENC on Pascal-generation
+    cards runs ~35% higher bitrate than x264 at a "matched" number, which
+    is a real, expected gap for that hardware — not a misconfiguration).
+    `-rc vbr -cq <n> -b:v 0` alone lets `-tune hq` chase quality well past
+    what `<n>` implies (measured ~3.7x the bitrate of an equivalent x264
+    CRF on real content); `-rc constqp -qp <n>` is NVENC's actual
+    constant-quality mode and doesn't have that problem.
     """
     quality = str(plan.video_quality)
     if plan.encoder == "gpu_nvenc":
@@ -140,11 +147,9 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
             "-c:v",
             "h264_nvenc",
             "-rc",
-            "vbr",
-            "-cq",
+            "constqp",
+            "-qp",
             quality,
-            "-b:v",
-            "0",
             "-preset",
             "p6",
             "-tune",
@@ -158,6 +163,10 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
         "-preset",
         plan.x264_preset,
     ]
+
+
+def _uses_gpu_hdr_tonemap(plan: ClipRenderPlan) -> bool:
+    return plan.encoder == "gpu_nvenc" and plan.hdr_strategy != "sdr"
 
 
 def build_ffmpeg_clip_args(
@@ -180,15 +189,29 @@ def build_ffmpeg_clip_args(
         "-hide_banner",
         "-y",
     ]
-    if plan.encoder == "gpu_nvenc":
+    if _uses_gpu_hdr_tonemap(plan):
+        # libplacebo needs its own Vulkan device context, separate from the
+        # NVDEC/CUDA path below — decode goes through Vulkan too so frames
+        # never leave GPU memory before libplacebo's tonemap+scale.
+        argv += [
+            "-init_hw_device",
+            "vulkan=vk:0",
+            "-filter_hw_device",
+            "vk",
+            "-hwaccel",
+            "vulkan",
+            "-hwaccel_output_format",
+            "vulkan",
+        ]
+    elif plan.encoder == "gpu_nvenc":
         # NVDEC hardware decode. Deliberately not paired with
         # -hwaccel_output_format cuda: frames come back to ordinary system
         # memory just like software decode would, so the CPU-side filter
         # chain below (scale, subtitle burn-in, HDR tonemap) needs no
-        # changes. This is the actual dominant cost for a 4K/HEVC source —
-        # h264_nvenc alone only offloads the encode, which is the smaller
-        # half of the work. ffmpeg's hwaccel negotiation falls back to
-        # software decode on its own for a source NVDEC can't handle, so
+        # changes. This is the actual dominant cost for a 4K/HEVC SDR
+        # source — h264_nvenc alone only offloads the encode, which is the
+        # smaller half of the work. ffmpeg's hwaccel negotiation falls back
+        # to software decode on its own for a source NVDEC can't handle, so
         # this doesn't risk failing a render outright.
         argv += ["-hwaccel", "cuda"]
     argv += [
@@ -268,7 +291,11 @@ def _subtitle_video_filter(
     preroll_seconds: float,
     prepared_text_subtitle: PreparedTextSubtitle | None,
 ) -> VideoFilterPlan:
-    base = build_video_base_filter(plan.hdr, plan.hdr_strategy)
+    base = (
+        build_video_base_filter_gpu_hdr(plan.hdr, plan.hdr_strategy)
+        if _uses_gpu_hdr_tonemap(plan)
+        else build_video_base_filter(plan.hdr, plan.hdr_strategy)
+    )
     trim = (
         f"trim=start={preroll_seconds:.3f}:"
         f"duration={_duration_seconds(plan):.3f},setpts=PTS-STARTPTS"

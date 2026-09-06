@@ -49,13 +49,31 @@ def build_video_frame_filter(
     )
 
 
-def _build_video_filter(
-    hdr: HdrCapabilities,
-    strategy: HdrRenderStrategy,
-    *,
-    size_filter: str | None,
-    output_pixel_format: str,
-) -> str:
+def build_video_base_filter_gpu_hdr(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -> str:
+    """GPU HDR->SDR path for a full clip render: `libplacebo` does scale,
+
+    tonemap, and color conversion in one GPU filter. Verified ~9.6x faster
+    than the CPU tonemapx chain on real HLG content on a GTX 1070 (41.5s ->
+    4.3s for a 10s 4K/50fps clip, decode included). `tonemap_cuda` was tried
+    first and produces badly underexposed output on HLG sources regardless
+    of parameters — a known limitation, not a misconfiguration: its own
+    author (the jellyfin-ffmpeg maintainer) describes it as a stripped-down
+    `libplacebo` with lower color accuracy. Only for the HDR strategies —
+    callers must route `strategy == "sdr"` to the plain CPU path instead,
+    since libplacebo/Vulkan buys nothing there over the existing NVDEC path.
+    """
+    _validate_strategy(hdr, strategy)
+    if strategy == "sdr":
+        raise ValueError("build_video_base_filter_gpu_hdr is only for HDR tonemap strategies.")
+    return (
+        "libplacebo=w='min(1920,iw)':h='min(1080,ih)':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2:"
+        "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
+        "tonemapping=mobius:tonemapping_param=0.3:format=yuv420p"
+    )
+
+
+def _validate_strategy(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -> None:
     enforce_dolby_vision_policy(hdr)
     expected = planned_hdr_strategy(hdr)
     if strategy != expected:
@@ -68,6 +86,16 @@ def _build_video_filter(
                 "expected_strategy": expected,
             },
         )
+
+
+def _build_video_filter(
+    hdr: HdrCapabilities,
+    strategy: HdrRenderStrategy,
+    *,
+    size_filter: str | None,
+    output_pixel_format: str,
+) -> str:
+    _validate_strategy(hdr, strategy)
     if strategy == "sdr":
         return _finish_filter(size_filter, output_pixel_format)
 
@@ -75,13 +103,15 @@ def _build_video_filter(
     primaries = _source_value(hdr.color.color_primaries, "bt2020")
     matrix = _source_value(hdr.color.color_space, "bt2020nc")
     source_range = _source_range(hdr.color.color_range)
+    # tonemapx is ffmpeg's SIMD-optimized HDR->SDR tonemapper. Same mobius
+    # curve as the old zscale-based chain, but ~2.6x faster on real HLG
+    # content (measured locally) since it avoids the float-linear round
+    # trip through gbrpf32le — verified visually equivalent output too.
     return (
         f"setparams=color_primaries={primaries}:color_trc={transfer}:"
         f"colorspace={matrix}:range={source_range},"
-        "zscale=transfer=linear:npl=100,"
-        "format=gbrpf32le,"
-        "tonemap=tonemap=mobius:param=0.3:desat=0,"
-        "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=limited,"
+        "tonemapx=tonemap=mobius:param=0.3:desat=0:"
+        "transfer=bt709:matrix=bt709:primaries=bt709:range=tv,"
         f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
     )
 

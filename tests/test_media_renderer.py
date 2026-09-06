@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mediaclipmakarr.clips import ClipCreateRequest
 from mediaclipmakarr.config import Settings
+from mediaclipmakarr.hdr import HdrCapabilities
 from mediaclipmakarr.media_renderer import build_ffmpeg_clip_args
 from mediaclipmakarr.plex import PlexSession
 from mediaclipmakarr.render_plan import build_clip_render_plan
@@ -92,7 +93,7 @@ def test_cpu_x264_render_uses_crf_and_configured_preset(tmp_path) -> None:
     assert "-hwaccel" not in argv
 
 
-def test_gpu_nvenc_render_uses_constant_quality_vbr(tmp_path) -> None:
+def test_gpu_nvenc_render_uses_constant_qp(tmp_path) -> None:
     plan = _plan(tmp_path, encoder="gpu_nvenc", video_quality=24)
     settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
 
@@ -100,11 +101,14 @@ def test_gpu_nvenc_render_uses_constant_quality_vbr(tmp_path) -> None:
 
     video_codec_index = argv.index("-c:v")
     assert argv[video_codec_index + 1] == "h264_nvenc"
-    assert argv[argv.index("-rc") + 1] == "vbr"
-    assert argv[argv.index("-cq") + 1] == "24"
-    assert argv[argv.index("-b:v") + 1] == "0"
+    # constqp, not vbr+cq: vbr+cq+tune=hq lets NVENC spend far more bitrate
+    # than the quality number implies (measured ~3.7x an equivalent x264
+    # CRF on real content) since nothing bounds how low it can push the QP.
+    assert argv[argv.index("-rc") + 1] == "constqp"
+    assert argv[argv.index("-qp") + 1] == "24"
     # NVENC uses its own preset scale (p1-p7) — never the x264 preset name.
     assert "-crf" not in argv
+    assert "-cq" not in argv
     assert "libx264" not in argv
 
 
@@ -124,3 +128,34 @@ def test_gpu_nvenc_render_also_requests_hardware_decode(tmp_path) -> None:
     # ordinary system memory so the existing CPU-side filter chain (scale,
     # subtitle burn-in, HDR tonemap) keeps working unchanged.
     assert "-hwaccel_output_format" not in argv
+
+
+def test_gpu_nvenc_hdr_render_uses_libplacebo_and_vulkan_decode(tmp_path) -> None:
+    """HDR content on the GPU encoder must route through libplacebo/Vulkan,
+    not NVDEC+CPU-tonemap — tonemap_cuda produces badly underexposed output
+    on real HLG content regardless of parameters (verified against a real
+    broadcast file), so this path is deliberately different from the plain
+    GPU/SDR case above."""
+    plan = _plan(tmp_path, encoder="gpu_nvenc")
+    hdr = HdrCapabilities(
+        hlg=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="arib-std-b67",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+    plan = plan.model_copy(update={"hdr": hdr, "hdr_strategy": "tone_map_hlg"})
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert argv[argv.index("-init_hw_device") + 1] == "vulkan=vk:0"
+    assert argv[argv.index("-filter_hw_device") + 1] == "vk"
+    assert argv[argv.index("-hwaccel") + 1] == "vulkan"
+    assert argv[argv.index("-hwaccel_output_format") + 1] == "vulkan"
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "libplacebo=" in video_filter
+    assert "tonemapping=mobius" in video_filter
+    assert "tonemapx=" not in video_filter

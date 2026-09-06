@@ -28,3 +28,14 @@ services:
       - "${MCM_DATA:?Set MCM_DATA to the host directory for database, work, and clips.}:/data/"
       - "${MCM_COMPOSE_SOURCE_DIR:-./sources}:/media:ro"
     restart: unless-stopped
+    # GPU passthrough for the gpu_nvenc video encoder (NVDEC/NVENC decode+encode
+    # and the libplacebo GPU HDR tonemap path). Uncomment for local docker-compose
+    # testing on a machine with an NVIDIA GPU and nvidia-container-toolkit
+    # installed — the actual deploy target grants this outside of compose.yaml.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

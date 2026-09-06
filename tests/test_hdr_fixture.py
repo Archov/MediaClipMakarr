@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +23,26 @@ from mediaclipmakarr.source_media import (
 from mediaclipmakarr.subprocesses import run_command
 
 
+def _resolve_jellyfin_ffmpeg() -> tuple[str, str] | None:
+    """Prefer this project's bundled jellyfin-ffmpeg over a generic system
+    ffmpeg — the HDR render path uses `tonemapx` and `libplacebo`, both
+    jellyfin-ffmpeg-specific filters absent from mainline ffmpeg builds, so
+    testing against a generic `ffmpeg` on PATH would either false-fail or
+    silently exercise the wrong filters."""
+    env_ffmpeg = os.environ.get("MCM_FFMPEG_PATH")
+    env_ffprobe = os.environ.get("MCM_FFPROBE_PATH")
+    if env_ffmpeg and env_ffprobe and Path(env_ffmpeg).is_file() and Path(env_ffprobe).is_file():
+        return env_ffmpeg, env_ffprobe
+    tools_root = Path(__file__).resolve().parents[1] / "data" / "tools"
+    for candidate_dir in sorted(tools_root.glob("jellyfin-ffmpeg-*")):
+        for exe_suffix in ("", ".exe"):
+            ffmpeg_path = candidate_dir / f"ffmpeg{exe_suffix}"
+            ffprobe_path = candidate_dir / f"ffprobe{exe_suffix}"
+            if ffmpeg_path.is_file() and ffprobe_path.is_file():
+                return str(ffmpeg_path), str(ffprobe_path)
+    return None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("fixture_name", "transfer", "strategy"),
@@ -34,10 +54,13 @@ from mediaclipmakarr.subprocesses import run_command
 async def test_hdr_fixture_renders_as_sane_limited_bt709_frame(
     tmp_path, fixture_name: str, transfer: str, strategy: str
 ) -> None:
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
-    if ffmpeg is None or ffprobe is None:
-        pytest.skip("FFmpeg and ffprobe are required for the HDR media smoke test.")
+    resolved = _resolve_jellyfin_ffmpeg()
+    if resolved is None:
+        pytest.skip(
+            "A jellyfin-ffmpeg build is required for the HDR media smoke test "
+            "(tonemapx/libplacebo aren't in mainline ffmpeg)."
+        )
+    ffmpeg, ffprobe = resolved
     fixture = Path(__file__).parent / "fixtures" / fixture_name
     stat = fixture.stat()
     source = ResolvedSourceMedia(
