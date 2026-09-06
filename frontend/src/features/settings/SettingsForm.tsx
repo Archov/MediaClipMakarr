@@ -58,6 +58,12 @@ import type {
 } from "../../types";
 
 const x264Presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+const videoEncoders: { value: string; label: string }[] = [
+  { value: "cpu_x264", label: "CPU (x264)" },
+  { value: "gpu_nvenc", label: "GPU (NVENC)" },
+];
+const VIDEO_QUALITY_MIN = 0;
+const VIDEO_QUALITY_MAX = 51;
 const SECRET_MASK = "●●●●●●●●";
 const AUTO_SAVE_DEBOUNCE_MS = 800;
 const ACTIVE_BULK_UPLOAD_JOB_KEY = "mediaclipmakarr.activeBulkUploadJobId";
@@ -150,6 +156,8 @@ export function SettingsForm({
   // guess over it — only an explicit selection from the control counts then.
   const [timezoneTouched, setTimezoneTouched] = useState(() => !settings.timezone_configured);
   const [x264Preset, setX264Preset] = useState(settings.x264_preset);
+  const [videoEncoder, setVideoEncoder] = useState(settings.video_encoder);
+  const [videoQuality, setVideoQuality] = useState(settings.video_quality);
   const [mappings, setMappings] = useState<SourcePathMapping[]>(settings.source_path_mappings);
 
   // A saved secret locks its service's URL field: retargeting the URL while the old
@@ -189,6 +197,8 @@ export function SettingsForm({
     mappings: settings.source_path_mappings,
     timezone: initialTimezone(settings),
     x264Preset: settings.x264_preset,
+    videoEncoder: settings.video_encoder,
+    videoQuality: settings.video_quality,
     immichUrl: settings.immich_url,
     immichDefaultTag: settings.immich_default_tag,
     immichAutoUpload: settings.immich_auto_upload,
@@ -235,6 +245,16 @@ export function SettingsForm({
       if (current !== known.x264Preset) return current;
       known.x264Preset = settings.x264_preset;
       return settings.x264_preset;
+    });
+    setVideoEncoder((current) => {
+      if (current !== known.videoEncoder) return current;
+      known.videoEncoder = settings.video_encoder;
+      return settings.video_encoder;
+    });
+    setVideoQuality((current) => {
+      if (current !== known.videoQuality) return current;
+      known.videoQuality = settings.video_quality;
+      return settings.video_quality;
     });
     setImmichUrl((current) => {
       if (current !== known.immichUrl) return current;
@@ -308,6 +328,12 @@ export function SettingsForm({
     if (!managed("x264_preset") && x264Preset !== settings.x264_preset) {
       update.x264_preset = x264Preset;
     }
+    if (!managed("video_encoder") && videoEncoder !== settings.video_encoder) {
+      update.video_encoder = videoEncoder;
+    }
+    if (!managed("video_quality") && videoQuality !== settings.video_quality) {
+      update.video_quality = videoQuality;
+    }
     if (!managed("immich_url") && immichUrl !== settings.immich_url) update.immich_url = immichUrl;
     if (!managed("immich_default_tag") && immichDefaultTag !== settings.immich_default_tag) {
       update.immich_default_tag = immichDefaultTag;
@@ -338,6 +364,8 @@ export function SettingsForm({
       if (update.source_path_mappings !== undefined) known.mappings = update.source_path_mappings;
       if (update.timezone !== undefined) known.timezone = update.timezone;
       if (update.x264_preset !== undefined) known.x264Preset = update.x264_preset;
+      if (update.video_encoder !== undefined) known.videoEncoder = update.video_encoder;
+      if (update.video_quality !== undefined) known.videoQuality = update.video_quality;
       if (update.immich_url !== undefined) known.immichUrl = update.immich_url;
       if (update.immich_default_tag !== undefined) known.immichDefaultTag = update.immich_default_tag;
       if (update.immich_auto_upload !== undefined) known.immichAutoUpload = update.immich_auto_upload;
@@ -356,6 +384,8 @@ export function SettingsForm({
     timezone,
     timezoneTouched,
     x264Preset,
+    videoEncoder,
+    videoQuality,
     immichUrl,
     immichDefaultTag,
     immichAutoUpload,
@@ -1131,6 +1161,79 @@ export function SettingsForm({
         <Card variant="outlined">
           <CardContent>
             <Stack spacing={3}>
+              <Typography variant="h5">Rendering</Typography>
+              <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
+                  <FormControl fullWidth disabled={managed("video_encoder")}>
+                    <InputLabel id="video-encoder-label">Encoder</InputLabel>
+                    <Select
+                      labelId="video-encoder-label"
+                      label="Encoder"
+                      value={videoEncoder}
+                      onChange={(event) => setVideoEncoder(event.target.value)}
+                    >
+                      {videoEncoders.map((encoder) => (
+                        <MenuItem key={encoder.value} value={encoder.value}>{encoder.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <ManagedLabel managed={managed("video_encoder")} />
+                </Stack>
+                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="Quality"
+                    value={videoQuality}
+                    disabled={managed("video_quality")}
+                    slotProps={{
+                      htmlInput: { min: VIDEO_QUALITY_MIN, max: VIDEO_QUALITY_MAX },
+                    }}
+                    helperText="0-51, lower is higher quality."
+                    onChange={(event) => {
+                      const parsed = Number(event.target.value);
+                      if (Number.isFinite(parsed)) {
+                        setVideoQuality(
+                          Math.min(VIDEO_QUALITY_MAX, Math.max(VIDEO_QUALITY_MIN, Math.round(parsed))),
+                        );
+                      }
+                    }}
+                  />
+                  <ManagedLabel managed={managed("video_quality")} />
+                </Stack>
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <FormControl fullWidth disabled={managed("x264_preset") || videoEncoder !== "cpu_x264"}>
+                  <InputLabel id="x264-preset-label">x264 preset</InputLabel>
+                  <Select
+                    labelId="x264-preset-label"
+                    label="x264 preset"
+                    value={x264Preset}
+                    onChange={(event) => setX264Preset(event.target.value)}
+                  >
+                    {x264Presets.map((preset) => <MenuItem key={preset} value={preset}>{preset}</MenuItem>)}
+                  </Select>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Only applies to the CPU encoder.
+                  </Typography>
+                </FormControl>
+                <ManagedLabel managed={managed("x264_preset")} />
+              </Stack>
+              {videoEncoder === "gpu_nvenc" && (
+                <Alert severity="info">
+                  GPU encoding requires the host to pass an Nvidia GPU through to this
+                  container (device passthrough + nvidia-container-toolkit) and an ffmpeg
+                  build with h264_nvenc. Selecting this without that in place will make
+                  every render fail.
+                </Alert>
+              )}
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card variant="outlined">
+          <CardContent>
+            <Stack spacing={3}>
               <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
                 <Stack direction="row" spacing={1} alignItems="center" flex={1}>
                   <Autocomplete
@@ -1156,20 +1259,6 @@ export function SettingsForm({
                     )}
                   />
                   <ManagedLabel managed={managed("timezone")} />
-                </Stack>
-                <Stack direction="row" spacing={1} alignItems="center" flex={1}>
-                  <FormControl fullWidth disabled={managed("x264_preset")}>
-                    <InputLabel id="x264-preset-label">x264 preset</InputLabel>
-                    <Select
-                      labelId="x264-preset-label"
-                      label="x264 preset"
-                      value={x264Preset}
-                      onChange={(event) => setX264Preset(event.target.value)}
-                    >
-                      {x264Presets.map((preset) => <MenuItem key={preset} value={preset}>{preset}</MenuItem>)}
-                    </Select>
-                  </FormControl>
-                  <ManagedLabel managed={managed("x264_preset")} />
                 </Stack>
               </Stack>
 

@@ -123,6 +123,43 @@ def _cleanup_failed_output_path(output_dir: Path, preserve_workdir: bool) -> Non
     shutil.rmtree(output_dir, ignore_errors=True)
 
 
+def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
+    """The `-c:v` and quality/preset flags for `plan.encoder`.
+
+    Both encoders read `plan.video_quality` on the same 0-51 scale (lower is
+    higher quality) — x264's CRF and NVENC's constant-quality VBR mode are
+    close enough in meaning to share one setting, even though they aren't
+    perceptually identical at the same number. NVENC needs `-rc vbr -cq
+    <n> -b:v 0` together for the quality value to actually govern bitrate
+    (otherwise it's clamped by an implicit target bitrate); `-tune hq`
+    trades the encode speed NVENC doesn't need to spend here for quality.
+    """
+    quality = str(plan.video_quality)
+    if plan.encoder == "gpu_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-rc",
+            "vbr",
+            "-cq",
+            quality,
+            "-b:v",
+            "0",
+            "-preset",
+            "p6",
+            "-tune",
+            "hq",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-crf",
+        quality,
+        "-preset",
+        plan.x264_preset,
+    ]
+
+
 def build_ffmpeg_clip_args(
     plan: ClipRenderPlan,
     settings: Settings,
@@ -175,12 +212,7 @@ def build_ffmpeg_clip_args(
             "-map",
             subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
             "-sn",
-            "-c:v",
-            "libx264",
-            "-crf",
-            "18",
-            "-preset",
-            plan.x264_preset,
+            *_video_encoder_args(plan),
             "-pix_fmt",
             "yuv420p",
             *output_color_args(),

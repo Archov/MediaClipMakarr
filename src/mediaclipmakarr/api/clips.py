@@ -128,6 +128,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                 request=clip_request,
                 source_media=result.source_media,
                 x264_preset=request.app.state.effective_application_settings.x264_preset,
+                encoder=request.app.state.effective_application_settings.video_encoder,
+                video_quality=request.app.state.effective_application_settings.video_quality,
             )
             job = await enqueue_clip_create_job(
                 request.app.state.database_engine,
