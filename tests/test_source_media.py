@@ -160,6 +160,73 @@ async def test_resolve_and_probe_captures_fingerprint_duration_and_selected_audi
 
 
 @pytest.mark.asyncio
+async def test_resolve_and_probe_falls_back_to_library_metadata_when_session_omits_file_path(
+    tmp_path, monkeypatch
+) -> None:
+    """/status/sessions can omit Part.file/Part.key (observed on a paused
+    session where Plex is serving a transcode instead of the original file) —
+    the resolver must fall back to querying Plex's library metadata for the
+    same part id rather than failing outright."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    class _FakePlexClient:
+        def __init__(self, plex_url: str, plex_token: str, *, client) -> None:
+            self.plex_url = plex_url
+            self.plex_token = plex_token
+
+        async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> str:
+            assert rating_key == "501"
+            assert part_id == "part-501"
+            return "/plex/Movie.mkv"
+
+    monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        session(plex_part_file=None),
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root], ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.local_path == str(media.resolve())
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_probe_still_fails_when_library_metadata_fallback_finds_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    class _FakePlexClient:
+        def __init__(self, plex_url: str, plex_token: str, *, client) -> None:
+            pass
+
+        async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> None:
+            return None
+
+    monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)
+
+    async def runner(argv, **_kwargs):
+        raise AssertionError("ffprobe should never run without a resolved file path.")
+
+    with pytest.raises(SourceMediaError) as excinfo:
+        await resolve_and_probe_source_media(
+            session(plex_part_file=None),
+            effective_settings(tmp_path),
+            Settings(_env_file=None, source_dirs=[tmp_path], ffprobe_path=Path("test-ffprobe")),
+            run_blocking=run_blocking,
+            runner=runner,
+        )
+
+    assert excinfo.value.code == "PLEX_SOURCE_PART_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 async def test_probe_preserves_attachment_filename_and_mime_type(tmp_path) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()

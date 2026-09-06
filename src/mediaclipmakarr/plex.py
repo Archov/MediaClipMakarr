@@ -352,6 +352,41 @@ class PlexClient:
             )
         return parse_video_sessions(response.content, sampled_at=sampled_at)
 
+    async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> str | None:
+        """The on-disk file path for a media part, read from library metadata
+        rather than the active session.
+
+        `/status/sessions` omits `Part.file`/`Part.key` for some sessions —
+        observed on paused sessions where Plex isn't actively streaming the
+        original file to the player (e.g. it's serving a transcode instead) —
+        even though the same part still has a real file on disk. Library
+        metadata for the item is unaffected by what a session happens to be
+        doing right now, so it's a reliable fallback source for that path.
+        """
+        try:
+            response = await self.client.get(
+                f"{self.plex_url}/library/metadata/{rating_key}",
+                headers={"Accept": "application/xml", "X-Plex-Token": self.plex_token},
+            )
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as error:
+            raise PlexSessionError(
+                "invalid_url", "The configured Plex URL could not be used for a request."
+            ) from error
+        except httpx.RequestError as error:
+            raise PlexSessionError(
+                "unreachable", "The Plex server could not be reached at the configured URL."
+            ) from error
+        if response.status_code in {401, 403}:
+            raise PlexSessionError("invalid_token", "Plex rejected the configured token.")
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise PlexSessionError(
+                "http_error",
+                f"Plex returned HTTP {response.status_code} while loading item metadata.",
+            )
+        return parse_media_part_file(response.content, part_id=part_id)
+
     async def fetch_library_names(self) -> list[str]:
         try:
             response = await self.client.get(
@@ -374,6 +409,36 @@ class PlexClient:
                 f"Plex returned HTTP {response.status_code} while loading libraries.",
             )
         return parse_library_names(response.content)
+
+
+def parse_media_part_file(payload: bytes, *, part_id: str | None) -> str | None:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return valid item metadata XML."
+        ) from error
+    if _local_name(root) != "MediaContainer":
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return a metadata container."
+        )
+    video = next((child for child in root if _local_name(child) == "Video"), None)
+    if video is None:
+        return None
+    # Prefer the exact part the session was playing — an item can have more than
+    # one Media (version/edition), each with its own Part — falling back to the
+    # first part with a file at all only if that exact one can't be found.
+    fallback_file: str | None = None
+    for media in _children(video, "Media"):
+        for part in _children(media, "Part"):
+            file_path = part.attrib.get("file")
+            if not file_path:
+                continue
+            if part_id is not None and part.attrib.get("id") == part_id:
+                return file_path
+            if fallback_file is None:
+                fallback_file = file_path
+    return fallback_file
 
 
 def parse_library_names(payload: bytes) -> list[str]:

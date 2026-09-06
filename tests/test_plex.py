@@ -8,7 +8,13 @@ import pytest
 
 import mediaclipmakarr.plex as plex_module
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
-from mediaclipmakarr.plex import PlexSessionPoller, parse_library_names, parse_video_sessions
+from mediaclipmakarr.plex import (
+    PlexClient,
+    PlexSessionPoller,
+    parse_library_names,
+    parse_media_part_file,
+    parse_video_sessions,
+)
 from mediaclipmakarr.plex import test_plex_connection as check_plex_connection
 
 
@@ -110,6 +116,79 @@ async def test_unreachable_server_is_not_reported_as_bad_credentials() -> None:
 
     assert result.connected is False
     assert result.code == "PLEX_UNREACHABLE"
+
+
+def test_parse_media_part_file_matches_exact_part_across_media_versions() -> None:
+    # Mirrors the shape /status/sessions can have: multiple Media (versions),
+    # each with its own Part — the exact part id must win even though it's
+    # not the first file encountered.
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/wrong-version.mkv" />
+        </Media>
+        <Media id="media-501-b">
+          <Part id="part-501-b1" file="/plex/wrong-part.mkv" />
+          <Part id="part-501-b2" file="/plex/right.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    assert parse_media_part_file(payload, part_id="part-501-b2") == "/plex/right.mkv"
+
+
+def test_parse_media_part_file_falls_back_to_first_available_file() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/first.mkv" />
+        </Media>
+        <Media id="media-501-b">
+          <Part id="part-501-b" file="/plex/second.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    assert parse_media_part_file(payload, part_id="unknown-part") == "/plex/first.mkv"
+    assert parse_media_part_file(payload, part_id=None) == "/plex/first.mkv"
+
+
+def test_parse_media_part_file_returns_none_without_any_file() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a"><Part id="part-501-a" /></Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    assert parse_media_part_file(payload, part_id="part-501-a") is None
+    assert parse_media_part_file(b'<MediaContainer size="0" />', part_id="anything") is None
+
+
+@pytest.mark.asyncio
+async def test_plex_client_fetch_media_part_file_queries_library_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/library/metadata/501"
+        assert request.headers["X-Plex-Token"] == "valid-token"
+        return httpx.Response(
+            200,
+            content=(
+                b'<MediaContainer size="1"><Video ratingKey="501" type="movie">'
+                b'<Media id="media-501"><Part id="part-501" file="/plex/right.mkv" /></Media>'
+                b"</Video></MediaContainer>"
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        plex_client = PlexClient("http://plex.example:32400", "valid-token", client=client)
+        result = await plex_client.fetch_media_part_file("501", part_id="part-501")
+
+    assert result == "/plex/right.mkv"
 
 
 def test_video_session_identity_is_separate_from_media_identity() -> None:
