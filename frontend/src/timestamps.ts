@@ -3,6 +3,17 @@ export interface TimestampParseResult {
   error: string | null;
 }
 
+/** Parse an API timestamp as UTC. The backend serializes naive-but-UTC
+ * datetimes (no trailing "Z" or offset) — left to plain `Date.parse`, an
+ * offset-less ISO string is interpreted as local time instead, silently
+ * skewing any comparison against `Date.now()` by the browser's UTC offset
+ * (e.g. a "just started" job reading as hours old, or hours in the future,
+ * clamped away to look permanently frozen at zero). */
+export function parseUtcMs(value: string): number {
+  const hasTimezone = /[zZ]|[+-]\d\d:?\d\d$/.test(value);
+  return Date.parse(hasTimezone ? value : `${value}Z`);
+}
+
 const TIMESTAMP_PATTERN = /^(\d+):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$/;
 
 export function formatTimestampMs(value: number | null): string {

@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { fetchJob, fetchPlexSessions } from "../../api";
+import { parseUtcMs } from "../../timestamps";
 import type { JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
 import { computeRenderDurationMs, isRenderingJob } from "./renderDuration";
 
@@ -17,7 +18,7 @@ export function useClock(enabled: boolean): number {
 
 export function displayedPosition(session: PlexSession, now: number): number {
   if (session.state.toLowerCase() !== "playing") return session.position_ms;
-  const sampledAt = Date.parse(session.sampled_at);
+  const sampledAt = parseUtcMs(session.sampled_at);
   if (!Number.isFinite(sampledAt)) return session.position_ms;
   const extrapolated = session.position_ms + Math.max(0, now - sampledAt);
   return session.duration_ms === null ? extrapolated : Math.min(session.duration_ms, extrapolated);

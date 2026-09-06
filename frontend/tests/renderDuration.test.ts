@@ -58,6 +58,20 @@ assert.equal(
 
 assert.equal(computeRenderDurationMs(null, startedAtMs), null);
 
+// Regression: the backend actually serializes naive-but-UTC timestamps (no
+// trailing "Z"), which plain `Date.parse` would misread as local time —
+// skewing a live "now - started_at" comparison by the browser's UTC offset
+// (a live counter permanently clamped to zero was the reported symptom).
+// `nowMs` here is real UTC epoch ms, exactly like `Date.now()` in the
+// browser, deliberately NOT derived from the same naive string.
+assert.equal(
+  computeRenderDurationMs(
+    job({ state: "RUNNING", started_at: "2026-01-01T00:00:00" }),
+    Date.parse("2026-01-01T00:00:07Z"),
+  ),
+  7_000,
+);
+
 assert.equal(formatElapsedSeconds(0), "0:00");
 assert.equal(formatElapsedSeconds(7_000), "0:07");
 assert.equal(formatElapsedSeconds(59_999), "0:59");
