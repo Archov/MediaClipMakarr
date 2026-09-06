@@ -36,7 +36,8 @@ import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import type { ClipRecord } from "../../types";
 import { EditTimeline } from "../editing/EditTimeline";
 import { useGifExport } from "../gif-export/useGifExport";
-import { useJobSnapshot } from "../make-clip/hooks";
+import { useJobSnapshot, useRenderDuration } from "../make-clip/hooks";
+import { formatElapsedSeconds } from "../make-clip/renderDuration";
 import {
   canShiftTimelineBoundary,
   shiftTimelineBoundary,
@@ -221,6 +222,7 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   );
   const saving = saveMutation.isPending || jobBusy;
   const gifExport = useGifExport(clip.id);
+  const renderDurationMs = useRenderDuration(activeJob);
 
   const info = useQuery({
     queryKey: ["clip-trim-info", clip.id, clip.revision],
@@ -613,6 +615,10 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
             {activeJob && (
               <Alert severity={activeJob.state === "FAILED" ? "error" : activeJob.state === "SUCCEEDED" ? "success" : "info"}>
                 {activeJob.error?.message ?? activeJob.message}
+                {renderDurationMs !== null &&
+                  (activeJob.state === "SUCCEEDED"
+                    ? ` Rendered in ${formatElapsedSeconds(renderDurationMs)}.`
+                    : ` (${formatElapsedSeconds(renderDurationMs)} elapsed)`)}
               </Alert>
             )}
             {saveMutation.error && <Alert severity="error">{saveMutation.error.message}</Alert>}

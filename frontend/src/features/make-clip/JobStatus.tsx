@@ -34,6 +34,8 @@ import type {
   JobState,
 } from "../../types";
 import { useGifExport } from "../gif-export/useGifExport";
+import { useRenderDuration } from "./hooks";
+import { formatElapsedSeconds } from "./renderDuration";
 import {
   DeleteClipDialog,
   ImmichAssetMissingDialog,
@@ -184,6 +186,7 @@ export function JobStatus({
     },
   });
   const gifExport = useGifExport(clipId);
+  const renderDurationMs = useRenderDuration(job);
 
   useEffect(() => {
     setEditing(false);
@@ -235,7 +238,16 @@ export function JobStatus({
     ? (uploadJob?.error ? `${uploadJob.error.code}: ${uploadJob.error.message}` : uploadLabel)
     : null;
   return <Stack spacing={2}>
-    {job && !job.error && <Alert severity={severity(job.state)}>{job.message}{job.queue_position ? ` Queue position ${job.queue_position}.` : ""}</Alert>}
+    {job && !job.error && (
+      <Alert severity={severity(job.state)}>
+        {job.message}
+        {job.queue_position ? ` Queue position ${job.queue_position}.` : ""}
+        {renderDurationMs !== null &&
+          (job.state === "SUCCEEDED"
+            ? ` Rendered in ${formatElapsedSeconds(renderDurationMs)}.`
+            : ` (${formatElapsedSeconds(renderDurationMs)} elapsed)`)}
+      </Alert>
+    )}
     {job?.error && (
       <MediaErrorAlert error={job.error} onSelectAlternative={onSelectAlternative} />
     )}

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { fetchJob, fetchPlexSessions } from "../../api";
 import type { JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
+import { computeRenderDurationMs, isRenderingJob } from "./renderDuration";
 
 export function useClock(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -57,6 +58,15 @@ export function useLivePlexSessions() {
   }, [queryClient]);
 
   return sessions;
+}
+
+/** The elapsed render time to display for `job`: live and ticking while it's
+ * still rendering, frozen at the final total once it succeeds. See
+ * `computeRenderDurationMs` for the underlying (independently testable)
+ * logic. */
+export function useRenderDuration(job: JobSnapshot | null): number | null {
+  const now = useClock(isRenderingJob(job));
+  return computeRenderDurationMs(job, now);
 }
 
 export function useJobSnapshot(
