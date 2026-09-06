@@ -7,7 +7,7 @@ import pytest
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
-from mediaclipmakarr.plex import PlexPartStream, PlexSession
+from mediaclipmakarr.plex import PlexPartMetadata, PlexPartStream, PlexSession
 from mediaclipmakarr.source_media import (
     SourceMediaError,
     resolve_and_probe_source_media,
@@ -177,10 +177,12 @@ async def test_resolve_and_probe_falls_back_to_library_metadata_when_session_omi
             self.plex_url = plex_url
             self.plex_token = plex_token
 
-        async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> str:
+        async def fetch_media_part_metadata(
+            self, rating_key: str, *, part_id: str | None
+        ) -> PlexPartMetadata:
             assert rating_key == "501"
             assert part_id == "part-501"
-            return "/plex/Movie.mkv"
+            return PlexPartMetadata(file="/plex/Movie.mkv")
 
     monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)
 
@@ -199,6 +201,54 @@ async def test_resolve_and_probe_falls_back_to_library_metadata_when_session_omi
 
 
 @pytest.mark.asyncio
+async def test_resolve_and_probe_enriches_a_session_streams_missing_index_from_library_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    """A thin session can report a selected audio stream with a stable `id`
+    but no `index` at all (observed alongside the missing file path) — the
+    resolver must backfill the index from library metadata so stream
+    selection doesn't fail as ambiguous."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    class _FakePlexClient:
+        def __init__(self, plex_url: str, plex_token: str, *, client) -> None:
+            pass
+
+        async def fetch_media_part_metadata(
+            self, rating_key: str, *, part_id: str | None
+        ) -> PlexPartMetadata:
+            return PlexPartMetadata(
+                file="/plex/Movie.mkv",
+                streams=[PlexPartStream(id="stream-audio", stream_index=1, stream_type=2)],
+            )
+
+    monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    thin_session = session(
+        plex_part_file=None,
+        selected_audio_streams=[
+            PlexPartStream(id="stream-audio", stream_index=None, stream_type=2, selected=True)
+        ],
+    )
+
+    result = await resolve_and_probe_source_media(
+        thin_session,
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root], ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.selected_audio_stream.stream_index == 1
+
+
+@pytest.mark.asyncio
 async def test_resolve_and_probe_still_fails_when_library_metadata_fallback_finds_nothing(
     tmp_path, monkeypatch
 ) -> None:
@@ -206,7 +256,9 @@ async def test_resolve_and_probe_still_fails_when_library_metadata_fallback_find
         def __init__(self, plex_url: str, plex_token: str, *, client) -> None:
             pass
 
-        async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> None:
+        async def fetch_media_part_metadata(
+            self, rating_key: str, *, part_id: str | None
+        ) -> None:
             return None
 
     monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)

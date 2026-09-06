@@ -15,7 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.hdr import HdrCapabilities, VideoColorMetadata, classify_hdr
-from mediaclipmakarr.plex import PlexClient, PlexPartStream, PlexSession, PlexSessionError
+from mediaclipmakarr.plex import (
+    PlexClient,
+    PlexPartMetadata,
+    PlexPartStream,
+    PlexSession,
+    PlexSessionError,
+)
 from mediaclipmakarr.source_paths import SourcePathMapping, resolve_mapped_source_path
 from mediaclipmakarr.subprocesses import (
     CommandError,
@@ -231,15 +237,16 @@ def _resolve_existing_source_file(
     )
 
 
-async def _fetch_part_file_from_library(
+async def _fetch_part_metadata_from_library(
     session: PlexSession, effective_settings: EffectiveApplicationSettings
-) -> str | None:
-    """Fall back to Plex's library metadata for the file path a session omits.
+) -> PlexPartMetadata | None:
+    """Fall back to Plex's library metadata for what a thin session omits.
 
-    `/status/sessions` doesn't always carry `Part.file`/`Part.key` — observed
-    on a paused session where Plex isn't actively streaming the original file
-    to the player (it's serving a transcode instead) even though the part
-    still has a real file on disk. Library metadata for the item is unaffected
+    `/status/sessions` doesn't always carry `Part.file`/`Part.key`, or a
+    `Stream`'s `index` — observed on a paused session where Plex isn't
+    actively streaming the original file to the player (it's serving a
+    transcode instead) even though the part still has a real file on disk
+    with fully-indexed streams. Library metadata for the item is unaffected
     by what a session happens to be doing right now, so it's queried directly
     instead. Best-effort: any failure here just means the caller falls through
     to its usual "no file path" error, so nothing here is fatal by itself.
@@ -255,16 +262,30 @@ async def _fetch_part_file_from_library(
             plex_client = PlexClient(
                 effective_settings.plex_url, effective_settings.plex_token, client=client
             )
-            return await plex_client.fetch_media_part_file(
+            return await plex_client.fetch_media_part_metadata(
                 session.plex_rating_key, part_id=session.plex_part_id
             )
     except PlexSessionError:
         logger.warning(
-            "Could not fall back to Plex library metadata for the file path of rating key %s.",
+            "Could not fall back to Plex library metadata for rating key %s.",
             session.plex_rating_key,
             exc_info=True,
         )
         return None
+
+
+def _enrich_stream(
+    stream: PlexPartStream, library_streams: Sequence[PlexPartStream]
+) -> PlexPartStream:
+    """Backfill a stream's index from library metadata when the session's own
+    copy of it is missing one — matched by Plex's stable per-stream `id`,
+    which (unlike `index`) a thin session still reports correctly."""
+    if stream.stream_index is not None or stream.id is None:
+        return stream
+    match = next((candidate for candidate in library_streams if candidate.id == stream.id), None)
+    if match is None or match.stream_index is None:
+        return stream
+    return stream.model_copy(update={"stream_index": match.stream_index})
 
 
 async def resolve_and_probe_source_media(
@@ -278,9 +299,28 @@ async def resolve_and_probe_source_media(
     requested_subtitle_stream_index: int | None = None,
     subtitles_enabled: bool = False,
 ) -> ResolvedSourceMedia:
-    part_file = session.plex_part_file or await _fetch_part_file_from_library(
-        session, effective_settings
-    )
+    part_file = session.plex_part_file
+    if not part_file:
+        library_metadata = await _fetch_part_metadata_from_library(session, effective_settings)
+        if library_metadata is not None:
+            part_file = library_metadata.file
+            if library_metadata.streams:
+                session = session.model_copy(
+                    update={
+                        "selected_audio_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.selected_audio_streams
+                        ],
+                        "subtitle_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.subtitle_streams
+                        ],
+                        "selected_subtitle_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.selected_subtitle_streams
+                        ],
+                    }
+                )
     if not part_file:
         raise SourceMediaError(
             "PLEX_SOURCE_PART_UNAVAILABLE",

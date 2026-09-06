@@ -62,6 +62,14 @@ class PlexPartStream(BaseModel):
     selected: bool = False
 
 
+class PlexPartMetadata(BaseModel):
+    """A media part's file path and full stream list, as read from Plex
+    library metadata (see `PlexClient.fetch_media_part_metadata`)."""
+
+    file: str | None = None
+    streams: list[PlexPartStream] = Field(default_factory=list)
+
+
 class PlexSession(BaseModel):
     session_identity: str
     media_identity: str
@@ -352,16 +360,19 @@ class PlexClient:
             )
         return parse_video_sessions(response.content, sampled_at=sampled_at)
 
-    async def fetch_media_part_file(self, rating_key: str, *, part_id: str | None) -> str | None:
-        """The on-disk file path for a media part, read from library metadata
-        rather than the active session.
+    async def fetch_media_part_metadata(
+        self, rating_key: str, *, part_id: str | None
+    ) -> PlexPartMetadata | None:
+        """The on-disk file path and full stream list for a media part, read
+        from library metadata rather than the active session.
 
-        `/status/sessions` omits `Part.file`/`Part.key` for some sessions —
-        observed on paused sessions where Plex isn't actively streaming the
-        original file to the player (e.g. it's serving a transcode instead) —
-        even though the same part still has a real file on disk. Library
-        metadata for the item is unaffected by what a session happens to be
-        doing right now, so it's a reliable fallback source for that path.
+        `/status/sessions` can report a part's `Stream`s without their `file`,
+        `key`, or `index` attributes at all — observed on a paused session
+        where Plex isn't actively streaming the original file to the player
+        (it's serving a transcode instead) — even though the same part still
+        has a real file on disk with fully-indexed streams. Library metadata
+        for the item is unaffected by what a session happens to be doing
+        right now, so it's a reliable fallback source for both.
         """
         try:
             response = await self.client.get(
@@ -385,7 +396,7 @@ class PlexClient:
                 "http_error",
                 f"Plex returned HTTP {response.status_code} while loading item metadata.",
             )
-        return parse_media_part_file(response.content, part_id=part_id)
+        return parse_media_part_metadata(response.content, part_id=part_id)
 
     async def fetch_library_names(self) -> list[str]:
         try:
@@ -411,7 +422,7 @@ class PlexClient:
         return parse_library_names(response.content)
 
 
-def parse_media_part_file(payload: bytes, *, part_id: str | None) -> str | None:
+def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPartMetadata | None:
     try:
         root = ElementTree.fromstring(payload)
     except ElementTree.ParseError as error:
@@ -428,17 +439,21 @@ def parse_media_part_file(payload: bytes, *, part_id: str | None) -> str | None:
     # Prefer the exact part the session was playing — an item can have more than
     # one Media (version/edition), each with its own Part — falling back to the
     # first part with a file at all only if that exact one can't be found.
-    fallback_file: str | None = None
+    fallback: PlexPartMetadata | None = None
     for media in _children(video, "Media"):
         for part in _children(media, "Part"):
             file_path = part.attrib.get("file")
             if not file_path:
                 continue
+            metadata = PlexPartMetadata(
+                file=file_path,
+                streams=[_parse_part_stream(stream) for stream in _children(part, "Stream")],
+            )
             if part_id is not None and part.attrib.get("id") == part_id:
-                return file_path
-            if fallback_file is None:
-                fallback_file = file_path
-    return fallback_file
+                return metadata
+            if fallback is None:
+                fallback = metadata
+    return fallback
 
 
 def parse_library_names(payload: bytes) -> list[str]:
