@@ -136,12 +136,17 @@ def _build_video_filter(
     # curve as the old zscale-based chain, but ~2.6x faster on real HLG
     # content (measured locally) since it avoids the float-linear round
     # trip through gbrpf32le — verified visually equivalent output too.
+    # fps_filter goes first, before tonemapx/scale: dropping frames is cheap
+    # and shrinks the input to every expensive step downstream. Placed last,
+    # it would only discard work tonemapx already paid for on every source
+    # frame — a real bug this app shipped with, caught because a 50fps->30fps
+    # cap wasn't actually speeding anything up.
     return (
-        f"setparams=color_primaries={primaries}:color_trc={transfer}:"
+        f"{fps_filter}setparams=color_primaries={primaries}:color_trc={transfer}:"
         f"colorspace={matrix}:range={source_range},"
         "tonemapx=tonemap=mobius:param=0.3:desat=0:"
         "transfer=bt709:matrix=bt709:primaries=bt709:range=tv,"
-        f"{f'{size_filter},' if size_filter else ''}{fps_filter}format={output_pixel_format}"
+        f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
     )
 
 
@@ -179,7 +184,9 @@ def _libplacebo_fps_option(source_frame_rate: float | None, max_fps: int) -> str
 
 
 def _finish_filter(size_filter: str | None, fps_filter: str, output_pixel_format: str) -> str:
-    return f"{f'{size_filter},' if size_filter else ''}{fps_filter}format={output_pixel_format}"
+    # fps_filter first — see the comment in _build_video_filter's HDR branch;
+    # it also lets scale work on fewer frames when both apply.
+    return f"{fps_filter}{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
 
 
 def output_color_args() -> list[str]:

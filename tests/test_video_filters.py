@@ -96,6 +96,37 @@ def test_base_filter_applies_fps_cap_only_when_source_exceeds_it() -> None:
     )
 
     assert "fps=30," in graph
+    # fps must come before scale, not after — dropping frames is cheap and
+    # shrinks the input to everything downstream; applied last it would only
+    # discard work scale (or, for HDR, the much more expensive tonemapx)
+    # already did on every source frame. A real bug this app shipped with,
+    # caught because a 50fps->30fps cap wasn't actually speeding anything up.
+    assert graph.index("fps=30") < graph.index("scale=")
+
+
+def test_hdr_filter_applies_fps_cap_before_the_expensive_tonemap_step() -> None:
+    hdr = HdrCapabilities(
+        hdr10=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="smpte2084",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+
+    graph = build_video_base_filter(
+        hdr,
+        "tone_map_hdr10",
+        max_width=1920,
+        max_height=1080,
+        max_fps=30,
+        source_frame_rate=60.0,
+    )
+
+    assert "fps=30," in graph
+    assert graph.index("fps=30") < graph.index("tonemapx=")
+    assert graph.index("fps=30") < graph.index("scale=")
 
 
 def test_output_is_explicitly_tagged_limited_range_bt709() -> None:
