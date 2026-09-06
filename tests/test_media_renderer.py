@@ -130,12 +130,18 @@ def test_gpu_nvenc_render_also_requests_hardware_decode(tmp_path) -> None:
     assert "-hwaccel_output_format" not in argv
 
 
-def test_gpu_nvenc_hdr_render_uses_libplacebo_and_vulkan_decode(tmp_path) -> None:
-    """HDR content on the GPU encoder must route through libplacebo/Vulkan,
-    not NVDEC+CPU-tonemap — tonemap_cuda produces badly underexposed output
-    on real HLG content regardless of parameters (verified against a real
-    broadcast file), so this path is deliberately different from the plain
-    GPU/SDR case above."""
+def test_gpu_nvenc_hdr_render_uses_libplacebo_vulkan_decode_and_cpu_encode(
+    tmp_path,
+) -> None:
+    """HDR content on the GPU encoder must route decode+tonemap through
+    libplacebo/Vulkan, not NVDEC+CPU-tonemap — tonemap_cuda produces badly
+    underexposed output on real HLG content regardless of parameters
+    (verified against a real broadcast file). The *encode* step, though,
+    stays on libx264 even here: NVENC's efficiency gap vs x264 on this
+    (Pascal-generation) hardware widens to ~1.7x on real grainy/high-motion
+    HDR broadcast footage (vs ~1.2x on clean SDR content) — decode/tonemap
+    was the actual bottleneck, not encode, so there's nothing to gain from
+    NVENC here and a real file-size cost to keeping it."""
     plan = _plan(tmp_path, encoder="gpu_nvenc")
     hdr = HdrCapabilities(
         hlg=True,
@@ -159,3 +165,6 @@ def test_gpu_nvenc_hdr_render_uses_libplacebo_and_vulkan_decode(tmp_path) -> Non
     assert "libplacebo=" in video_filter
     assert "tonemapping=mobius" in video_filter
     assert "tonemapx=" not in video_filter
+    assert argv[argv.index("-c:v") + 1] == "libx264"
+    assert argv[argv.index("-crf") + 1] == "18"
+    assert "h264_nvenc" not in argv

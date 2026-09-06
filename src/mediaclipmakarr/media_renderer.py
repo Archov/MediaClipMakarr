@@ -133,16 +133,19 @@ def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
     Both encoders read `plan.video_quality` on the same 0-51 scale (lower is
     higher quality) — x264's CRF and NVENC's constant-QP mode are close
     enough in meaning to share one setting, even though they aren't
-    perceptually identical at the same number (NVENC on Pascal-generation
-    cards runs ~35% higher bitrate than x264 at a "matched" number, which
-    is a real, expected gap for that hardware — not a misconfiguration).
-    `-rc vbr -cq <n> -b:v 0` alone lets `-tune hq` chase quality well past
-    what `<n>` implies (measured ~3.7x the bitrate of an equivalent x264
-    CRF on real content); `-rc constqp -qp <n>` is NVENC's actual
-    constant-quality mode and doesn't have that problem.
+    perceptually identical at the same number. `-rc vbr -cq <n> -b:v 0`
+    alone lets `-tune hq` chase quality well past what `<n>` implies
+    (measured ~3.7x the bitrate of an equivalent x264 CRF on real content);
+    `-rc constqp -qp <n>` is NVENC's actual constant-quality mode and
+    doesn't have that problem — but NVENC's remaining gap vs x264 on this
+    (Pascal-generation) hardware widens substantially on real, grainy/
+    high-motion footage (measured ~1.7x on a real HDR broadcast clip, vs
+    ~1.2x on clean animated SDR content), so HDR renders skip NVENC and
+    encode via libx264 regardless of `plan.encoder` — only the GPU
+    decode/tonemap upstream (the actual bottleneck) uses the GPU there.
     """
     quality = str(plan.video_quality)
-    if plan.encoder == "gpu_nvenc":
+    if plan.encoder == "gpu_nvenc" and not _uses_gpu_hdr_tonemap(plan):
         return [
             "-c:v",
             "h264_nvenc",
