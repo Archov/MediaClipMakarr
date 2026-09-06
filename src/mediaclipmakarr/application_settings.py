@@ -38,6 +38,17 @@ VIDEO_DECODES = ("cpu", "gpu")
 VIDEO_TONEMAPS = ("cpu", "gpu")
 VIDEO_QUALITY_MIN = 0
 VIDEO_QUALITY_MAX = 51
+# Caps, never targets — a source already at or under the cap is left alone
+# (see video_filters.py's never-upscale scale/fps expressions). 16:9 pixel
+# dimensions for each tier.
+VIDEO_MAX_RESOLUTIONS = ("4k", "1080p", "720p", "480p")
+VIDEO_MAX_RESOLUTION_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "4k": (3840, 2160),
+    "1080p": (1920, 1080),
+    "720p": (1280, 720),
+    "480p": (854, 480),
+}
+VIDEO_MAX_FPS_OPTIONS = (30, 60)
 SETTING_FIELDS = (
     "plex_url",
     "plex_token",
@@ -48,6 +59,8 @@ SETTING_FIELDS = (
     "video_tonemap",
     "video_encoder",
     "video_quality",
+    "video_max_resolution",
+    "video_max_fps",
     "immich_url",
     "immich_api_key",
     "immich_default_tag",
@@ -163,6 +176,24 @@ def validate_video_quality(value: int) -> int:
     return value
 
 
+def validate_video_max_resolution(value: str) -> str:
+    value = value.strip().lower()
+    if value not in VIDEO_MAX_RESOLUTIONS:
+        raise ValueError(
+            f"Video max resolution must be one of: {', '.join(VIDEO_MAX_RESOLUTIONS)}."
+        )
+    return value
+
+
+def validate_video_max_fps(value: int) -> int:
+    if value not in VIDEO_MAX_FPS_OPTIONS:
+        raise ValueError(
+            "Video max fps must be one of: "
+            f"{', '.join(str(option) for option in VIDEO_MAX_FPS_OPTIONS)}."
+        )
+    return value
+
+
 class ApplicationSettingsResponse(BaseModel):
     plex_url: str
     plex_token_configured: bool
@@ -175,6 +206,8 @@ class ApplicationSettingsResponse(BaseModel):
     video_tonemap: str
     video_encoder: str
     video_quality: int
+    video_max_resolution: str
+    video_max_fps: int
     immich_url: str
     immich_api_key_configured: bool
     immich_default_tag: str
@@ -199,6 +232,8 @@ class ApplicationSettingsUpdate(BaseModel):
     video_tonemap: str | None = None
     video_encoder: str | None = None
     video_quality: int | None = None
+    video_max_resolution: str | None = None
+    video_max_fps: int | None = None
     immich_url: str | None = None
     immich_api_key: str | None = None
     clear_immich_api_key: bool = False
@@ -249,6 +284,16 @@ class ApplicationSettingsUpdate(BaseModel):
     def validate_quality(cls, value: int | None) -> int | None:
         return None if value is None else validate_video_quality(value)
 
+    @field_validator("video_max_resolution")
+    @classmethod
+    def validate_max_resolution(cls, value: str | None) -> str | None:
+        return None if value is None else validate_video_max_resolution(value)
+
+    @field_validator("video_max_fps")
+    @classmethod
+    def validate_max_fps(cls, value: int | None) -> int | None:
+        return None if value is None else validate_video_max_fps(value)
+
     @model_validator(mode="after")
     def validate_token_operation(self) -> ApplicationSettingsUpdate:
         if self.clear_plex_token and self.plex_token and self.plex_token.strip():
@@ -271,6 +316,8 @@ class EffectiveApplicationSettings:
     video_tonemap: str = "cpu"
     video_encoder: str = "cpu_x264"
     video_quality: int = 18
+    video_max_resolution: str = "1080p"
+    video_max_fps: int = 60
     immich_url: str = ""
     immich_api_key: str | None = None
     immich_default_tag: str = ""
@@ -293,6 +340,8 @@ class EffectiveApplicationSettings:
             video_tonemap=self.video_tonemap,
             video_encoder=self.video_encoder,
             video_quality=self.video_quality,
+            video_max_resolution=self.video_max_resolution,
+            video_max_fps=self.video_max_fps,
             immich_url=self.immich_url,
             immich_api_key_configured=bool(self.immich_api_key),
             immich_default_tag=self.immich_default_tag,
@@ -371,6 +420,10 @@ async def get_effective_application_settings(
         "video_tonemap": bootstrap.video_tonemap.strip() if bootstrap.video_tonemap else None,
         "video_encoder": bootstrap.video_encoder.strip() if bootstrap.video_encoder else None,
         "video_quality": bootstrap.video_quality,
+        "video_max_resolution": (
+            bootstrap.video_max_resolution.strip() if bootstrap.video_max_resolution else None
+        ),
+        "video_max_fps": bootstrap.video_max_fps,
         "immich_url": bootstrap.immich_url.strip() if bootstrap.immich_url else None,
         "immich_api_key": bootstrap.immich_api_key.strip() if bootstrap.immich_api_key else None,
         "immich_default_tag": (
@@ -422,6 +475,16 @@ async def get_effective_application_settings(
     if video_quality_raw is None:
         video_quality_raw = persisted.get("video_quality", "18")
     video_quality = validate_video_quality(int(video_quality_raw))
+    video_max_resolution = validate_video_max_resolution(
+        str(
+            environment_values["video_max_resolution"]
+            or persisted.get("video_max_resolution", "1080p")
+        )
+    )
+    video_max_fps_raw = environment_values["video_max_fps"]
+    if video_max_fps_raw is None:
+        video_max_fps_raw = persisted.get("video_max_fps", "60")
+    video_max_fps = validate_video_max_fps(int(video_max_fps_raw))
     token_value = environment_values["plex_token"] or persisted.get("plex_token")
     immich_api_key_value = environment_values["immich_api_key"] or persisted.get("immich_api_key")
 
@@ -444,6 +507,8 @@ async def get_effective_application_settings(
         video_tonemap=video_tonemap,
         video_encoder=video_encoder,
         video_quality=video_quality,
+        video_max_resolution=video_max_resolution,
+        video_max_fps=video_max_fps,
         immich_url=immich_url,
         immich_api_key=str(immich_api_key_value) if immich_api_key_value else None,
         immich_default_tag=str(

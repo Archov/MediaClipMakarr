@@ -10,18 +10,30 @@ from mediaclipmakarr.hdr import (
     planned_hdr_strategy,
 )
 
-_CLIP_SIZE_FILTER = (
-    "scale=w='min(1920,iw)':h='min(1080,ih)':"
-    "force_original_aspect_ratio=decrease:force_divisible_by=2"
-)
 
+def build_video_base_filter(
+    hdr: HdrCapabilities,
+    strategy: HdrRenderStrategy,
+    *,
+    max_width: int,
+    max_height: int,
+    max_fps: int,
+    source_frame_rate: float | None,
+) -> str:
+    """Return the pre-subtitle filter chain for the immutable render strategy.
 
-def build_video_base_filter(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -> str:
-    """Return the pre-subtitle filter chain for the immutable render strategy."""
+    `max_width`/`max_height`/`max_fps` are caps, never targets: the size
+    filter's `min(cap,iw)` expression only ever shrinks a larger source, and
+    the fps filter is omitted entirely (not just capped) unless the probed
+    `source_frame_rate` is actually above `max_fps` — ffmpeg's `fps` filter
+    duplicates frames to reach a rate the source doesn't have, which would
+    be exactly the upscale/interpolation this is meant to avoid.
+    """
     return _build_video_filter(
         hdr,
         strategy,
-        size_filter=_CLIP_SIZE_FILTER,
+        size_filter=_bounded_size_filter(max_width, max_height),
+        fps_filter=_fps_filter_segment(source_frame_rate, max_fps),
         output_pixel_format="yuv420p",
     )
 
@@ -45,11 +57,20 @@ def build_video_frame_filter(
         hdr,
         strategy,
         size_filter=size_filter,
+        fps_filter="",
         output_pixel_format="rgb24",
     )
 
 
-def build_video_base_filter_gpu_hdr(hdr: HdrCapabilities, strategy: HdrRenderStrategy) -> str:
+def build_video_base_filter_gpu_hdr(
+    hdr: HdrCapabilities,
+    strategy: HdrRenderStrategy,
+    *,
+    max_width: int,
+    max_height: int,
+    max_fps: int,
+    source_frame_rate: float | None,
+) -> str:
     """GPU HDR->SDR path for a full clip render: `libplacebo` does scale,
 
     tonemap, and color conversion in one GPU filter. Verified ~9.6x faster
@@ -61,15 +82,22 @@ def build_video_base_filter_gpu_hdr(hdr: HdrCapabilities, strategy: HdrRenderStr
     `libplacebo` with lower color accuracy. Only for the HDR strategies —
     callers must route `strategy == "sdr"` to the plain CPU path instead,
     since libplacebo/Vulkan buys nothing there over the existing NVDEC path.
+
+    `max_width`/`max_height`/`max_fps` are caps, never targets — same
+    never-upscale contract as `build_video_base_filter` above: the `w`/`h`
+    expressions only ever shrink, and `fps` is omitted entirely unless the
+    source is actually above it (libplacebo's `fps` option, like ffmpeg's
+    `fps` filter, has no built-in "only if higher" mode of its own).
     """
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
         raise ValueError("build_video_base_filter_gpu_hdr is only for HDR tonemap strategies.")
+    fps_option = _libplacebo_fps_option(source_frame_rate, max_fps)
     return (
-        "libplacebo=w='min(1920,iw)':h='min(1080,ih)':"
+        f"libplacebo=w='min({max_width},iw)':h='min({max_height},ih)':"
         "force_original_aspect_ratio=decrease:force_divisible_by=2:"
         "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
-        "tonemapping=mobius:tonemapping_param=0.3:format=yuv420p"
+        f"tonemapping=mobius:tonemapping_param=0.3{fps_option}:format=yuv420p"
     )
 
 
@@ -93,11 +121,12 @@ def _build_video_filter(
     strategy: HdrRenderStrategy,
     *,
     size_filter: str | None,
+    fps_filter: str,
     output_pixel_format: str,
 ) -> str:
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
-        return _finish_filter(size_filter, output_pixel_format)
+        return _finish_filter(size_filter, fps_filter, output_pixel_format)
 
     transfer = "smpte2084" if strategy == "tone_map_hdr10" else "arib-std-b67"
     primaries = _source_value(hdr.color.color_primaries, "bt2020")
@@ -112,7 +141,7 @@ def _build_video_filter(
         f"colorspace={matrix}:range={source_range},"
         "tonemapx=tonemap=mobius:param=0.3:desat=0:"
         "transfer=bt709:matrix=bt709:primaries=bt709:range=tv,"
-        f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
+        f"{f'{size_filter},' if size_filter else ''}{fps_filter}format={output_pixel_format}"
     )
 
 
@@ -125,8 +154,32 @@ def _bounded_size_filter(max_width: int, max_height: int) -> str:
     )
 
 
-def _finish_filter(size_filter: str | None, output_pixel_format: str) -> str:
-    return f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
+def _fps_filter_segment(source_frame_rate: float | None, max_fps: int) -> str:
+    """A trailing `fps=<n>,` segment, or "" when no cap is needed.
+
+    Omitted (not just capped) unless the source is actually above `max_fps`
+    — ffmpeg's `fps` filter duplicates frames to reach a rate the source
+    doesn't have, which would upscale/interpolate rather than only ever
+    downscale/sample. An unprobeable frame rate is treated the same as
+    "already under the cap": skipping the filter is always safe, applying
+    it on a guess is not.
+    """
+    if source_frame_rate is None or source_frame_rate <= max_fps:
+        return ""
+    return f"fps={max_fps},"
+
+
+def _libplacebo_fps_option(source_frame_rate: float | None, max_fps: int) -> str:
+    """A leading `:fps=<n>` option, or "" when no cap is needed — same
+    never-upscale contract as `_fps_filter_segment` above, for libplacebo's
+    own `fps` option instead of a separate `fps` filter."""
+    if source_frame_rate is None or source_frame_rate <= max_fps:
+        return ""
+    return f":fps={max_fps}"
+
+
+def _finish_filter(size_filter: str | None, fps_filter: str, output_pixel_format: str) -> str:
+    return f"{f'{size_filter},' if size_filter else ''}{fps_filter}format={output_pixel_format}"
 
 
 def output_color_args() -> list[str]:

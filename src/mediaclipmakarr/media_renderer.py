@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 
+from mediaclipmakarr.application_settings import VIDEO_MAX_RESOLUTION_DIMENSIONS
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
@@ -177,6 +178,15 @@ def _decode_uses_gpu(plan: ClipRenderPlan) -> bool:
     return plan.decode == "gpu"
 
 
+def _max_dimensions(plan: ClipRenderPlan) -> tuple[int, int]:
+    return VIDEO_MAX_RESOLUTION_DIMENSIONS[plan.max_resolution]
+
+
+def _source_frame_rate(plan: ClipRenderPlan) -> float | None:
+    capabilities = plan.source_media.capabilities
+    return capabilities.frame_rate if capabilities is not None else None
+
+
 def build_ffmpeg_clip_args(
     plan: ClipRenderPlan,
     settings: Settings,
@@ -306,10 +316,26 @@ def _subtitle_video_filter(
     preroll_seconds: float,
     prepared_text_subtitle: PreparedTextSubtitle | None,
 ) -> VideoFilterPlan:
+    max_width, max_height = _max_dimensions(plan)
+    source_frame_rate = _source_frame_rate(plan)
     base = (
-        build_video_base_filter_gpu_hdr(plan.hdr, plan.hdr_strategy)
+        build_video_base_filter_gpu_hdr(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+        )
         if _tonemap_uses_gpu(plan)
-        else build_video_base_filter(plan.hdr, plan.hdr_strategy)
+        else build_video_base_filter(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+        )
     )
     trim = (
         f"trim=start={preroll_seconds:.3f}:"

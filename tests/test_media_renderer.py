@@ -10,6 +10,7 @@ from mediaclipmakarr.media_renderer import build_ffmpeg_clip_args
 from mediaclipmakarr.plex import PlexSession
 from mediaclipmakarr.render_plan import build_clip_render_plan
 from mediaclipmakarr.source_media import (
+    MediaCapabilities,
     MediaStreamIdentity,
     ResolvedSourceMedia,
     SourceFingerprint,
@@ -25,6 +26,9 @@ def _plan(
     tonemap: str = "cpu",
     encoder: str = "cpu_x264",
     video_quality: int = 18,
+    max_resolution: str = "1080p",
+    max_fps: int = 60,
+    frame_rate: float | None = None,
 ):
     source_file = tmp_path / "Movie.mkv"
     source_file.write_bytes(b"media")
@@ -47,6 +51,16 @@ def _plan(
         subtitle_streams=[],
         selected_audio_stream=MediaStreamIdentity(
             stream_index=1, codec_type="audio", codec_name="aac"
+        ),
+        capabilities=MediaCapabilities(
+            duration_ms=10_000,
+            frame_rate=frame_rate,
+            video_tracks=[],
+            audio_tracks=[],
+            subtitle_tracks=[],
+            attachment_tracks=[],
+            default_audio_stream_index=1,
+            hdr=HdrCapabilities(),
         ),
     )
     session = PlexSession(
@@ -75,6 +89,8 @@ def _plan(
         tonemap=tonemap,
         encoder=encoder,
         video_quality=video_quality,
+        max_resolution=max_resolution,
+        max_fps=max_fps,
     )
 
 
@@ -83,6 +99,46 @@ def test_build_clip_render_plan_defaults_to_cpu_x264(tmp_path) -> None:
 
     assert plan.encoder == "cpu_x264"
     assert plan.video_quality == 18
+    assert plan.max_resolution == "1080p"
+    assert plan.max_fps == 60
+
+
+def test_max_resolution_flows_through_to_the_scale_filter(tmp_path) -> None:
+    plan = _plan(tmp_path, max_resolution="720p")
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "min(1280,iw)" in video_filter
+    assert "min(720,ih)" in video_filter
+
+
+def test_max_fps_is_omitted_when_source_frame_rate_is_at_or_under_it(tmp_path) -> None:
+    plan = _plan(tmp_path, max_fps=30, frame_rate=23.976)
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "fps=" not in argv[argv.index("-vf") + 1]
+
+
+def test_max_fps_applies_only_when_source_frame_rate_exceeds_it(tmp_path) -> None:
+    plan = _plan(tmp_path, max_fps=30, frame_rate=59.94)
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "fps=30," in argv[argv.index("-vf") + 1]
+
+
+def test_max_fps_is_omitted_when_source_frame_rate_is_unknown(tmp_path) -> None:
+    plan = _plan(tmp_path, max_fps=30, frame_rate=None)
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "fps=" not in argv[argv.index("-vf") + 1]
 
 
 def test_cpu_x264_render_uses_crf_and_configured_preset(tmp_path) -> None:

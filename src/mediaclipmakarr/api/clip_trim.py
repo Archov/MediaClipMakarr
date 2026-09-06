@@ -164,6 +164,8 @@ def build_router(application_settings: Settings) -> APIRouter:
                 tonemap=request.app.state.effective_application_settings.video_tonemap,
                 encoder=request.app.state.effective_application_settings.video_encoder,
                 video_quality=request.app.state.effective_application_settings.video_quality,
+                max_resolution=request.app.state.effective_application_settings.video_max_resolution,
+                max_fps=request.app.state.effective_application_settings.video_max_fps,
             )
             job = await enqueue_clip_create_job(request.app.state.database_engine, plan)
         except ClipEditError as error:

@@ -166,6 +166,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
                 "video_tonemap": "gpu",
                 "video_encoder": "gpu_nvenc",
                 "video_quality": "24",
+                "video_max_resolution": "4k",
+                "video_max_fps": "30",
                 "immich_url": "http://database-immich:2283",
                 "immich_api_key": "database-immich-secret",
                 "immich_default_tag": "database-tag",
@@ -189,6 +191,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
             video_tonemap="cpu",
             video_encoder="cpu_x264",
             video_quality=20,
+            video_max_resolution="1080p",
+            video_max_fps=60,
             immich_url="http://environment-immich:2283/",
             immich_api_key="environment-immich-secret",
             immich_default_tag="environment-tag",
@@ -226,6 +230,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert effective.video_tonemap == "cpu"
     assert effective.video_encoder == "cpu_x264"
     assert effective.video_quality == 20
+    assert effective.video_max_resolution == "1080p"
+    assert effective.video_max_fps == 60
     assert effective.immich_url == "http://environment-immich:2283"
     assert effective.immich_api_key == "environment-immich-secret"
     assert effective.immich_default_tag == "environment-tag"
@@ -242,6 +248,8 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert empty_overrides.video_tonemap == "gpu"
     assert empty_overrides.video_encoder == "gpu_nvenc"
     assert empty_overrides.video_quality == 24
+    assert empty_overrides.video_max_resolution == "4k"
+    assert empty_overrides.video_max_fps == 30
     assert empty_overrides.immich_url == "http://database-immich:2283"
     assert empty_overrides.immich_api_key == "database-immich-secret"
     assert empty_overrides.immich_default_tag == "database-tag"

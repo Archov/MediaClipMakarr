@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     video_tonemap: str | None = None
     video_encoder: str | None = None
     video_quality: int | None = None
+    video_max_resolution: str | None = None
+    video_max_fps: int | None = None
     immich_url: str | None = None
     immich_api_key: str | None = None
     immich_default_tag: str | None = None
@@ -78,6 +80,7 @@ class Settings(BaseSettings):
         "video_decode",
         "video_tonemap",
         "video_encoder",
+        "video_max_resolution",
         "immich_url",
         "immich_api_key",
         "immich_default_tag",

@@ -36,6 +36,8 @@ export type ApplicationSettingField =
   | "video_tonemap"
   | "video_encoder"
   | "video_quality"
+  | "video_max_resolution"
+  | "video_max_fps"
   | "immich_url"
   | "immich_api_key"
   | "immich_default_tag"
@@ -57,6 +59,8 @@ export interface ApplicationSettings {
   video_tonemap: string;
   video_encoder: string;
   video_quality: number;
+  video_max_resolution: string;
+  video_max_fps: number;
   immich_url: string;
   immich_api_key_configured: boolean;
   immich_default_tag: string;
@@ -79,6 +83,8 @@ export interface ApplicationSettingsUpdate {
   video_tonemap?: string;
   video_encoder?: string;
   video_quality?: number;
+  video_max_resolution?: string;
+  video_max_fps?: number;
   immich_url?: string;
   immich_api_key?: string;
   clear_immich_api_key?: boolean;
