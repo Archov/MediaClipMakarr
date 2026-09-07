@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -55,6 +55,29 @@ class ClipCreateRequest(BaseModel):
     audio_stream_index: int | None = None
     subtitle_stream_index: int | None = None
     subtitles_enabled: bool = False
+    # A specific pixel crop box computed client-side by the /crop-detect
+    # endpoint (either auto-detected or derived from a chosen aspect ratio) —
+    # applied exactly as previewed, never recomputed at render time.
+    crop_width: int | None = None
+    crop_height: int | None = None
+    crop_x: int | None = None
+    crop_y: int | None = None
+
+    @model_validator(mode="after")
+    def crop_fields_are_all_or_nothing(self) -> ClipCreateRequest:
+        values = (self.crop_width, self.crop_height, self.crop_x, self.crop_y)
+        if any(value is not None for value in values) and any(
+            value is None for value in values
+        ):
+            raise ValueError("crop_width, crop_height, crop_x, and crop_y must be set together.")
+        return self
+
+    @property
+    def crop_box(self) -> tuple[int, int, int, int] | None:
+        if self.crop_width is None:
+            return None
+        assert self.crop_height is not None and self.crop_x is not None and self.crop_y is not None
+        return self.crop_width, self.crop_height, self.crop_x, self.crop_y
 
 
 class ClipCreateValidationResult(BaseModel):
@@ -214,14 +237,16 @@ async def insert_clip(engine: AsyncEngine, clip: dict[str, object]) -> None:
                 "created_at, updated_at, custom_title, automatic_title, movie_title, "
                 "movie_year, show_name, "
                 "episode_title, season_number, episode_number, clip_number, plex_username, "
-                "file_size_bytes, file_modified_ns) "
+                "file_size_bytes, file_modified_ns, "
+                "crop_width, crop_height, crop_x, crop_y) "
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
                 ":render_plan_hash, :parent_clip_id, :created_at, :updated_at, :custom_title, "
                 ":automatic_title, :movie_title, "
                 ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
-                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
+                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns, "
+                ":crop_width, :crop_height, :crop_x, :crop_y)"
             ),
             _insert_values(clip),
         )
@@ -240,14 +265,16 @@ async def insert_clip_if_missing(engine: AsyncEngine, clip: dict[str, object]) -
                 "created_at, updated_at, custom_title, automatic_title, movie_title, "
                 "movie_year, show_name, "
                 "episode_title, season_number, episode_number, clip_number, plex_username, "
-                "file_size_bytes, file_modified_ns) "
+                "file_size_bytes, file_modified_ns, "
+                "crop_width, crop_height, crop_x, crop_y) "
                 "VALUES (:id, :title, :library, :media_type, :file_path, :duration_ms, "
                 ":revision, :source_start_ms, :source_end_ms, :source_path, "
                 ":source_size_bytes, :source_modified_at, :selected_audio_stream_index, "
                 ":render_plan_hash, :parent_clip_id, :created_at, :updated_at, :custom_title, "
                 ":automatic_title, :movie_title, "
                 ":movie_year, :show_name, :episode_title, :season_number, :episode_number, "
-                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns)"
+                ":clip_number, :plex_username, :file_size_bytes, :file_modified_ns, "
+                ":crop_width, :crop_height, :crop_x, :crop_y)"
             ),
             _insert_values(clip),
         )
@@ -268,6 +295,10 @@ def _insert_values(clip: dict[str, object]) -> dict[str, object]:
         "file_size_bytes": None,
         "file_modified_ns": None,
         "parent_clip_id": None,
+        "crop_width": None,
+        "crop_height": None,
+        "crop_x": None,
+        "crop_y": None,
         **clip,
     }
 

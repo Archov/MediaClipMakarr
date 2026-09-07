@@ -317,6 +317,7 @@ def _subtitle_video_filter(
             max_height=max_height,
             max_fps=plan.max_fps,
             source_frame_rate=source_frame_rate,
+            crop=plan.crop_box,
         )
         if _tonemap_uses_gpu(plan)
         else build_video_base_filter(
@@ -326,6 +327,7 @@ def _subtitle_video_filter(
             max_height=max_height,
             max_fps=plan.max_fps,
             source_frame_rate=source_frame_rate,
+            crop=plan.crop_box,
         )
     )
     trim = (

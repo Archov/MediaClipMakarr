@@ -185,6 +185,35 @@ export interface ClipCreateRequest {
   audio_stream_index?: number | null;
   subtitle_stream_index?: number | null;
   subtitles_enabled?: boolean;
+  crop_width?: number | null;
+  crop_height?: number | null;
+  crop_x?: number | null;
+  crop_y?: number | null;
+}
+
+export interface CropBox {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+}
+
+export interface CropDetectRequest {
+  start_ms: number;
+  end_ms: number;
+  aspect_ratio?: string | null;
+}
+
+export interface CropDetectResponse {
+  source_width: number;
+  source_height: number;
+  crop: CropBox | null;
+  aspect_ratio_fraction: string | null;
+  aspect_ratio_decimal: string | null;
+}
+
+export interface AspectRatioOverrideResponse {
+  aspect_ratio: string | null;
 }
 
 export interface SourceFingerprint {

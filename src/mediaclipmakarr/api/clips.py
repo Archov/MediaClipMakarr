@@ -134,6 +134,7 @@ def build_router(application_settings: Settings) -> APIRouter:
                 video_quality=request.app.state.effective_application_settings.video_quality,
                 max_resolution=request.app.state.effective_application_settings.video_max_resolution,
                 max_fps=request.app.state.effective_application_settings.video_max_fps,
+                crop=clip_request.crop_box,
             )
             job = await enqueue_clip_create_job(
                 request.app.state.database_engine,

@@ -74,6 +74,10 @@ class ClipRenderPlan(BaseModel):
     video_quality: int = 18
     max_resolution: str = "1080p"
     max_fps: int = 60
+    crop_width: int | None = None
+    crop_height: int | None = None
+    crop_x: int | None = None
+    crop_y: int | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
     operation: Literal["create", "trim_new", "trim_replace"] = "create"
@@ -87,6 +91,13 @@ class ClipRenderPlan(BaseModel):
     provenance_end_ms: int | None = None
     provenance_audio_stream_index: int | None = None
     clip_created_at: datetime | None = None
+
+    @property
+    def crop_box(self) -> tuple[int, int, int, int] | None:
+        if self.crop_width is None:
+            return None
+        assert self.crop_height is not None and self.crop_x is not None and self.crop_y is not None
+        return self.crop_width, self.crop_height, self.crop_x, self.crop_y
 
     @model_validator(mode="before")
     @classmethod
@@ -111,6 +122,7 @@ def build_clip_render_plan(
     video_quality: int = 18,
     max_resolution: str = "1080p",
     max_fps: int = 60,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> ClipRenderPlan:
     hdr = (
         source_media.capabilities.hdr
@@ -181,6 +193,10 @@ def build_clip_render_plan(
         "video_quality": video_quality,
         "max_resolution": max_resolution,
         "max_fps": max_fps,
+        "crop_width": crop[0] if crop is not None else None,
+        "crop_height": crop[1] if crop is not None else None,
+        "crop_x": crop[2] if crop is not None else None,
+        "crop_y": crop[3] if crop is not None else None,
         "render_plan_hash": "",
     }
     plan = ClipRenderPlan.model_validate(payload)

@@ -42,8 +42,9 @@ def test_session_frame_endpoint_exports_the_validated_full_resolution_variant(
         _settings,
         *,
         run_blocking,
+        crop=None,
     ):
-        del run_blocking
+        del run_blocking, crop
         rendered_variants.append(variant)
         work_dir = tmp_path / "frame-work"
         work_dir.mkdir()

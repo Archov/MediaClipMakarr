@@ -807,6 +807,10 @@ async def commit_clip_replacement(
             "thumbnail_path",
             "thumbnail_source_size",
             "thumbnail_source_modified_ns",
+            "crop_width",
+            "crop_height",
+            "crop_x",
+            "crop_y",
         )
         assignments = ", ".join(f"{field} = :{field}" for field in fields)
         result = await connection.execute(

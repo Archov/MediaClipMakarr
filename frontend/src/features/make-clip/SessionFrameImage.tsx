@@ -6,10 +6,12 @@ export function SessionFrameImage({
   source,
   alt,
   width,
+  aspectRatio = "16 / 9",
 }: {
   source: string;
   alt: string;
   width: number | string;
+  aspectRatio?: string;
 }) {
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
   useEffect(() => setStatus("loading"), [source]);
@@ -20,7 +22,7 @@ export function SessionFrameImage({
         position: "relative",
         width,
         maxWidth: "100%",
-        aspectRatio: "16 / 9",
+        aspectRatio,
         bgcolor: "black",
         borderRadius: 1,
         overflow: "hidden",

@@ -113,6 +113,14 @@ def build_trim_render_plan(
         "video_quality": video_quality,
         "max_resolution": max_resolution,
         "max_fps": max_fps,
+        # A trim re-renders from the original source file at the parent
+        # clip's absolute source range, not from the already-cropped output —
+        # so the parent's crop (if any) must be reapplied for the trimmed
+        # result to still be cropped the same way.
+        "crop_width": parent.get("crop_width"),
+        "crop_height": parent.get("crop_height"),
+        "crop_x": parent.get("crop_x"),
+        "crop_y": parent.get("crop_y"),
         "render_plan_hash": "",
         "operation": "trim_replace" if replacing else "trim_new",
         "parent_clip_id": parent.get("parent_clip_id") if replacing else parent["id"],
