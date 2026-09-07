@@ -437,9 +437,11 @@ def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPar
     if video is None:
         return None
     # Prefer the exact part the session was playing — an item can have more than
-    # one Media (version/edition), each with its own Part — falling back to the
-    # first part with a file at all only if that exact one can't be found.
-    fallback: PlexPartMetadata | None = None
+    # one Media (version/edition), each with its own Part. When the exact part
+    # can't be identified, only fall back if there's a single unambiguous
+    # candidate: guessing among multiple editions/resolutions/language versions
+    # could silently render a completely different file than what's playing.
+    candidates: list[PlexPartMetadata] = []
     for media in _children(video, "Media"):
         for part in _children(media, "Part"):
             file_path = part.attrib.get("file")
@@ -451,9 +453,8 @@ def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPar
             )
             if part_id is not None and part.attrib.get("id") == part_id:
                 return metadata
-            if fallback is None:
-                fallback = metadata
-    return fallback
+            candidates.append(metadata)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def parse_library_names(payload: bytes) -> list[str]:

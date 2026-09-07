@@ -146,8 +146,31 @@ def test_parse_media_part_metadata_matches_exact_part_across_media_versions() ->
     assert metadata.streams[0].stream_index == 1
 
 
-def test_parse_media_part_metadata_falls_back_to_first_available_file() -> None:
-    payload = b"""
+def test_parse_media_part_metadata_falls_back_only_when_unambiguous() -> None:
+    single_version = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/only.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    unmatched = parse_media_part_metadata(single_version, part_id="unknown-part")
+    assert unmatched is not None
+    assert unmatched.file == "/plex/only.mkv"
+    no_part_id = parse_media_part_metadata(single_version, part_id=None)
+    assert no_part_id is not None
+    assert no_part_id.file == "/plex/only.mkv"
+
+
+def test_parse_media_part_metadata_refuses_to_guess_among_multiple_versions() -> None:
+    # Multiple Media (versions/editions), and the part id doesn't match any of
+    # them — silently picking one could render a different edition/resolution/
+    # language version than what's actually playing, so this must return None
+    # rather than guess.
+    multiple_versions = b"""
     <MediaContainer size="1">
       <Video ratingKey="501" title="A Movie" type="movie">
         <Media id="media-501-a">
@@ -160,8 +183,8 @@ def test_parse_media_part_metadata_falls_back_to_first_available_file() -> None:
     </MediaContainer>
     """
 
-    assert parse_media_part_metadata(payload, part_id="unknown-part").file == "/plex/first.mkv"
-    assert parse_media_part_metadata(payload, part_id=None).file == "/plex/first.mkv"
+    assert parse_media_part_metadata(multiple_versions, part_id="unknown-part") is None
+    assert parse_media_part_metadata(multiple_versions, part_id=None) is None
 
 
 def test_parse_media_part_metadata_returns_none_without_any_file() -> None:
