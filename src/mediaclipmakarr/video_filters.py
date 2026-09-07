@@ -85,19 +85,27 @@ def build_video_base_filter_gpu_hdr(
 
     `max_width`/`max_height`/`max_fps` are caps, never targets — same
     never-upscale contract as `build_video_base_filter` above: the `w`/`h`
-    expressions only ever shrink, and `fps` is omitted entirely unless the
-    source is actually above it (libplacebo's `fps` option, like ffmpeg's
-    `fps` filter, has no built-in "only if higher" mode of its own).
+    expressions only ever shrink, and the fps cap is omitted entirely unless
+    the source is actually above it.
+
+    The fps cap is deliberately a *separate* `fps=` filter appended after
+    libplacebo, never libplacebo's own `fps` option. Verified on a real
+    HLG broadcast file (decode itself clean, 0 errors): libplacebo's native
+    `fps` option silently dropped every single frame — 0 encoded — while
+    moving the identical cap to a plain trailing `fps=` filter produced the
+    correct frame count with no other change. A real bug in libplacebo's
+    own frame-rate handling on some real-world content, not a config issue.
     """
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
         raise ValueError("build_video_base_filter_gpu_hdr is only for HDR tonemap strategies.")
-    fps_option = _libplacebo_fps_option(source_frame_rate, max_fps)
+    fps_filter = _fps_filter_segment(source_frame_rate, max_fps)
+    fps_suffix = f",{fps_filter.rstrip(',')}" if fps_filter else ""
     return (
         f"libplacebo=w='min({max_width},iw)':h='min({max_height},ih)':"
         "force_original_aspect_ratio=decrease:force_divisible_by=2:"
         "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
-        f"tonemapping=mobius:tonemapping_param=0.3{fps_option}:format=yuv420p"
+        f"tonemapping=mobius:tonemapping_param=0.3:format=yuv420p{fps_suffix}"
     )
 
 
@@ -172,15 +180,6 @@ def _fps_filter_segment(source_frame_rate: float | None, max_fps: int) -> str:
     if source_frame_rate is None or source_frame_rate <= max_fps:
         return ""
     return f"fps={max_fps},"
-
-
-def _libplacebo_fps_option(source_frame_rate: float | None, max_fps: int) -> str:
-    """A leading `:fps=<n>` option, or "" when no cap is needed — same
-    never-upscale contract as `_fps_filter_segment` above, for libplacebo's
-    own `fps` option instead of a separate `fps` filter."""
-    if source_frame_rate is None or source_frame_rate <= max_fps:
-        return ""
-    return f":fps={max_fps}"
 
 
 def _finish_filter(size_filter: str | None, fps_filter: str, output_pixel_format: str) -> str:

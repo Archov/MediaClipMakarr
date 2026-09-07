@@ -222,13 +222,17 @@ def test_gpu_encoder_alone_does_not_imply_gpu_decode(tmp_path) -> None:
     assert argv[argv.index("-c:v") + 1] == "h264_nvenc"
 
 
-def test_hdr_tonemap_gpu_with_gpu_decode_uses_libplacebo_vulkan_decode(
+def test_hdr_tonemap_gpu_with_gpu_decode_uses_libplacebo_and_nvdec(
     tmp_path,
 ) -> None:
-    """HDR content with GPU decode+tonemap must route through libplacebo/
-    Vulkan, not NVDEC+CPU-tonemap — tonemap_cuda produces badly underexposed
-    output on real HLG content regardless of parameters (verified against a
-    real broadcast file)."""
+    """HDR content with GPU decode+tonemap must route tonemap through
+    libplacebo/Vulkan (tonemap_cuda produces badly underexposed output on
+    real HLG content regardless of parameters), but decode deliberately
+    stays on NVDEC (`-hwaccel cuda`), never `-hwaccel vulkan`. Verified on a
+    real HEVC/HLG broadcast file: Vulkan decode hung for 10 minutes spewing
+    VK_ERROR_OUT_OF_DEVICE_MEMORY on content that both software decode and
+    NVDEC handled cleanly at the identical timestamp — a genuine ffmpeg
+    Vulkan-decode reliability gap, not something fixable in this app."""
     plan = _hdr_plan(tmp_path, decode="gpu", tonemap="gpu", encoder="cpu_x264")
     settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
 
@@ -236,8 +240,8 @@ def test_hdr_tonemap_gpu_with_gpu_decode_uses_libplacebo_vulkan_decode(
 
     assert argv[argv.index("-init_hw_device") + 1] == "vulkan=vk:0"
     assert argv[argv.index("-filter_hw_device") + 1] == "vk"
-    assert argv[argv.index("-hwaccel") + 1] == "vulkan"
-    assert argv[argv.index("-hwaccel_output_format") + 1] == "vulkan"
+    assert argv[argv.index("-hwaccel") + 1] == "cuda"
+    assert "-hwaccel_output_format" not in argv
     video_filter = argv[argv.index("-vf") + 1]
     assert "libplacebo=" in video_filter
     assert "tonemapping=mobius" in video_filter

@@ -240,7 +240,13 @@ def test_gpu_hdr_filter_applies_fps_cap_only_when_source_exceeds_it() -> None:
     )
 
     assert "fps=" not in under_cap
-    assert ":fps=30" in over_cap
+    # A separate trailing filter *after* format=yuv420p, never libplacebo's
+    # own `fps` option (which would appear before format=). Verified on
+    # real content that libplacebo's native fps handling can silently drop
+    # every single frame; a plain fps= filter placed after it doesn't. Do
+    # not "simplify" this back into a libplacebo option.
+    assert over_cap.endswith(",fps=30")
+    assert over_cap.index("format=yuv420p") < over_cap.index("fps=30")
 
 
 def test_gpu_hdr_filter_rejects_sdr_strategy() -> None:

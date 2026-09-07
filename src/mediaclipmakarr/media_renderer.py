@@ -209,35 +209,26 @@ def build_ffmpeg_clip_args(
     ]
     tonemap_gpu = _tonemap_uses_gpu(plan)
     decode_gpu = _decode_uses_gpu(plan)
-    if tonemap_gpu and decode_gpu:
-        # libplacebo needs its own Vulkan device context, separate from the
-        # NVDEC/CUDA hwaccel below — decode goes through Vulkan too so
-        # frames never leave GPU memory before libplacebo's tonemap+scale.
-        argv += [
-            "-init_hw_device",
-            "vulkan=vk:0",
-            "-filter_hw_device",
-            "vk",
-            "-hwaccel",
-            "vulkan",
-            "-hwaccel_output_format",
-            "vulkan",
-        ]
-    elif tonemap_gpu:
-        # GPU tonemap with CPU decode: libplacebo uploads plain system-memory
-        # frames to its own Vulkan device internally (verified working), so
-        # only the device context is needed here, not a decode hwaccel.
+    # Deliberately never `-hwaccel vulkan -hwaccel_output_format vulkan` for
+    # decode, even when both decode and tonemap are "gpu": Vulkan HEVC
+    # decode is a genuine ffmpeg reliability gap, confirmed on real content —
+    # it hung for 10 minutes spewing VK_ERROR_OUT_OF_DEVICE_MEMORY on a file
+    # that both plain software decode and NVDEC/CUDA decoded cleanly at the
+    # identical timestamp. NVDEC (`-hwaccel cuda`) has been reliable across
+    # everything tested this session, so it's used for all GPU decode
+    # regardless of tonemap choice; libplacebo uploads the resulting plain
+    # system-memory frames to its own Vulkan device internally when tonemap
+    # is GPU (verified working — its `w`/`h`/`fps`/`tonemapping` chain
+    # doesn't care whether the source is a decode hwaccel or software decode).
+    if tonemap_gpu:
         argv += ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"]
-    elif decode_gpu:
-        # NVDEC hardware decode. Deliberately not paired with
-        # -hwaccel_output_format cuda: frames come back to ordinary system
-        # memory just like software decode would, so the CPU-side filter
-        # chain below (scale, subtitle burn-in, HDR tonemap) needs no
-        # changes. This is the actual dominant cost for a 4K/HEVC SDR
-        # source — h264_nvenc alone only offloads the encode, which is the
-        # smaller half of the work. ffmpeg's hwaccel negotiation falls back
-        # to software decode on its own for a source NVDEC can't handle, so
-        # this doesn't risk failing a render outright.
+    if decode_gpu:
+        # Not paired with -hwaccel_output_format cuda: frames come back to
+        # ordinary system memory just like software decode would, so the
+        # filter chain that follows (CPU tonemapx, or libplacebo's own
+        # upload) needs no changes either way. ffmpeg's hwaccel negotiation
+        # falls back to software decode on its own for a source NVDEC can't
+        # handle, so this doesn't risk failing a render outright.
         argv += ["-hwaccel", "cuda"]
     argv += [
         "-ss",
