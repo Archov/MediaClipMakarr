@@ -214,7 +214,7 @@ export function CropControls({
           </Tooltip>
         )}
       </Stack>
-      {enabled && detected && (
+      {enabled && ratioChoice === "auto" && detected && (
         <Typography variant="body2" color="text.secondary">
           Detected aspect ratio: <strong>{detected.fraction}</strong> ({detected.decimal})
         </Typography>
