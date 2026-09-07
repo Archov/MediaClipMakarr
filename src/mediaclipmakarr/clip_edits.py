@@ -113,14 +113,12 @@ def build_trim_render_plan(
         "video_quality": video_quality,
         "max_resolution": max_resolution,
         "max_fps": max_fps,
-        # A trim re-renders from the original source file at the parent
-        # clip's absolute source range, not from the already-cropped output —
-        # so the parent's crop (if any) must be reapplied for the trimmed
-        # result to still be cropped the same way.
-        "crop_width": parent.get("crop_width"),
-        "crop_height": parent.get("crop_height"),
-        "crop_x": parent.get("crop_x"),
-        "crop_y": parent.get("crop_y"),
+        # A trim decodes from the already-rendered managed clip file
+        # (`probe_managed_media_file`), not the original pristine source —
+        # so it's already cropped, scaled, and tonemapped. Applying the
+        # parent's crop again here would crop a frame that's already the
+        # cropped-and-scaled size, which is invalid whenever the crop box
+        # (sized for the original source) exceeds the now-smaller input.
         "render_plan_hash": "",
         "operation": "trim_replace" if replacing else "trim_new",
         "parent_clip_id": parent.get("parent_clip_id") if replacing else parent["id"],
