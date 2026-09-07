@@ -7,7 +7,7 @@ Deploy target info
     - deploy.env```
 ```
 
-Confirm deploy worked by navigating to `http://192.168.0.111:3623`
+Confirm deploy worked by navigating to `https://mcm.capsule-corp.me/` using the Claude in Chrome browser extension (the `mcp__claude-in-chrome__*` tools — the user's real, logged-in Chrome), not the sandboxed Browser pane. Check that the app loads and that the served JS bundle filename (`/assets/index-*.js`) matches the hash from the deploy's own build output.
 Always create branches under `claude\*`
 
 Only run the full test suite before a commit, push, deploy. It doesn't need run every change for every turn.

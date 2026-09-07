@@ -45,8 +45,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY --from=media-tools /opt/jellyfin-ffmpeg /opt/jellyfin-ffmpeg
 # Compose may override USER, so fontconfig needs readable system data and an arbitrary-UID cache.
+# libvulkan1/libegl1/libxext6: the Vulkan loader and its transitive deps for
+# jellyfin-ffmpeg's libplacebo GPU HDR tonemap filter. nvidia-container-toolkit
+# mounts the NVIDIA Vulkan ICD/driver libraries into the container already
+# (confirmed present without any compose.yaml GPU config) but not the generic
+# Vulkan loader itself; libGLX_nvidia.so.0 additionally fails to resolve its
+# vkCreateInstance entry point in a headless container without libEGL present
+# (a known nvidia-container-toolkit quirk: github.com/NVIDIA/nvidia-container-toolkit/issues/1952).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends \
+        fontconfig fonts-dejavu-core libvulkan1 libegl1 libxext6 \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache --force \
     && fc-match --format='%{family}\n' sans-serif | grep --fixed-strings --quiet 'DejaVu Sans' \

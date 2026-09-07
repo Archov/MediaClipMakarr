@@ -43,6 +43,12 @@ def build_trim_render_plan(
     render_source_stat: stat_result,
     *,
     x264_preset: str,
+    decode: str = "cpu",
+    tonemap: str = "cpu",
+    encoder: str = "cpu_x264",
+    video_quality: int = 18,
+    max_resolution: str = "1080p",
+    max_fps: int = 60,
 ) -> ClipRenderPlan:
     revision = int(parent["revision"])
     duration_ms = int(parent["duration_ms"])
@@ -101,6 +107,12 @@ def build_trim_render_plan(
         "hdr": hdr,
         "hdr_strategy": planned_hdr_strategy(hdr),
         "x264_preset": x264_preset,
+        "decode": decode,
+        "tonemap": tonemap,
+        "encoder": encoder,
+        "video_quality": video_quality,
+        "max_resolution": max_resolution,
+        "max_fps": max_fps,
         "render_plan_hash": "",
         "operation": "trim_replace" if replacing else "trim_new",
         "parent_clip_id": parent.get("parent_clip_id") if replacing else parent["id"],

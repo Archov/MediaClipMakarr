@@ -98,6 +98,54 @@ async def test_default_x264_preset_is_veryfast(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_video_encoder_and_quality(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        effective = await get_effective_application_settings(engine, Settings(_env_file=None))
+    finally:
+        await engine.dispose()
+
+    assert effective.video_encoder == "cpu_x264"
+    assert effective.video_quality == 18
+
+
+def test_video_encoder_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="Video encoder must be one of"):
+        ApplicationSettingsUpdate(video_encoder="quicksync")
+
+
+def test_video_quality_rejects_out_of_range_values() -> None:
+    with pytest.raises(ValueError, match="between 0 and 51"):
+        ApplicationSettingsUpdate(video_quality=52)
+    with pytest.raises(ValueError, match="between 0 and 51"):
+        ApplicationSettingsUpdate(video_quality=-1)
+
+
+@pytest.mark.asyncio
+async def test_video_quality_of_zero_is_a_real_override_not_treated_as_unset(
+    tmp_path,
+) -> None:
+    """0 is the highest-quality end of the CRF/CQ scale and a legitimate value —
+    a naive `env_value or default` check would treat it as falsy and silently
+    fall through to the default/persisted value instead."""
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    try:
+        await save_persisted_application_settings(engine, {"video_quality": "30"})
+        effective = await get_effective_application_settings(
+            engine, Settings(_env_file=None, video_quality=0)
+        )
+    finally:
+        await engine.dispose()
+
+    assert effective.video_quality == 0
+    assert effective.environment_managed["video_quality"] is True
+
+
+@pytest.mark.asyncio
 async def test_non_empty_environment_values_override_persisted_settings(tmp_path) -> None:
     database_path = tmp_path / "application.db"
     upgrade_database(database_path)
@@ -114,6 +162,12 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
                 ),
                 "timezone": "Europe/London",
                 "x264_preset": "slow",
+                "video_decode": "gpu",
+                "video_tonemap": "gpu",
+                "video_encoder": "gpu_nvenc",
+                "video_quality": "24",
+                "video_max_resolution": "4k",
+                "video_max_fps": "30",
                 "immich_url": "http://database-immich:2283",
                 "immich_api_key": "database-immich-secret",
                 "immich_default_tag": "database-tag",
@@ -133,6 +187,12 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
             ),
             timezone="America/Chicago",
             x264_preset="fast",
+            video_decode="cpu",
+            video_tonemap="cpu",
+            video_encoder="cpu_x264",
+            video_quality=20,
+            video_max_resolution="1080p",
+            video_max_fps=60,
             immich_url="http://environment-immich:2283/",
             immich_api_key="environment-immich-secret",
             immich_default_tag="environment-tag",
@@ -166,6 +226,12 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert effective.source_path_mappings[0].plex_prefix == "D:/Media"
     assert effective.timezone == "America/Chicago"
     assert effective.x264_preset == "fast"
+    assert effective.video_decode == "cpu"
+    assert effective.video_tonemap == "cpu"
+    assert effective.video_encoder == "cpu_x264"
+    assert effective.video_quality == 20
+    assert effective.video_max_resolution == "1080p"
+    assert effective.video_max_fps == 60
     assert effective.immich_url == "http://environment-immich:2283"
     assert effective.immich_api_key == "environment-immich-secret"
     assert effective.immich_default_tag == "environment-tag"
@@ -178,6 +244,12 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert empty_overrides.plex_url == "http://database-plex:32400"
     assert empty_overrides.plex_token == "database-secret"
     assert empty_overrides.x264_preset == "slow"
+    assert empty_overrides.video_decode == "gpu"
+    assert empty_overrides.video_tonemap == "gpu"
+    assert empty_overrides.video_encoder == "gpu_nvenc"
+    assert empty_overrides.video_quality == 24
+    assert empty_overrides.video_max_resolution == "4k"
+    assert empty_overrides.video_max_fps == 30
     assert empty_overrides.immich_url == "http://database-immich:2283"
     assert empty_overrides.immich_api_key == "database-immich-secret"
     assert empty_overrides.immich_default_tag == "database-tag"

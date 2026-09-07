@@ -17,6 +17,12 @@ services:
       MCM_SOURCE_PATH_MAPPINGS: '${MCM_SOURCE_PATH_MAPPINGS:-}'
       MCM_TIMEZONE: "${MCM_TIMEZONE:-}"
       MCM_X264_PRESET: "${MCM_X264_PRESET:-}"
+      MCM_VIDEO_DECODE: "${MCM_VIDEO_DECODE:-}"
+      MCM_VIDEO_TONEMAP: "${MCM_VIDEO_TONEMAP:-}"
+      MCM_VIDEO_ENCODER: "${MCM_VIDEO_ENCODER:-}"
+      MCM_VIDEO_QUALITY: "${MCM_VIDEO_QUALITY:-}"
+      MCM_VIDEO_MAX_RESOLUTION: "${MCM_VIDEO_MAX_RESOLUTION:-}"
+      MCM_VIDEO_MAX_FPS: "${MCM_VIDEO_MAX_FPS:-}"
       MCM_ALEMBIC_INI_PATH: "${MCM_ALEMBIC_INI_PATH:-/app/alembic.ini}"
       MCM_ALEMBIC_SCRIPT_DIR: "${MCM_ALEMBIC_SCRIPT_DIR:-/app/alembic}"
       MCM_DEV_API_PORT: "${MCM_DEV_API_PORT:-8000}"
@@ -26,3 +32,14 @@ services:
       - "${MCM_DATA:?Set MCM_DATA to the host directory for database, work, and clips.}:/data/"
       - "${MCM_COMPOSE_SOURCE_DIR:-./sources}:/media:ro"
     restart: unless-stopped
+    # GPU passthrough for the gpu_nvenc video encoder (NVDEC/NVENC decode+encode
+    # and the libplacebo GPU HDR tonemap path). Uncomment for local docker-compose
+    # testing on a machine with an NVIDIA GPU and nvidia-container-toolkit
+    # installed — the actual deploy target grants this outside of compose.yaml.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

@@ -13,10 +13,15 @@ from pathlib import Path
 
 import httpx
 
+from mediaclipmakarr.application_settings import VIDEO_MAX_RESOLUTION_DIMENSIONS
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
-from mediaclipmakarr.video_filters import build_video_base_filter, output_color_args
+from mediaclipmakarr.video_filters import (
+    build_video_base_filter,
+    build_video_base_filter_gpu_hdr,
+    output_color_args,
+)
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 logger = logging.getLogger(__name__)
@@ -123,6 +128,65 @@ def _cleanup_failed_output_path(output_dir: Path, preserve_workdir: bool) -> Non
     shutil.rmtree(output_dir, ignore_errors=True)
 
 
+def _video_encoder_args(plan: ClipRenderPlan) -> list[str]:
+    """The `-c:v` and quality/preset flags for `plan.encoder`.
+
+    Both encoders read `plan.video_quality` on the same 0-51 scale (lower is
+    higher quality) — x264's CRF and NVENC's constant-QP mode are close
+    enough in meaning to share one setting, even though they aren't
+    perceptually identical at the same number. `-rc vbr -cq <n> -b:v 0`
+    alone lets `-tune hq` chase quality well past what `<n>` implies
+    (measured ~3.7x the bitrate of an equivalent x264 CRF on real content);
+    `-rc constqp -qp <n>` is NVENC's actual constant-quality mode and
+    doesn't have that problem. NVENC's remaining gap vs x264 on this
+    (Pascal-generation) hardware still widens substantially on real, grainy/
+    high-motion footage (measured ~1.7x on a real HDR broadcast clip, vs
+    ~1.2x on clean animated SDR content) — decode/tonemap/encode are three
+    independent settings for exactly this reason, so a user chasing file
+    size can pick GPU decode/tonemap with CPU encode instead of assuming
+    encoder choice must match the rest of the chain.
+    """
+    quality = str(plan.video_quality)
+    if plan.encoder == "gpu_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-rc",
+            "constqp",
+            "-qp",
+            quality,
+            "-preset",
+            "p6",
+            "-tune",
+            "hq",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-crf",
+        quality,
+        "-preset",
+        plan.x264_preset,
+    ]
+
+
+def _tonemap_uses_gpu(plan: ClipRenderPlan) -> bool:
+    return plan.tonemap == "gpu" and plan.hdr_strategy != "sdr"
+
+
+def _decode_uses_gpu(plan: ClipRenderPlan) -> bool:
+    return plan.decode == "gpu"
+
+
+def _max_dimensions(plan: ClipRenderPlan) -> tuple[int, int]:
+    return VIDEO_MAX_RESOLUTION_DIMENSIONS[plan.max_resolution]
+
+
+def _source_frame_rate(plan: ClipRenderPlan) -> float | None:
+    capabilities = plan.source_media.capabilities
+    return capabilities.frame_rate if capabilities is not None else None
+
+
 def build_ffmpeg_clip_args(
     plan: ClipRenderPlan,
     settings: Settings,
@@ -142,6 +206,31 @@ def build_ffmpeg_clip_args(
         os.fspath(settings.ffmpeg_path),
         "-hide_banner",
         "-y",
+    ]
+    tonemap_gpu = _tonemap_uses_gpu(plan)
+    decode_gpu = _decode_uses_gpu(plan)
+    # Deliberately never `-hwaccel vulkan -hwaccel_output_format vulkan` for
+    # decode, even when both decode and tonemap are "gpu": Vulkan HEVC
+    # decode is a genuine ffmpeg reliability gap, confirmed on real content —
+    # it hung for 10 minutes spewing VK_ERROR_OUT_OF_DEVICE_MEMORY on a file
+    # that both plain software decode and NVDEC/CUDA decoded cleanly at the
+    # identical timestamp. NVDEC (`-hwaccel cuda`) has been reliable across
+    # everything tested this session, so it's used for all GPU decode
+    # regardless of tonemap choice; libplacebo uploads the resulting plain
+    # system-memory frames to its own Vulkan device internally when tonemap
+    # is GPU (verified working — its `w`/`h`/`fps`/`tonemapping` chain
+    # doesn't care whether the source is a decode hwaccel or software decode).
+    if tonemap_gpu:
+        argv += ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"]
+    if decode_gpu:
+        # Not paired with -hwaccel_output_format cuda: frames come back to
+        # ordinary system memory just like software decode would, so the
+        # filter chain that follows (CPU tonemapx, or libplacebo's own
+        # upload) needs no changes either way. ffmpeg's hwaccel negotiation
+        # falls back to software decode on its own for a source NVDEC can't
+        # handle, so this doesn't risk failing a render outright.
+        argv += ["-hwaccel", "cuda"]
+    argv += [
         "-ss",
         f"{start_seconds:.3f}",
         # Input option: decode only the requested range plus any subtitle preroll.
@@ -175,12 +264,7 @@ def build_ffmpeg_clip_args(
             "-map",
             subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
             "-sn",
-            "-c:v",
-            "libx264",
-            "-crf",
-            "18",
-            "-preset",
-            plan.x264_preset,
+            *_video_encoder_args(plan),
             "-pix_fmt",
             "yuv420p",
             *output_color_args(),
@@ -223,7 +307,27 @@ def _subtitle_video_filter(
     preroll_seconds: float,
     prepared_text_subtitle: PreparedTextSubtitle | None,
 ) -> VideoFilterPlan:
-    base = build_video_base_filter(plan.hdr, plan.hdr_strategy)
+    max_width, max_height = _max_dimensions(plan)
+    source_frame_rate = _source_frame_rate(plan)
+    base = (
+        build_video_base_filter_gpu_hdr(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+        )
+        if _tonemap_uses_gpu(plan)
+        else build_video_base_filter(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+        )
+    )
     trim = (
         f"trim=start={preroll_seconds:.3f}:"
         f"duration={_duration_seconds(plan):.3f},setpts=PTS-STARTPTS"

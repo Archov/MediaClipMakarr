@@ -62,6 +62,14 @@ class PlexPartStream(BaseModel):
     selected: bool = False
 
 
+class PlexPartMetadata(BaseModel):
+    """A media part's file path and full stream list, as read from Plex
+    library metadata (see `PlexClient.fetch_media_part_metadata`)."""
+
+    file: str | None = None
+    streams: list[PlexPartStream] = Field(default_factory=list)
+
+
 class PlexSession(BaseModel):
     session_identity: str
     media_identity: str
@@ -352,6 +360,44 @@ class PlexClient:
             )
         return parse_video_sessions(response.content, sampled_at=sampled_at)
 
+    async def fetch_media_part_metadata(
+        self, rating_key: str, *, part_id: str | None
+    ) -> PlexPartMetadata | None:
+        """The on-disk file path and full stream list for a media part, read
+        from library metadata rather than the active session.
+
+        `/status/sessions` can report a part's `Stream`s without their `file`,
+        `key`, or `index` attributes at all — observed on a paused session
+        where Plex isn't actively streaming the original file to the player
+        (it's serving a transcode instead) — even though the same part still
+        has a real file on disk with fully-indexed streams. Library metadata
+        for the item is unaffected by what a session happens to be doing
+        right now, so it's a reliable fallback source for both.
+        """
+        try:
+            response = await self.client.get(
+                f"{self.plex_url}/library/metadata/{rating_key}",
+                headers={"Accept": "application/xml", "X-Plex-Token": self.plex_token},
+            )
+        except (httpx.InvalidURL, httpx.UnsupportedProtocol) as error:
+            raise PlexSessionError(
+                "invalid_url", "The configured Plex URL could not be used for a request."
+            ) from error
+        except httpx.RequestError as error:
+            raise PlexSessionError(
+                "unreachable", "The Plex server could not be reached at the configured URL."
+            ) from error
+        if response.status_code in {401, 403}:
+            raise PlexSessionError("invalid_token", "Plex rejected the configured token.")
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise PlexSessionError(
+                "http_error",
+                f"Plex returned HTTP {response.status_code} while loading item metadata.",
+            )
+        return parse_media_part_metadata(response.content, part_id=part_id)
+
     async def fetch_library_names(self) -> list[str]:
         try:
             response = await self.client.get(
@@ -374,6 +420,41 @@ class PlexClient:
                 f"Plex returned HTTP {response.status_code} while loading libraries.",
             )
         return parse_library_names(response.content)
+
+
+def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPartMetadata | None:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return valid item metadata XML."
+        ) from error
+    if _local_name(root) != "MediaContainer":
+        raise PlexSessionError(
+            "invalid_response", "Plex did not return a metadata container."
+        )
+    video = next((child for child in root if _local_name(child) == "Video"), None)
+    if video is None:
+        return None
+    # Prefer the exact part the session was playing — an item can have more than
+    # one Media (version/edition), each with its own Part. When the exact part
+    # can't be identified, only fall back if there's a single unambiguous
+    # candidate: guessing among multiple editions/resolutions/language versions
+    # could silently render a completely different file than what's playing.
+    candidates: list[PlexPartMetadata] = []
+    for media in _children(video, "Media"):
+        for part in _children(media, "Part"):
+            file_path = part.attrib.get("file")
+            if not file_path:
+                continue
+            metadata = PlexPartMetadata(
+                file=file_path,
+                streams=[_parse_part_stream(stream) for stream in _children(part, "Stream")],
+            )
+            if part_id is not None and part.attrib.get("id") == part_id:
+                return metadata
+            candidates.append(metadata)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def parse_library_names(payload: bytes) -> list[str]:

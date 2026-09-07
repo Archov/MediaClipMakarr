@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,12 +9,19 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.hdr import HdrCapabilities, VideoColorMetadata, classify_hdr
-from mediaclipmakarr.plex import PlexPartStream, PlexSession
+from mediaclipmakarr.plex import (
+    PlexClient,
+    PlexPartMetadata,
+    PlexPartStream,
+    PlexSession,
+    PlexSessionError,
+)
 from mediaclipmakarr.source_paths import SourcePathMapping, resolve_mapped_source_path
 from mediaclipmakarr.subprocesses import (
     CommandError,
@@ -21,6 +29,8 @@ from mediaclipmakarr.subprocesses import (
     CommandResult,
     run_command,
 )
+
+logger = logging.getLogger(__name__)
 
 SourceMediaErrorCode = Literal[
     "PLEX_SOURCE_PART_UNAVAILABLE",
@@ -227,6 +237,77 @@ def _resolve_existing_source_file(
     )
 
 
+async def _fetch_part_metadata_from_library(
+    session: PlexSession, effective_settings: EffectiveApplicationSettings
+) -> PlexPartMetadata | None:
+    """Fall back to Plex's library metadata for what a thin session omits.
+
+    `/status/sessions` doesn't always carry `Part.file`/`Part.key`, or a
+    `Stream`'s `index` — observed on a paused session where Plex isn't
+    actively streaming the original file to the player (it's serving a
+    transcode instead) even though the part still has a real file on disk
+    with fully-indexed streams. Library metadata for the item is unaffected
+    by what a session happens to be doing right now, so it's queried directly
+    instead. Best-effort: any failure here just means the caller falls through
+    to its usual "no file path" error, so nothing here is fatal by itself.
+    """
+    if (
+        not session.plex_rating_key
+        or not effective_settings.plex_url
+        or not effective_settings.plex_token
+    ):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            plex_client = PlexClient(
+                effective_settings.plex_url, effective_settings.plex_token, client=client
+            )
+            return await plex_client.fetch_media_part_metadata(
+                session.plex_rating_key, part_id=session.plex_part_id
+            )
+    except PlexSessionError:
+        logger.warning(
+            "Could not fall back to Plex library metadata for rating key %s.",
+            session.plex_rating_key,
+            exc_info=True,
+        )
+        return None
+
+
+def _enrich_stream(
+    stream: PlexPartStream, library_streams: Sequence[PlexPartStream]
+) -> PlexPartStream:
+    """Backfill a stream's index from library metadata when the session's own
+    copy of it is missing one — matched by Plex's stable per-stream `id`,
+    which (unlike `index`) a thin session still reports correctly."""
+    if stream.stream_index is not None or stream.id is None:
+        return stream
+    match = next((candidate for candidate in library_streams if candidate.id == stream.id), None)
+    if match is None or match.stream_index is None:
+        return stream
+    return stream.model_copy(update={"stream_index": match.stream_index})
+
+
+def _needs_stream_enrichment(session: PlexSession) -> bool:
+    """True if some selected stream is missing an index that library metadata
+
+    could backfill — a thin session can omit `Stream.index` even when
+    `Part.file` is present (they aren't always missing together), so the
+    library-metadata fetch must trigger on this independently of `part_file`,
+    or `_select_audio_stream`/`_select_subtitle_stream` can raise
+    AUDIO_STREAM_AMBIGUOUS/SUBTITLE_STREAM_UNAVAILABLE despite the fix being a
+    single already-fetched piece of metadata away.
+    """
+    return any(
+        stream.stream_index is None and stream.id is not None
+        for stream in (
+            *session.selected_audio_streams,
+            *session.subtitle_streams,
+            *session.selected_subtitle_streams,
+        )
+    )
+
+
 async def resolve_and_probe_source_media(
     session: PlexSession,
     effective_settings: EffectiveApplicationSettings,
@@ -238,7 +319,30 @@ async def resolve_and_probe_source_media(
     requested_subtitle_stream_index: int | None = None,
     subtitles_enabled: bool = False,
 ) -> ResolvedSourceMedia:
-    if not session.plex_part_file:
+    part_file = session.plex_part_file
+    if not part_file or _needs_stream_enrichment(session):
+        library_metadata = await _fetch_part_metadata_from_library(session, effective_settings)
+        if library_metadata is not None:
+            if not part_file:
+                part_file = library_metadata.file
+            if library_metadata.streams:
+                session = session.model_copy(
+                    update={
+                        "selected_audio_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.selected_audio_streams
+                        ],
+                        "subtitle_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.subtitle_streams
+                        ],
+                        "selected_subtitle_streams": [
+                            _enrich_stream(stream, library_metadata.streams)
+                            for stream in session.selected_subtitle_streams
+                        ],
+                    }
+                )
+    if not part_file:
         raise SourceMediaError(
             "PLEX_SOURCE_PART_UNAVAILABLE",
             "Plex did not report a file path for the active media part.",
@@ -247,7 +351,7 @@ async def resolve_and_probe_source_media(
 
     source_file = await run_blocking(
         _resolve_existing_source_file,
-        session.plex_part_file,
+        part_file,
         effective_settings.source_path_mappings,
         bootstrap_settings.resolved_source_dirs,
     )
@@ -279,7 +383,7 @@ async def resolve_and_probe_source_media(
     )
 
     return ResolvedSourceMedia(
-        plex_path=session.plex_part_file,
+        plex_path=part_file,
         local_path=str(source_file.path),
         fingerprint=source_file.fingerprint,
         duration_ms=_duration_ms(probe),

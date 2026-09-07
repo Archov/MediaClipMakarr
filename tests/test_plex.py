@@ -8,7 +8,13 @@ import pytest
 
 import mediaclipmakarr.plex as plex_module
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
-from mediaclipmakarr.plex import PlexSessionPoller, parse_library_names, parse_video_sessions
+from mediaclipmakarr.plex import (
+    PlexClient,
+    PlexSessionPoller,
+    parse_library_names,
+    parse_media_part_metadata,
+    parse_video_sessions,
+)
 from mediaclipmakarr.plex import test_plex_connection as check_plex_connection
 
 
@@ -110,6 +116,113 @@ async def test_unreachable_server_is_not_reported_as_bad_credentials() -> None:
 
     assert result.connected is False
     assert result.code == "PLEX_UNREACHABLE"
+
+
+def test_parse_media_part_metadata_matches_exact_part_across_media_versions() -> None:
+    # Mirrors the shape /status/sessions can have: multiple Media (versions),
+    # each with its own Part — the exact part id must win even though it's
+    # not the first file encountered.
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/wrong-version.mkv" />
+        </Media>
+        <Media id="media-501-b">
+          <Part id="part-501-b1" file="/plex/wrong-part.mkv" />
+          <Part id="part-501-b2" file="/plex/right.mkv">
+            <Stream id="stream-1" streamType="2" index="1" codec="flac" />
+          </Part>
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    metadata = parse_media_part_metadata(payload, part_id="part-501-b2")
+
+    assert metadata is not None
+    assert metadata.file == "/plex/right.mkv"
+    assert metadata.streams[0].id == "stream-1"
+    assert metadata.streams[0].stream_index == 1
+
+
+def test_parse_media_part_metadata_falls_back_only_when_unambiguous() -> None:
+    single_version = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/only.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    unmatched = parse_media_part_metadata(single_version, part_id="unknown-part")
+    assert unmatched is not None
+    assert unmatched.file == "/plex/only.mkv"
+    no_part_id = parse_media_part_metadata(single_version, part_id=None)
+    assert no_part_id is not None
+    assert no_part_id.file == "/plex/only.mkv"
+
+
+def test_parse_media_part_metadata_refuses_to_guess_among_multiple_versions() -> None:
+    # Multiple Media (versions/editions), and the part id doesn't match any of
+    # them — silently picking one could render a different edition/resolution/
+    # language version than what's actually playing, so this must return None
+    # rather than guess.
+    multiple_versions = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a">
+          <Part id="part-501-a" file="/plex/first.mkv" />
+        </Media>
+        <Media id="media-501-b">
+          <Part id="part-501-b" file="/plex/second.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    assert parse_media_part_metadata(multiple_versions, part_id="unknown-part") is None
+    assert parse_media_part_metadata(multiple_versions, part_id=None) is None
+
+
+def test_parse_media_part_metadata_returns_none_without_any_file() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Media id="media-501-a"><Part id="part-501-a" /></Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    assert parse_media_part_metadata(payload, part_id="part-501-a") is None
+    assert parse_media_part_metadata(b'<MediaContainer size="0" />', part_id="anything") is None
+
+
+@pytest.mark.asyncio
+async def test_plex_client_fetch_media_part_metadata_queries_library_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/library/metadata/501"
+        assert request.headers["X-Plex-Token"] == "valid-token"
+        return httpx.Response(
+            200,
+            content=(
+                b'<MediaContainer size="1"><Video ratingKey="501" type="movie">'
+                b'<Media id="media-501"><Part id="part-501" file="/plex/right.mkv">'
+                b'<Stream id="stream-1" streamType="2" index="1" codec="flac" />'
+                b"</Part></Media>"
+                b"</Video></MediaContainer>"
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        plex_client = PlexClient("http://plex.example:32400", "valid-token", client=client)
+        result = await plex_client.fetch_media_part_metadata("501", part_id="part-501")
+
+    assert result is not None
+    assert result.file == "/plex/right.mkv"
+    assert result.streams[0].stream_index == 1
 
 
 def test_video_session_identity_is_separate_from_media_identity() -> None:

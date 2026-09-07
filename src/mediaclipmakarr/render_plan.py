@@ -68,6 +68,12 @@ class ClipRenderPlan(BaseModel):
     hdr_strategy: HdrRenderStrategy = "sdr"
     output_profile: OutputProfileId = "p2-h264-aac-sdr-v1"
     x264_preset: str
+    decode: str = "cpu"
+    tonemap: str = "cpu"
+    encoder: str = "cpu_x264"
+    video_quality: int = 18
+    max_resolution: str = "1080p"
+    max_fps: int = 60
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     render_plan_hash: str
     operation: Literal["create", "trim_new", "trim_replace"] = "create"
@@ -99,6 +105,12 @@ def build_clip_render_plan(
     request: ClipCreateRequest,
     source_media: ResolvedSourceMedia,
     x264_preset: str,
+    decode: str = "cpu",
+    tonemap: str = "cpu",
+    encoder: str = "cpu_x264",
+    video_quality: int = 18,
+    max_resolution: str = "1080p",
+    max_fps: int = 60,
 ) -> ClipRenderPlan:
     hdr = (
         source_media.capabilities.hdr
@@ -163,6 +175,12 @@ def build_clip_render_plan(
         "hdr": hdr,
         "hdr_strategy": planned_hdr_strategy(hdr),
         "x264_preset": x264_preset,
+        "decode": decode,
+        "tonemap": tonemap,
+        "encoder": encoder,
+        "video_quality": video_quality,
+        "max_resolution": max_resolution,
+        "max_fps": max_fps,
         "render_plan_hash": "",
     }
     plan = ClipRenderPlan.model_validate(payload)

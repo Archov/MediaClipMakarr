@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     source_path_mappings: str | None = None
     timezone: str | None = None
     x264_preset: str | None = None
+    video_decode: str | None = None
+    video_tonemap: str | None = None
+    video_encoder: str | None = None
+    video_quality: int | None = None
+    video_max_resolution: str | None = None
+    video_max_fps: int | None = None
     immich_url: str | None = None
     immich_api_key: str | None = None
     immich_default_tag: str | None = None
@@ -71,6 +77,12 @@ class Settings(BaseSettings):
         "source_path_mappings",
         "timezone",
         "x264_preset",
+        "video_decode",
+        "video_tonemap",
+        "video_encoder",
+        "video_quality",
+        "video_max_resolution",
+        "video_max_fps",
         "immich_url",
         "immich_api_key",
         "immich_default_tag",
