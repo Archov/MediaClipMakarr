@@ -249,6 +249,58 @@ async def test_resolve_and_probe_enriches_a_session_streams_missing_index_from_l
 
 
 @pytest.mark.asyncio
+async def test_resolve_and_probe_enriches_streams_even_when_part_file_is_present(
+    tmp_path, monkeypatch
+) -> None:
+    """A session can report `Part.file` just fine while a selected stream's
+    `index` is still missing — the two aren't always missing together — so
+    the library-metadata fetch must trigger on the stream gap alone. Without
+    it, a movie with more than one audio track would fail as
+    AUDIO_STREAM_AMBIGUOUS despite Plex's own selection being resolvable via
+    the stream's stable `id`."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    class _FakePlexClient:
+        def __init__(self, plex_url: str, plex_token: str, *, client) -> None:
+            pass
+
+        async def fetch_media_part_metadata(
+            self, rating_key: str, *, part_id: str | None
+        ) -> PlexPartMetadata:
+            return PlexPartMetadata(
+                file="/plex/Movie.mkv",
+                streams=[PlexPartStream(id="stream-audio", stream_index=2, stream_type=2)],
+            )
+
+    monkeypatch.setattr("mediaclipmakarr.source_media.PlexClient", _FakePlexClient)
+
+    async def runner(argv, **_kwargs):
+        return CommandResult(
+            tuple(str(value) for value in argv), 0, probe_payload(audio_indexes=(1, 2)), ""
+        )
+
+    non_thin_session = session(
+        plex_part_file="/plex/Movie.mkv",
+        selected_audio_streams=[
+            PlexPartStream(id="stream-audio", stream_index=None, stream_type=2, selected=True)
+        ],
+    )
+
+    result = await resolve_and_probe_source_media(
+        non_thin_session,
+        effective_settings(source_root),
+        Settings(_env_file=None, source_dirs=[source_root], ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.selected_audio_stream.stream_index == 2
+
+
+@pytest.mark.asyncio
 async def test_resolve_and_probe_still_fails_when_library_metadata_fallback_finds_nothing(
     tmp_path, monkeypatch
 ) -> None:

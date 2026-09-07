@@ -288,6 +288,26 @@ def _enrich_stream(
     return stream.model_copy(update={"stream_index": match.stream_index})
 
 
+def _needs_stream_enrichment(session: PlexSession) -> bool:
+    """True if some selected stream is missing an index that library metadata
+
+    could backfill — a thin session can omit `Stream.index` even when
+    `Part.file` is present (they aren't always missing together), so the
+    library-metadata fetch must trigger on this independently of `part_file`,
+    or `_select_audio_stream`/`_select_subtitle_stream` can raise
+    AUDIO_STREAM_AMBIGUOUS/SUBTITLE_STREAM_UNAVAILABLE despite the fix being a
+    single already-fetched piece of metadata away.
+    """
+    return any(
+        stream.stream_index is None and stream.id is not None
+        for stream in (
+            *session.selected_audio_streams,
+            *session.subtitle_streams,
+            *session.selected_subtitle_streams,
+        )
+    )
+
+
 async def resolve_and_probe_source_media(
     session: PlexSession,
     effective_settings: EffectiveApplicationSettings,
@@ -300,10 +320,11 @@ async def resolve_and_probe_source_media(
     subtitles_enabled: bool = False,
 ) -> ResolvedSourceMedia:
     part_file = session.plex_part_file
-    if not part_file:
+    if not part_file or _needs_stream_enrichment(session):
         library_metadata = await _fetch_part_metadata_from_library(session, effective_settings)
         if library_metadata is not None:
-            part_file = library_metadata.file
+            if not part_file:
+                part_file = library_metadata.file
             if library_metadata.streams:
                 session = session.model_copy(
                     update={
