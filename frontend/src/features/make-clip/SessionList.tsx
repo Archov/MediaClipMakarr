@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 
 import { sessionFrameUrl } from "../../api";
 import type { PlexSession, PlexSessionSnapshot } from "../../types";
+import { useSavedCropForSession } from "./hooks";
 import { SessionDetail } from "./SessionDetail";
 import { SessionFrameImage } from "./SessionFrameImage";
 import {
@@ -21,11 +22,14 @@ function SessionFramePreview({ session, capture }: {
   session: PlexSession;
   capture: SessionFrameCapture;
 }) {
+  const crop = useSavedCropForSession(session.session_identity, capture.mediaIdentity);
   const source = sessionFrameUrl(
     session.session_identity,
     capture.mediaIdentity,
     capture.positionMs,
     capture.captureVersion,
+    false,
+    crop,
   );
 
   return (
@@ -34,6 +38,7 @@ function SessionFramePreview({ session, capture }: {
         source={source}
         alt={`Captured frame from ${session.title}`}
         width="100%"
+        aspectRatio={crop ? `${crop.width} / ${crop.height}` : "16 / 9"}
       />
     </Box>
   );

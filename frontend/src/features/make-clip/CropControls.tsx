@@ -89,7 +89,11 @@ export function CropControls({
   // loading: a permanently "loading" thumbnail even though every individual
   // request succeeds. Waiting for input to settle avoids that pile-up.
   useEffect(() => {
-    if (!enabled || startMs === null || endMs === null || endMs <= startMs) {
+    const hasRange = startMs !== null && endMs !== null && endMs > startMs;
+    // Auto mode samples near both Start and End, so it needs a real range.
+    // A fixed ratio only needs the source's dimensions — not a range — so
+    // it can (and should) still crop the Start preview before End is set.
+    if (!enabled || startMs === null || (ratioChoice === "auto" && !hasRange)) {
       setLoading(false);
       setDetected(null);
       setError(null);
@@ -102,7 +106,7 @@ export function CropControls({
       const requestId = ++requestIdRef.current;
       detectCrop(sessionIdentity, {
         start_ms: startMs,
-        end_ms: endMs,
+        end_ms: hasRange && endMs !== null ? endMs : startMs + 1,
         aspect_ratio: ratioChoice,
       })
         .then((response) => {

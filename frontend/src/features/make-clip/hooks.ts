@@ -1,9 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import { fetchJob, fetchPlexSessions } from "../../api";
+import { detectCrop, fetchAspectRatioOverride, fetchJob, fetchPlexSessions } from "../../api";
 import { parseUtcMs } from "../../timestamps";
-import type { JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
+import type { CropBox, JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
 import { computeRenderDurationMs, isRenderingJob } from "./renderDuration";
 
 export function useClock(enabled: boolean): number {
@@ -59,6 +59,43 @@ export function useLivePlexSessions() {
   }, [queryClient]);
 
   return sessions;
+}
+
+/** The crop box for a show/movie's saved aspect-ratio override, or `null` if
+ * none is set — the ratio needs no time range to compute, only the source's
+ * dimensions, so this works before Start/End (or even a session selection
+ * for a clip) has been captured. Used to crop live "stream" preview
+ * thumbnails and the boundary-editor Start preview ahead of any detection. */
+export function useSavedCropForSession(
+  sessionIdentity: string,
+  mediaIdentity: string,
+): CropBox | null {
+  const [crop, setCrop] = useState<CropBox | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCrop(null);
+    fetchAspectRatioOverride(sessionIdentity)
+      .then((override) => {
+        if (cancelled || !override.aspect_ratio) return null;
+        return detectCrop(sessionIdentity, {
+          start_ms: 0,
+          end_ms: 1,
+          aspect_ratio: override.aspect_ratio,
+        });
+      })
+      .then((result) => {
+        if (!cancelled && result) setCrop(result.crop);
+      })
+      .catch(() => {
+        // No saved override, or Plex/lookup unavailable — no crop.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionIdentity, mediaIdentity]);
+
+  return crop;
 }
 
 /** The elapsed render time to display for `job`: live and ticking while it's
