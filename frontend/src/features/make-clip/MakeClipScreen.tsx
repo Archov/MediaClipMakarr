@@ -57,7 +57,7 @@ export function MakeClipScreen() {
   const [startInput, setStartInput] = useState("");
   const [endInput, setEndInput] = useState("");
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
-  const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
+  const [audioStreamIndex, setAudioStreamIndex] = useState<number | "" | "off">("");
   const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [crop, setCrop] = useState<CropBox | null>(null);
@@ -182,7 +182,9 @@ export function MakeClipScreen() {
       media_identity: selectedMediaIdentity,
       start_ms: startMs,
       end_ms: endMs,
-      audio_stream_index: audioStreamIndex === "" ? null : Number(audioStreamIndex),
+      audio_stream_index:
+        audioStreamIndex === "" || audioStreamIndex === "off" ? null : Number(audioStreamIndex),
+      audio_disabled: audioStreamIndex === "off",
       subtitle_stream_index:
         subtitlesEnabled && subtitleStreamIndex !== "" ? Number(subtitleStreamIndex) : null,
       subtitles_enabled: subtitlesEnabled,

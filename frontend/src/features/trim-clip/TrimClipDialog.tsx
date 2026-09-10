@@ -1,6 +1,4 @@
 import AddLocationAltRounded from "@mui/icons-material/AddLocationAltRounded";
-import ArrowBackIosRounded from "@mui/icons-material/ArrowBackIosRounded";
-import ArrowForwardIosRounded from "@mui/icons-material/ArrowForwardIosRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import GifRounded from "@mui/icons-material/GifRounded";
@@ -21,7 +19,6 @@ import {
   IconButton,
   LinearProgress,
   Stack,
-  TextField,
   Tooltip,
   Typography,
   useMediaQuery,
@@ -29,11 +26,11 @@ import {
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
 
 import { fetchClipTrimInfo, saveClipTrim } from "../../api";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import type { ClipRecord } from "../../types";
+import { ACCENT_BLUE, FrameNudgeButton, TimestampField } from "../editing/BoundaryFieldControls";
 import { EditTimeline } from "../editing/EditTimeline";
 import { useGifExport } from "../gif-export/useGifExport";
 import { useJobSnapshot, useRenderDuration } from "../make-clip/hooks";
@@ -45,133 +42,9 @@ import {
 } from "../editing/timelineMath";
 import { clampTrimRange, shouldStopPreview, validateTrimValue } from "./trimSelection";
 
-// Matches the theme-matched accent blue used elsewhere in the app (see
-// IMMICH_ICON_BLUE in LibraryScreen.tsx).
-const ACCENT_BLUE = "#61a6fa";
-
 interface TrimClipDialogProps {
   clip: ClipRecord;
   onClose: () => void;
-}
-
-interface TimestampFieldProps {
-  id: string;
-  label: string;
-  value: string;
-  error: string | null;
-  onChange: (value: string) => void;
-  onFocus: () => void;
-  onBlur: () => void;
-  startAdornment?: ReactNode;
-  endAdornment?: ReactNode;
-}
-
-function TimestampField({
-  id,
-  label,
-  value,
-  error,
-  onChange,
-  onFocus,
-  onBlur,
-  startAdornment,
-  endAdornment,
-}: TimestampFieldProps) {
-  return (
-    <TextField
-      id={id}
-      label={label}
-      value={value}
-      error={Boolean(error)}
-      helperText={error}
-      onChange={(event) => onChange(event.target.value)}
-      onFocus={onFocus}
-      onBlur={onBlur}
-      size="small"
-      slotProps={{
-        input: { startAdornment, endAdornment },
-        htmlInput: {
-          style: { width: "12ch", textAlign: "center", fontVariantNumeric: "tabular-nums" },
-        },
-      }}
-      sx={{
-        width: "fit-content",
-        // Centers the label over the input instead of MUI's default left-aligned
-        // notch, by centering the real notch (the fieldset's `legend`, which
-        // natively cuts the border gap) rather than hiding it behind a faked
-        // background patch — the latter can't match this theme's dark-mode Paper
-        // elevation overlay, which layers a translucent gradient over the base
-        // background color rather than being one flat color.
-        "& .MuiInputLabel-root": {
-          right: 0,
-          textAlign: "center",
-        },
-        "& .MuiInputLabel-shrink": {
-          left: 0,
-          right: 0,
-          width: "fit-content",
-          margin: "0 auto",
-          whiteSpace: "nowrap",
-          textAlign: "center",
-          // MUI's default shrink transform is translate(14px, -9px) scale(0.75).
-          // The -9px vertical offset is what correctly bisects the border line, so
-          // it's kept as-is; the 14px horizontal offset is dropped since it fights
-          // the left/right/margin centering above. transformOrigin must also move
-          // to the element's center — MUI's default is the top-left corner, which
-          // scales the box toward that corner instead of shrinking it in place,
-          // silently un-centering it.
-          transform: "translate(0, -9px) scale(0.75)",
-          transformOrigin: "center",
-        },
-        "& .MuiOutlinedInput-root legend": {
-          float: "none",
-          margin: "0 auto",
-          // MUI sets the notch width via an inline style, which needs !important
-          // to override.
-          width: "fit-content !important",
-        },
-      }}
-    />
-  );
-}
-
-interface FrameNudgeButtonProps {
-  boundary: "Start" | "End";
-  direction: "backward" | "forward";
-  disabled: boolean;
-  onClick: () => void;
-  onArrowNudge: (direction: -1 | 1) => void;
-}
-
-function FrameNudgeButton({ boundary, direction, disabled, onClick, onArrowNudge }: FrameNudgeButtonProps) {
-  const backward = direction === "backward";
-  return (
-    <Tooltip title={`Move ${boundary} ${direction} one nominal frame`}>
-      <span>
-        <IconButton
-          aria-label={`Move ${boundary} ${direction} one frame`}
-          disabled={disabled}
-          onClick={onClick}
-          onKeyDown={(event) => {
-            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-            event.preventDefault();
-            onArrowNudge(event.key === "ArrowLeft" ? -1 : 1);
-          }}
-          size="small"
-          sx={{
-            p: 0,
-            color: disabled ? "text.disabled" : ACCENT_BLUE,
-          }}
-        >
-          {backward ? (
-            <ArrowBackIosRounded style={{ fontSize: 32 }} />
-          ) : (
-            <ArrowForwardIosRounded style={{ fontSize: 32 }} />
-          )}
-        </IconButton>
-      </span>
-    </Tooltip>
-  );
 }
 
 export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
@@ -474,6 +347,8 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     boundary="Start"
                     direction="backward"
                     disabled={!canNudgeBoundary("start", -1)}
+                    tooltip="Move Start backward one nominal frame"
+                    ariaLabel="Move Start backward one frame"
                     onClick={() => nudgeBoundaryOneFrame("start", -1)}
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
@@ -519,6 +394,8 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     boundary="Start"
                     direction="forward"
                     disabled={!canNudgeBoundary("start", 1)}
+                    tooltip="Move Start forward one nominal frame"
+                    ariaLabel="Move Start forward one frame"
                     onClick={() => nudgeBoundaryOneFrame("start", 1)}
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("start", direction)}
                   />
@@ -542,6 +419,8 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     boundary="End"
                     direction="backward"
                     disabled={!canNudgeBoundary("end", -1)}
+                    tooltip="Move End backward one nominal frame"
+                    ariaLabel="Move End backward one frame"
                     onClick={() => nudgeBoundaryOneFrame("end", -1)}
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />
@@ -587,6 +466,8 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
                     boundary="End"
                     direction="forward"
                     disabled={!canNudgeBoundary("end", 1)}
+                    tooltip="Move End forward one nominal frame"
+                    ariaLabel="Move End forward one frame"
                     onClick={() => nudgeBoundaryOneFrame("end", 1)}
                     onArrowNudge={(direction) => nudgeBoundaryOneFrame("end", direction)}
                   />

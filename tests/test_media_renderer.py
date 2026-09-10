@@ -29,6 +29,7 @@ def _plan(
     max_resolution: str = "1080p",
     max_fps: int = 60,
     frame_rate: float | None = None,
+    audio_disabled: bool = False,
 ):
     source_file = tmp_path / "Movie.mkv"
     source_file.write_bytes(b"media")
@@ -49,8 +50,10 @@ def _plan(
         ],
         audio_streams=[MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")],
         subtitle_streams=[],
-        selected_audio_stream=MediaStreamIdentity(
-            stream_index=1, codec_type="audio", codec_name="aac"
+        selected_audio_stream=(
+            None
+            if audio_disabled
+            else MediaStreamIdentity(stream_index=1, codec_type="audio", codec_name="aac")
         ),
         capabilities=MediaCapabilities(
             duration_ms=10_000,
@@ -130,6 +133,31 @@ def test_max_fps_applies_only_when_source_frame_rate_exceeds_it(tmp_path) -> Non
     argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
 
     assert "fps=30," in argv[argv.index("-vf") + 1]
+
+
+def test_audio_disabled_omits_audio_map_and_codec_and_adds_an(tmp_path) -> None:
+    plan = _plan(tmp_path, audio_disabled=True)
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "-an" in argv
+    assert "-af" not in argv
+    assert "-c:a" not in argv
+    map_values = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-map"]
+    assert map_values == ["0:0"]
+
+
+def test_audio_enabled_maps_and_encodes_audio(tmp_path) -> None:
+    plan = _plan(tmp_path)
+    settings = Settings(_env_file=None, ffmpeg_path=Path("ffmpeg"))
+
+    argv = build_ffmpeg_clip_args(plan, settings, tmp_path / "out.mp4")
+
+    assert "-an" not in argv
+    assert "-c:a" in argv
+    map_values = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-map"]
+    assert map_values == ["0:0", "0:1"]
 
 
 def test_max_fps_is_omitted_when_source_frame_rate_is_unknown(tmp_path) -> None:

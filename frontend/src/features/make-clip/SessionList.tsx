@@ -1,7 +1,6 @@
 import {
   Box,
   List,
-  ListItemText,
   Stack,
   Typography,
 } from "@mui/material";
@@ -33,13 +32,11 @@ function SessionFramePreview({ session, capture }: {
   );
 
   return (
-    <Box sx={{ width: { xs: "100%", sm: 224 }, flex: { sm: "0 0 224px" } }}>
-      <SessionFrameImage
-        source={source}
-        alt={`Captured frame from ${session.title}`}
-        width="100%"
-      />
-    </Box>
+    <SessionFrameImage
+      source={source}
+      alt={`Captured frame from ${session.title}`}
+      width="100%"
+    />
   );
 }
 
@@ -91,9 +88,9 @@ export function SessionList({
       }}
     >
       <Box sx={{ p: 1.5 }}>
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ width: "100%", minWidth: 0 }}>
+        <Stack spacing={1} alignItems="center" sx={{ width: { xs: "100%", sm: 280 }, maxWidth: "100%", mx: "auto" }}>
           {capture && <SessionFramePreview session={session} capture={capture} />}
-          <ListItemText primary={session.title} secondary={<SessionDetail session={session} />} slotProps={{ secondary: { component: "div" } }} sx={{ m: 0, minWidth: 0 }} />
+          <SessionDetail session={session} />
         </Stack>
       </Box>
     </Box>;

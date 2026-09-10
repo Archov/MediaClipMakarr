@@ -73,6 +73,12 @@ class SourceMediaError(Exception):
         self.alternatives = alternatives or []
 
 
+# Stored in the `clips.selected_audio_stream_index` column (NOT NULL) to mean
+# "this clip was rendered with audio disabled" — real ffmpeg stream indices
+# are never negative, so this sentinel can't collide with a real track.
+NO_AUDIO_STREAM_INDEX = -1
+
+
 class SourceFingerprint(BaseModel):
     size_bytes: int
     modified_at: datetime
@@ -115,7 +121,7 @@ class MediaCapabilities(BaseModel):
     audio_tracks: list[TrackDescriptor]
     subtitle_tracks: list[TrackDescriptor]
     attachment_tracks: list[TrackDescriptor]
-    default_audio_stream_index: int
+    default_audio_stream_index: int | None
     default_subtitle_stream_index: int | None = None
     subtitles_forced_off: bool = True
     hdr: HdrCapabilities
@@ -145,7 +151,7 @@ class ResolvedSourceMedia(BaseModel):
     subtitle_streams: list[MediaStreamIdentity]
     attachment_streams: list[MediaStreamIdentity] = Field(default_factory=list)
     capabilities: MediaCapabilities | None = None
-    selected_audio_stream: MediaStreamIdentity
+    selected_audio_stream: MediaStreamIdentity | None = None
     selected_subtitle: SubtitleSelection = Field(default_factory=SubtitleSelection)
     subtitles_forced_off: bool = True
 
@@ -318,6 +324,7 @@ async def resolve_and_probe_source_media(
     requested_audio_stream_index: int | None = None,
     requested_subtitle_stream_index: int | None = None,
     subtitles_enabled: bool = False,
+    audio_disabled: bool = False,
 ) -> ResolvedSourceMedia:
     part_file = session.plex_part_file
     if not part_file or _needs_stream_enrichment(session):
@@ -362,10 +369,14 @@ async def resolve_and_probe_source_media(
             "VIDEO_STREAM_UNAVAILABLE",
             "The selected source media does not contain a usable video stream.",
         )
-    selected_audio = _select_audio_stream(
-        probe,
-        session.selected_audio_streams,
-        requested_stream_index=requested_audio_stream_index,
+    selected_audio = (
+        None
+        if audio_disabled
+        else _select_audio_stream(
+            probe,
+            session.selected_audio_streams,
+            requested_stream_index=requested_audio_stream_index,
+        )
     )
     selected_subtitle = _select_subtitle_stream(
         probe,
@@ -467,13 +478,8 @@ async def probe_managed_media_file(
             "VIDEO_STREAM_UNAVAILABLE",
             "The managed clip does not contain a usable video stream.",
         )
-    if not audio_streams:
-        raise SourceMediaError(
-            "AUDIO_STREAM_UNAVAILABLE",
-            "The managed clip does not contain a usable audio stream.",
-        )
     video = video_streams[0]
-    selected_audio = _stream_identity(audio_streams[0])
+    selected_audio = _stream_identity(audio_streams[0]) if audio_streams else None
     hdr = classify_hdr(video)
     return ResolvedSourceMedia(
         plex_path=str(path),
@@ -511,12 +517,12 @@ async def probe_managed_media_file(
                 for stream in video_streams
             ],
             audio_tracks=[
-                _track_descriptor(stream, kind="audio", selected=stream == audio_streams[0])
+                _track_descriptor(stream, kind="audio", selected=stream is audio_streams[0])
                 for stream in audio_streams
             ],
             subtitle_tracks=[],
             attachment_tracks=[],
-            default_audio_stream_index=selected_audio.stream_index,
+            default_audio_stream_index=selected_audio.stream_index if selected_audio else None,
             subtitles_forced_off=True,
             hdr=hdr,
         ),
@@ -896,7 +902,7 @@ def _media_capabilities(
     probe: FFProbePayload,
     session: PlexSession,
     *,
-    selected_audio_stream: MediaStreamIdentity,
+    selected_audio_stream: MediaStreamIdentity | None,
     selected_subtitle: SubtitleSelection,
 ) -> MediaCapabilities:
     video = _video_streams(probe)
@@ -910,6 +916,9 @@ def _media_capabilities(
         else _default_plex_stream_index(session.selected_subtitle_streams, external_subtitles)
     )
     first_video = video[0] if video else None
+    selected_audio_index = (
+        selected_audio_stream.stream_index if selected_audio_stream is not None else None
+    )
     subtitle_tracks = [
         _track_descriptor(
             stream,
@@ -936,7 +945,7 @@ def _media_capabilities(
             _track_descriptor(
                 stream,
                 kind="audio",
-                selected=stream.index == selected_audio_stream.stream_index,
+                selected=stream.index == selected_audio_index,
                 plex_stream=_matching_plex_stream(stream, session.selected_audio_streams),
             )
             for stream in audio
@@ -945,7 +954,7 @@ def _media_capabilities(
         attachment_tracks=[
             _track_descriptor(stream, kind="attachment", selected=False) for stream in attachments
         ],
-        default_audio_stream_index=selected_audio_stream.stream_index,
+        default_audio_stream_index=selected_audio_index,
         default_subtitle_stream_index=selected_subtitle_index,
         subtitles_forced_off=selected_subtitle_index is None,
         hdr=classify_hdr(first_video, session.video_metadata),
