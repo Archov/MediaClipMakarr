@@ -21,10 +21,10 @@ export function MediaTrackSelectors({
   onSubtitleChange,
 }: {
   capabilities: MediaCapabilities | undefined;
-  audioStreamIndex: number | "";
+  audioStreamIndex: number | "" | "off";
   subtitleStreamIndex: number | "";
   subtitlesEnabled: boolean;
-  onAudioChange: (value: number | "") => void;
+  onAudioChange: (value: number | "" | "off") => void;
   onSubtitleChange: (enabled: boolean, value: number | "") => void;
 }) {
   if (!capabilities) return null;
@@ -38,7 +38,7 @@ export function MediaTrackSelectors({
             labelId="audio-track-label"
             label="Audio"
             value={audioStreamIndex}
-            onChange={(event) => onAudioChange(event.target.value as number | "")}
+            onChange={(event) => onAudioChange(event.target.value as number | "" | "off")}
           >
             {capabilities.audio_tracks.map((track) => (
               <MenuItem
@@ -49,6 +49,7 @@ export function MediaTrackSelectors({
                 {trackLabel(track)}
               </MenuItem>
             ))}
+            <MenuItem value="off">Off</MenuItem>
           </Select>
         </FormControl>
         <FormControl fullWidth>

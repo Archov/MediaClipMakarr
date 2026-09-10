@@ -240,6 +240,7 @@ def build_ffmpeg_clip_args(
         plan.source_media.local_path,
     ]
 
+    has_audio = audio_stream is not None
     subtitle_filter = _subtitle_video_filter(
         plan,
         preroll_seconds,
@@ -248,34 +249,29 @@ def build_ffmpeg_clip_args(
     if subtitle_filter.complex_filter:
         argv.extend(["-filter_complex", subtitle_filter.filter_value])
     else:
-        argv.extend(
-            [
-                "-vf",
-                subtitle_filter.filter_value,
-                "-af",
-                _audio_filter(preroll_seconds, duration_seconds),
-            ]
-        )
+        argv.extend(["-vf", subtitle_filter.filter_value])
+        if has_audio:
+            argv.extend(["-af", _audio_filter(preroll_seconds, duration_seconds)])
+
+    map_args = ["-map", subtitle_filter.video_map]
+    if has_audio:
+        map_args += [
+            "-map",
+            subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
+        ]
+    audio_output_args = (
+        ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"] if has_audio else ["-an"]
+    )
 
     argv.extend(
         [
-            "-map",
-            subtitle_filter.video_map,
-            "-map",
-            subtitle_filter.audio_map or f"0:{audio_stream.stream_index}",
+            *map_args,
             "-sn",
             *_video_encoder_args(plan),
             "-pix_fmt",
             "yuv420p",
             *output_color_args(),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ac",
-            "2",
-            "-ar",
-            "48000",
+            *audio_output_args,
             "-movflags",
             "+faststart",
             "-metadata",
@@ -371,11 +367,16 @@ def _subtitle_video_filter(
             f"[0:{plan.source_media.video_streams[0].stream_index}]"
             f"{base},setpts=PTS-STARTPTS[v];"
             f"[0:{stream.stream_index}]setpts=PTS-STARTPTS[s];"
-            f"[v][s]overlay,format=yuv420p,{trim}[outv];"
-            f"[0:{plan.selected_audio_stream.stream_index}]"
-            f"{_audio_filter(preroll_seconds, _duration_seconds(plan))}[outa]"
+            f"[v][s]overlay,format=yuv420p,{trim}[outv]"
         )
-        return VideoFilterPlan(filter_value, "[outv]", "[outa]", complex_filter=True)
+        audio_map = None
+        if plan.selected_audio_stream is not None:
+            filter_value += (
+                f";[0:{plan.selected_audio_stream.stream_index}]"
+                f"{_audio_filter(preroll_seconds, _duration_seconds(plan))}[outa]"
+            )
+            audio_map = "[outa]"
+        return VideoFilterPlan(filter_value, "[outv]", audio_map, complex_filter=True)
     return VideoFilterPlan(
         f"{base},{trim}",
         f"0:{plan.source_media.video_streams[0].stream_index}",
@@ -776,8 +777,12 @@ def _metadata_envelope(plan: ClipRenderPlan) -> str:
         ),
         "modified_at": source_modified_at.isoformat(),
     }
-    selected_audio = plan.selected_audio_stream.model_dump(mode="json")
-    if plan.provenance_audio_stream_index is not None:
+    selected_audio = (
+        plan.selected_audio_stream.model_dump(mode="json")
+        if plan.selected_audio_stream is not None
+        else None
+    )
+    if selected_audio is not None and plan.provenance_audio_stream_index is not None:
         selected_audio["stream_index"] = plan.provenance_audio_stream_index
     payload = {
         "schemaVersion": 2,

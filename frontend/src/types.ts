@@ -183,6 +183,7 @@ export interface ClipCreateRequest {
   start_ms: number;
   end_ms: number;
   audio_stream_index?: number | null;
+  audio_disabled?: boolean;
   subtitle_stream_index?: number | null;
   subtitles_enabled?: boolean;
   crop_width?: number | null;
@@ -278,7 +279,7 @@ export interface MediaCapabilities {
   audio_tracks: TrackDescriptor[];
   subtitle_tracks: TrackDescriptor[];
   attachment_tracks: TrackDescriptor[];
-  default_audio_stream_index: number;
+  default_audio_stream_index: number | null;
   default_subtitle_stream_index: number | null;
   subtitles_forced_off: boolean;
   hdr: HdrCapabilities;
@@ -295,7 +296,7 @@ export interface ResolvedSourceMedia {
   subtitle_streams: MediaStreamIdentity[];
   attachment_streams: MediaStreamIdentity[];
   capabilities: MediaCapabilities | null;
-  selected_audio_stream: MediaStreamIdentity;
+  selected_audio_stream: MediaStreamIdentity | null;
   selected_subtitle: {
     enabled: boolean;
     stream: MediaStreamIdentity | null;

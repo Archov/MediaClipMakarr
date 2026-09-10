@@ -64,6 +64,7 @@ from mediaclipmakarr.immich import (
 )
 from mediaclipmakarr.media_renderer import RenderedClipFile, render_clip_file
 from mediaclipmakarr.render_plan import ClipRenderPlan, resolve_unique_clip_path
+from mediaclipmakarr.source_media import NO_AUDIO_STREAM_INDEX
 
 from .events import JobEventBroker
 from .finalization import install_metadata_revision, install_rendered_clip, remove_superseded_clip
@@ -1801,7 +1802,11 @@ def _clip_payload(
     audio_stream_index = (
         plan.provenance_audio_stream_index
         if plan.provenance_audio_stream_index is not None
-        else plan.selected_audio_stream.stream_index
+        else (
+            plan.selected_audio_stream.stream_index
+            if plan.selected_audio_stream is not None
+            else NO_AUDIO_STREAM_INDEX
+        )
     )
     return {
         "id": plan.clip_id,

@@ -122,6 +122,7 @@ def build_router(application_settings: Settings) -> APIRouter:
                 requested_audio_stream_index=clip_request.audio_stream_index,
                 requested_subtitle_stream_index=clip_request.subtitle_stream_index,
                 subtitles_enabled=clip_request.subtitles_enabled,
+                audio_disabled=clip_request.audio_disabled,
             )
             render_plan = build_clip_render_plan(
                 session=session,

@@ -1,4 +1,5 @@
 import ArrowDownwardRounded from "@mui/icons-material/ArrowDownwardRounded";
+import ContentCutRounded from "@mui/icons-material/ContentCutRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import GifRounded from "@mui/icons-material/GifRounded";
@@ -34,6 +35,7 @@ import type {
   JobState,
 } from "../../types";
 import { useGifExport } from "../gif-export/useGifExport";
+import { TrimClipDialog } from "../trim-clip/TrimClipDialog";
 import { useRenderDuration } from "./hooks";
 import { formatElapsedSeconds } from "./renderDuration";
 import {
@@ -74,6 +76,7 @@ export function JobStatus({
   const jobClipId = job?.state === "SUCCEEDED" && job.result && "clip_id" in job.result ? job.result.clip_id : null;
   const clipId = jobClipId ?? initialClip?.id ?? null;
   const [editing, setEditing] = useState(false);
+  const [trimming, setTrimming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleted, setDeleted] = useState(false);
   const [deleteWarnings, setDeleteWarnings] = useState<string[]>([]);
@@ -190,6 +193,7 @@ export function JobStatus({
 
   useEffect(() => {
     setEditing(false);
+    setTrimming(false);
     setDeleting(false);
     setDeleted(false);
     setDeleteWarnings([]);
@@ -284,6 +288,14 @@ export function JobStatus({
         >
           Edit
         </Button>
+        <Button
+          variant="outlined"
+          startIcon={<ContentCutRounded />}
+          disabled={!displayedClip}
+          onClick={() => setTrimming(true)}
+        >
+          Trim
+        </Button>
         {immichConfigured && (
           <Tooltip title={uploadDetail ?? ""} disableHoverListener={!uploadDetail}>
             <span>
@@ -335,6 +347,9 @@ export function JobStatus({
     {clip.error && <Alert severity="error">{clip.error.message}</Alert>}
     {deleted && <Alert severity="success">The generated clip was deleted.</Alert>}
     {deleteWarnings.length > 0 && <Alert severity="warning">{deleteWarnings.join(" ")}</Alert>}
+    {trimming && displayedClip && (
+      <TrimClipDialog clip={displayedClip} onClose={() => setTrimming(false)} />
+    )}
     {editing && displayedClip && (
       <MetadataDialog
         clip={displayedClip}

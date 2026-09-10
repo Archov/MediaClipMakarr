@@ -160,6 +160,66 @@ async def test_resolve_and_probe_captures_fingerprint_duration_and_selected_audi
 
 
 @pytest.mark.asyncio
+async def test_audio_disabled_skips_audio_stream_selection(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    async def runner(argv, **kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        session(),
+        effective_settings(source_root),
+        Settings(
+            _env_file=None,
+            source_dirs=[source_root],
+            ffprobe_path=Path("test-ffprobe"),
+            subprocess_timeout_seconds=3,
+        ),
+        run_blocking=run_blocking,
+        runner=runner,
+        audio_disabled=True,
+    )
+
+    assert result.selected_audio_stream is None
+    assert result.capabilities is not None
+    assert result.capabilities.default_audio_stream_index is None
+    assert all(not track.selected for track in result.capabilities.audio_tracks)
+
+
+@pytest.mark.asyncio
+async def test_audio_disabled_allows_sources_plex_reported_no_audio_stream_for(tmp_path) -> None:
+    """With audio off, a source Plex didn't select any audio stream for (e.g.
+    the media has no audio track at all) no longer fails with
+    AUDIO_STREAM_UNAVAILABLE — there's nothing to select in the first place."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    media = source_root / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    async def runner(argv, **kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await resolve_and_probe_source_media(
+        session(selected_audio_streams=[]),
+        effective_settings(source_root),
+        Settings(
+            _env_file=None,
+            source_dirs=[source_root],
+            ffprobe_path=Path("test-ffprobe"),
+            subprocess_timeout_seconds=3,
+        ),
+        run_blocking=run_blocking,
+        runner=runner,
+        audio_disabled=True,
+    )
+
+    assert result.selected_audio_stream is None
+
+
+@pytest.mark.asyncio
 async def test_resolve_and_probe_falls_back_to_library_metadata_when_session_omits_file_path(
     tmp_path, monkeypatch
 ) -> None:
@@ -802,3 +862,43 @@ async def test_media_capabilities_frame_rate_none_when_unreported(tmp_path) -> N
 
     assert result.capabilities is not None
     assert result.capabilities.frame_rate is None
+
+
+@pytest.mark.asyncio
+async def test_probe_managed_media_file_tolerates_a_clip_rendered_without_audio(tmp_path) -> None:
+    """A clip created with audio disabled has no audio stream in its own
+    managed MP4 - trimming or GIF-exporting it later must still be able to
+    probe it, not fail with AUDIO_STREAM_UNAVAILABLE."""
+    from mediaclipmakarr.source_media import probe_managed_media_file
+
+    clip_file = tmp_path / "clip.mp4"
+    clip_file.write_bytes(b"fake clip")
+    video_only_payload = json.dumps(
+        {
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                }
+            ],
+            "format": {"duration": "3.0"},
+        }
+    )
+
+    async def runner(argv, **kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, video_only_payload, "")
+
+    result = await probe_managed_media_file(
+        clip_file,
+        Settings(_env_file=None, ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+    )
+
+    assert result.selected_audio_stream is None
+    assert result.audio_streams == []
+    assert result.capabilities is not None
+    assert result.capabilities.default_audio_stream_index is None

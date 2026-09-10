@@ -53,6 +53,7 @@ class ClipCreateRequest(BaseModel):
     start_ms: int
     end_ms: int
     audio_stream_index: int | None = None
+    audio_disabled: bool = False
     subtitle_stream_index: int | None = None
     subtitles_enabled: bool = False
     # A specific pixel crop box computed client-side by the /crop-detect

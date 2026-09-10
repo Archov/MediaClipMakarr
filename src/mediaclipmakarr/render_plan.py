@@ -62,7 +62,7 @@ class ClipRenderPlan(BaseModel):
     source_media: ResolvedSourceMedia
     source_start_ms: int
     source_end_ms: int
-    selected_audio_stream: MediaStreamIdentity
+    selected_audio_stream: MediaStreamIdentity | None = None
     selected_subtitle: SubtitleSelection = Field(default_factory=SubtitleSelection)
     hdr: HdrCapabilities = Field(default_factory=HdrCapabilities)
     hdr_strategy: HdrRenderStrategy = "sdr"
