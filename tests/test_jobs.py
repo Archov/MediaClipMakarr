@@ -1303,6 +1303,52 @@ def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> 
     assert ["-map", "[outa]"] == argv[second_map : second_map + 2]
 
 
+def test_ffmpeg_args_scale_the_bitmap_subtitle_when_output_resolution_is_capped(
+    tmp_path,
+) -> None:
+    """Regression test: a 16:9 source rendered at a resolution cap below its
+    own (e.g. a 1080p source capped to 720p output) scales the video but,
+    without this fix, would leave the subtitle bitmap at the source's native
+    resolution — same misalignment as the crop case, no crop involved."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="subtitle",
+                    codec_name="hdmv_pgs_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        max_resolution="720p",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+    )
+
+    filter_complex = argv[argv.index("-filter_complex") + 1]
+    video_segment, subtitle_segment, _overlay_segment = filter_complex.split(";")[:3]
+    scale_720p = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    assert scale_720p in video_segment
+    assert scale_720p in subtitle_segment
+    assert subtitle_segment.index(scale_720p) < subtitle_segment.index("setpts=")
+
+
 def test_ffmpeg_args_crop_the_bitmap_subtitle_to_match_the_video(tmp_path) -> None:
     """Regression test: a crop applied to the video path but not to the
     overlaid subtitle bitmap misaligns the two coordinate systems, and
