@@ -18,10 +18,12 @@ import {
 import { formatTimestampMs } from "../../timestamps";
 import type {
   ClipCreateRequest,
+  CropBox,
   JobSnapshot,
   PlexSession,
 } from "../../types";
 import { ClipBoundaryEditor } from "./ClipBoundaryEditor";
+import { CropControls } from "./CropControls";
 import { displayedPosition, useClock, useJobSnapshot, useLivePlexSessions } from "./hooks";
 import { JobStatus } from "./JobStatus";
 import { MediaErrorAlert, structuredErrorFrom } from "./MediaErrorAlert";
@@ -58,6 +60,7 @@ export function MakeClipScreen() {
   const [audioStreamIndex, setAudioStreamIndex] = useState<number | "">("");
   const [subtitleStreamIndex, setSubtitleStreamIndex] = useState<number | "">("");
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+  const [crop, setCrop] = useState<CropBox | null>(null);
   const [submittedJob, setSubmittedJob] = useState<JobSnapshot | null>(null);
   const [submittedJobId, setSubmittedJobId] = useState<string | null>(() =>
     typeof window === "undefined" ? null : window.sessionStorage.getItem(ACTIVE_CLIP_JOB_KEY),
@@ -183,6 +186,10 @@ export function MakeClipScreen() {
       subtitle_stream_index:
         subtitlesEnabled && subtitleStreamIndex !== "" ? Number(subtitleStreamIndex) : null,
       subtitles_enabled: subtitlesEnabled,
+      crop_width: crop?.width ?? null,
+      crop_height: crop?.height ?? null,
+      crop_x: crop?.x ?? null,
+      crop_y: crop?.y ?? null,
     };
     clipCreate.mutate(request);
   };
@@ -232,6 +239,7 @@ export function MakeClipScreen() {
                 setAudioStreamIndex("");
                 setSubtitleStreamIndex("");
                 setSubtitlesEnabled(false);
+                setCrop(null);
               }}
             />
           </Stack>
@@ -254,6 +262,7 @@ export function MakeClipScreen() {
                 mediaIdentity={selectedSession.media_identity}
                 mediaDurationMs={selectedSession.duration_ms}
                 mediaFrameRate={capabilities.data?.frame_rate ?? null}
+                crop={crop}
                 onStartChange={handleStartChange}
                 onEndChange={handleEndChange}
               >
@@ -286,6 +295,13 @@ export function MakeClipScreen() {
                   }}
                 />
               </ClipBoundaryEditor>
+              <CropControls
+                sessionIdentity={selectedSession.session_identity}
+                mediaIdentity={selectedSession.media_identity}
+                startMs={startMs}
+                endMs={endMs}
+                onCropChange={setCrop}
+              />
               {clipCreate.error && (
                 <MediaErrorAlert
                   error={structuredErrorFrom(clipCreate.error)}

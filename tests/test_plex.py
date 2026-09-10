@@ -146,6 +146,46 @@ def test_parse_media_part_metadata_matches_exact_part_across_media_versions() ->
     assert metadata.streams[0].stream_index == 1
 
 
+def test_parse_media_part_metadata_extracts_external_ids_and_group_rating_key_for_a_movie() -> (
+    None
+):
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="501" title="A Movie" type="movie">
+        <Guid id="imdb://tt1234567" />
+        <Guid id="tmdb://539" />
+        <Media id="media-501">
+          <Part id="part-501" file="/plex/movie.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    metadata = parse_media_part_metadata(payload, part_id="part-501")
+
+    assert metadata is not None
+    assert metadata.external_ids == ["imdb://tt1234567", "tmdb://539"]
+    assert metadata.group_rating_key == "501"
+
+
+def test_parse_media_part_metadata_group_rating_key_is_the_show_for_an_episode() -> None:
+    payload = b"""
+    <MediaContainer size="1">
+      <Video ratingKey="101" grandparentRatingKey="80" title="Episode" type="episode">
+        <Media id="media-101">
+          <Part id="part-101" file="/plex/episode.mkv" />
+        </Media>
+      </Video>
+    </MediaContainer>
+    """
+
+    metadata = parse_media_part_metadata(payload, part_id="part-101")
+
+    assert metadata is not None
+    assert metadata.group_rating_key == "80"
+    assert metadata.external_ids == []
+
+
 def test_parse_media_part_metadata_falls_back_only_when_unambiguous() -> None:
     single_version = b"""
     <MediaContainer size="1">

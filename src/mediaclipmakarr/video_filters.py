@@ -19,6 +19,7 @@ def build_video_base_filter(
     max_height: int,
     max_fps: int,
     source_frame_rate: float | None,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> str:
     """Return the pre-subtitle filter chain for the immutable render strategy.
 
@@ -28,6 +29,10 @@ def build_video_base_filter(
     `source_frame_rate` is actually above `max_fps` — ffmpeg's `fps` filter
     duplicates frames to reach a rate the source doesn't have, which would
     be exactly the upscale/interpolation this is meant to avoid.
+
+    `crop`, when given, is `(w, h, x, y)` for a fixed letterbox/pillarbox
+    trim — applied first, before scale/tonemap, so every downstream step
+    (and the resolution cap) operates on the already-cropped frame.
     """
     return _build_video_filter(
         hdr,
@@ -35,6 +40,7 @@ def build_video_base_filter(
         size_filter=_bounded_size_filter(max_width, max_height),
         fps_filter=_fps_filter_segment(source_frame_rate, max_fps),
         output_pixel_format="yuv420p",
+        crop_filter=_crop_filter_segment(crop),
     )
 
 
@@ -44,8 +50,11 @@ def build_video_frame_filter(
     *,
     max_width: int | None = None,
     max_height: int | None = None,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> str:
-    """Return a subtitle-free still-frame filter, optionally bounded for a thumbnail."""
+    """Return a subtitle-free still-frame filter, optionally bounded for a
+    thumbnail. `crop` (w, h, x, y) lets a crop-detect preview reuse this same
+    frame-render path rather than a separate preview pipeline."""
     if (max_width is None) != (max_height is None):
         raise ValueError("Frame dimensions must either both be set or both be omitted.")
     size_filter = (
@@ -59,6 +68,7 @@ def build_video_frame_filter(
         size_filter=size_filter,
         fps_filter="",
         output_pixel_format="rgb24",
+        crop_filter=_crop_filter_segment(crop),
     )
 
 
@@ -70,6 +80,7 @@ def build_video_base_filter_gpu_hdr(
     max_height: int,
     max_fps: int,
     source_frame_rate: float | None,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> str:
     """GPU HDR->SDR path for a full clip render: `libplacebo` does scale,
 
@@ -99,9 +110,11 @@ def build_video_base_filter_gpu_hdr(
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
         raise ValueError("build_video_base_filter_gpu_hdr is only for HDR tonemap strategies.")
+    crop_filter = _crop_filter_segment(crop)
     fps_filter = _fps_filter_segment(source_frame_rate, max_fps)
     fps_suffix = f",{fps_filter.rstrip(',')}" if fps_filter else ""
     return (
+        f"{crop_filter}"
         f"libplacebo=w='min({max_width},iw)':h='min({max_height},ih)':"
         "force_original_aspect_ratio=decrease:force_divisible_by=2:"
         "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
@@ -131,10 +144,11 @@ def _build_video_filter(
     size_filter: str | None,
     fps_filter: str,
     output_pixel_format: str,
+    crop_filter: str = "",
 ) -> str:
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
-        return _finish_filter(size_filter, fps_filter, output_pixel_format)
+        return _finish_filter(size_filter, fps_filter, output_pixel_format, crop_filter)
 
     transfer = "smpte2084" if strategy == "tone_map_hdr10" else "arib-std-b67"
     primaries = _source_value(hdr.color.color_primaries, "bt2020")
@@ -144,13 +158,13 @@ def _build_video_filter(
     # curve as the old zscale-based chain, but ~2.6x faster on real HLG
     # content (measured locally) since it avoids the float-linear round
     # trip through gbrpf32le — verified visually equivalent output too.
-    # fps_filter goes first, before tonemapx/scale: dropping frames is cheap
-    # and shrinks the input to every expensive step downstream. Placed last,
-    # it would only discard work tonemapx already paid for on every source
-    # frame — a real bug this app shipped with, caught because a 50fps->30fps
-    # cap wasn't actually speeding anything up.
+    # crop, then fps, then tonemapx/scale: crop and fps are both cheap and
+    # only ever shrink what's fed to every expensive step downstream. Placed
+    # last, fps would only discard work tonemapx already paid for on every
+    # source frame — a real bug this app shipped with, caught because a
+    # 50fps->30fps cap wasn't actually speeding anything up.
     return (
-        f"{fps_filter}setparams=color_primaries={primaries}:color_trc={transfer}:"
+        f"{crop_filter}{fps_filter}setparams=color_primaries={primaries}:color_trc={transfer}:"
         f"colorspace={matrix}:range={source_range},"
         "tonemapx=tonemap=mobius:param=0.3:desat=0:"
         "transfer=bt709:matrix=bt709:primaries=bt709:range=tv,"
@@ -182,10 +196,22 @@ def _fps_filter_segment(source_frame_rate: float | None, max_fps: int) -> str:
     return f"fps={max_fps},"
 
 
-def _finish_filter(size_filter: str | None, fps_filter: str, output_pixel_format: str) -> str:
-    # fps_filter first — see the comment in _build_video_filter's HDR branch;
-    # it also lets scale work on fewer frames when both apply.
-    return f"{fps_filter}{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
+def _finish_filter(
+    size_filter: str | None, fps_filter: str, output_pixel_format: str, crop_filter: str = ""
+) -> str:
+    # crop, then fps — see the comment in _build_video_filter's HDR branch;
+    # it also lets scale work on fewer pixels/frames when more than one applies.
+    return (
+        f"{crop_filter}{fps_filter}"
+        f"{f'{size_filter},' if size_filter else ''}format={output_pixel_format}"
+    )
+
+
+def _crop_filter_segment(crop: tuple[int, int, int, int] | None) -> str:
+    if crop is None:
+        return ""
+    width, height, x, y = crop
+    return f"crop={width}:{height}:{x}:{y},"
 
 
 def output_color_args() -> list[str]:

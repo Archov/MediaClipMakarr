@@ -8,7 +8,10 @@ from alembic.config import Config
 from sqlalchemy import URL
 
 from alembic import command
-from mediaclipmakarr.source_metadata import infer_source_organizing_metadata
+from mediaclipmakarr.source_metadata import (
+    derive_aspect_ratio_group_path,
+    infer_source_organizing_metadata,
+)
 
 
 def test_episode_source_path_supplies_library_show_code_and_title() -> None:
@@ -72,6 +75,43 @@ def test_movie_directory_is_preferred_over_release_filename() -> None:
     assert metadata.automatic_title() == (
         "My Love Story with Yamada-kun at Lv999 (2025)"
     )
+
+
+def test_aspect_ratio_group_path_is_the_show_folder_for_structured_episodes() -> None:
+    source = (
+        "/media/anime/KonoSuba - An Explosion on This Wonderful World!/Season 1/"
+        "KonoSuba - An Explosion on This Wonderful World! - S01E07 - "
+        "Troublemakers of the City of Water.mkv"
+    )
+
+    assert derive_aspect_ratio_group_path(source, "episode") == (
+        "/media/anime/KonoSuba - An Explosion on This Wonderful World!"
+    )
+
+
+def test_aspect_ratio_group_path_is_the_movie_folder_for_structured_movies() -> None:
+    source = (
+        "/media/movies/My Love Story with Yamada-kun at Lv999 (2025)/"
+        "My Love Story with Yamada-kun at Lv999 (2025) WEBDL-1080p.mkv"
+    )
+
+    assert derive_aspect_ratio_group_path(source, "movie") == (
+        "/media/movies/My Love Story with Yamada-kun at Lv999 (2025)"
+    )
+
+
+def test_aspect_ratio_group_path_is_none_for_unstructured_layouts() -> None:
+    # No "Season N" directory, so grouping by the immediate parent would
+    # silently lump unrelated shows/episodes that happen to share a flat
+    # folder under the same aspect-ratio override.
+    assert derive_aspect_ratio_group_path(
+        "/media/anime/Frieren - S02E03 - Reunion.mkv", "episode"
+    ) is None
+    # No "Movie (Year)" directory, so the parent folder isn't reliably
+    # this movie's own — could be a shared flat movies folder.
+    assert derive_aspect_ratio_group_path(
+        "/media/movies/Perfect Blue Remastered.mkv", "movie"
+    ) is None
 
 
 def test_forward_migration_backfills_existing_clip_source_metadata(tmp_path) -> None:

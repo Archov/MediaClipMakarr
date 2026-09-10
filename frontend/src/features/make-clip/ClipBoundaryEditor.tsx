@@ -14,6 +14,7 @@ import {
 import { type ReactNode, useEffect, useState } from "react";
 
 import { sessionFrameUrl } from "../../api";
+import type { CropBox } from "../../types";
 import { formatTimestampMs, parseTimestampMs } from "../../timestamps";
 import { BoundaryNudgeControls } from "./BoundaryNudgeControls";
 import { SessionFrameImage } from "./SessionFrameImage";
@@ -32,6 +33,7 @@ interface ClipBoundaryEditorProps {
   mediaIdentity: string;
   mediaDurationMs: number | null | undefined;
   mediaFrameRate: number | null;
+  crop?: CropBox | null;
   onStartChange: (input: string, value: number | null) => void;
   onEndChange: (input: string, value: number | null) => void;
   children: ReactNode;
@@ -44,7 +46,15 @@ interface BoundaryPreview {
   version: number;
 }
 
-function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: BoundaryPreview | null }) {
+function PreviewSlot({
+  label,
+  preview,
+  crop,
+}: {
+  label: "Start" | "End";
+  preview: BoundaryPreview | null;
+  crop?: CropBox | null;
+}) {
   return (
     <Stack spacing={0.75}>
       <Typography variant="body2" color="text.secondary">
@@ -57,6 +67,8 @@ function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: Boun
             preview.mediaIdentity,
             preview.positionMs,
             preview.version,
+            false,
+            crop,
           )}
           alt={`${label} frame at ${formatMilliseconds(preview.positionMs)}`}
           width="100%"
@@ -65,7 +77,10 @@ function PreviewSlot({ label, preview }: { label: "Start" | "End"; preview: Boun
         <Box
           sx={{
             width: "100%",
-            aspectRatio: "16 / 9",
+            // No frame has been captured here yet, so there's nothing real
+            // to size from — 16:9 is just this placeholder's own shape, not
+            // a claim about the video.
+            aspectRatio: crop ? `${crop.width} / ${crop.height}` : "16 / 9",
             display: "grid",
             placeItems: "center",
             border: 1,
@@ -98,6 +113,7 @@ export function ClipBoundaryEditor({
   mediaIdentity,
   mediaDurationMs,
   mediaFrameRate,
+  crop,
   onStartChange,
   onEndChange,
   children,
@@ -189,7 +205,7 @@ export function ClipBoundaryEditor({
     <Stack spacing={2}>
       <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
-          <PreviewSlot label="Start" preview={startPreview} />
+          <PreviewSlot label="Start" preview={startPreview} crop={crop} />
           <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="Start"
@@ -237,7 +253,7 @@ export function ClipBoundaryEditor({
           </Stack>
         </Stack>
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
-          <PreviewSlot label="End" preview={endPreview} />
+          <PreviewSlot label="End" preview={endPreview} crop={crop} />
           <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="End"

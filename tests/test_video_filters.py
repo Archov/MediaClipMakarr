@@ -129,6 +129,93 @@ def test_hdr_filter_applies_fps_cap_before_the_expensive_tonemap_step() -> None:
     assert graph.index("fps=30") < graph.index("scale=")
 
 
+def test_base_filter_applies_crop_before_scale_and_tonemap() -> None:
+    hdr = HdrCapabilities(
+        hdr10=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="smpte2084",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+
+    graph = build_video_base_filter(
+        hdr,
+        "tone_map_hdr10",
+        max_width=1920,
+        max_height=1080,
+        max_fps=60,
+        source_frame_rate=None,
+        crop=(1440, 1080, 240, 0),
+    )
+
+    assert graph.startswith("crop=1440:1080:240:0,")
+    assert graph.index("crop=") < graph.index("tonemapx=")
+    assert graph.index("crop=") < graph.index("scale=")
+
+
+def test_sdr_base_filter_applies_crop_first() -> None:
+    hdr = HdrCapabilities()
+
+    graph = build_video_base_filter(
+        hdr,
+        "sdr",
+        max_width=1920,
+        max_height=1080,
+        max_fps=60,
+        source_frame_rate=None,
+        crop=(1440, 1080, 240, 0),
+    )
+
+    assert graph.startswith("crop=1440:1080:240:0,")
+
+
+def test_base_filter_omits_crop_when_not_given() -> None:
+    hdr = HdrCapabilities()
+
+    graph = build_video_base_filter(
+        hdr, "sdr", max_width=1920, max_height=1080, max_fps=60, source_frame_rate=None
+    )
+
+    assert "crop=" not in graph
+
+
+def test_gpu_hdr_filter_applies_crop_before_libplacebo() -> None:
+    hdr = HdrCapabilities(
+        hdr10=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="smpte2084",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+
+    graph = build_video_base_filter_gpu_hdr(
+        hdr,
+        "tone_map_hdr10",
+        max_width=1920,
+        max_height=1080,
+        max_fps=60,
+        source_frame_rate=None,
+        crop=(1440, 1080, 240, 0),
+    )
+
+    assert graph.startswith("crop=1440:1080:240:0,libplacebo=")
+
+
+def test_frame_filter_applies_crop_for_preview_reuse() -> None:
+    hdr = HdrCapabilities()
+
+    graph = build_video_frame_filter(
+        hdr, "sdr", max_width=480, max_height=270, crop=(1440, 1080, 240, 0)
+    )
+
+    assert graph.startswith("crop=1440:1080:240:0,")
+    assert graph.index("crop=") < graph.index("scale=")
+
+
 def test_output_is_explicitly_tagged_limited_range_bt709() -> None:
     args = output_color_args()
 

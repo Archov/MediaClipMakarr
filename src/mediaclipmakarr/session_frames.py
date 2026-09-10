@@ -57,6 +57,7 @@ async def render_session_frame(
     *,
     run_blocking: BlockingRunner,
     runner: CommandRunner = run_command,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> RenderedSessionFrame:
     if position_ms < 0:
         raise SessionFrameError(
@@ -100,6 +101,7 @@ async def render_session_frame(
             variant,
             settings,
             output_path,
+            crop=crop,
         )
         await runner(
             argv,
@@ -138,10 +140,12 @@ def build_ffmpeg_frame_args(
     variant: FrameVariant,
     settings: Settings,
     output_path: Path,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> list[str]:
     strategy = planned_hdr_strategy(hdr)
     dimensions = {"max_width": 480, "max_height": 270} if variant == "thumbnail" else {}
-    video_filter = build_video_frame_filter(hdr, strategy, **dimensions)
+    video_filter = build_video_frame_filter(hdr, strategy, crop=crop, **dimensions)
     return [
         os.fspath(settings.ffmpeg_path),
         "-hide_banner",

@@ -68,6 +68,8 @@ class PlexPartMetadata(BaseModel):
 
     file: str | None = None
     streams: list[PlexPartStream] = Field(default_factory=list)
+    external_ids: list[str] = Field(default_factory=list)
+    group_rating_key: str | None = None
 
 
 class PlexSession(BaseModel):
@@ -436,6 +438,17 @@ def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPar
     video = next((child for child in root if _local_name(child) == "Video"), None)
     if video is None:
         return None
+    # Guid ids and the show/movie-level rating key identify the *title*, not
+    # the specific part/edition — the same for every candidate below. Used to
+    # key persisted aspect-ratio overrides (see aspect_ratio_overrides.py).
+    external_ids = [
+        guid_id
+        for guid_element in _children(video, "Guid")
+        if (guid_id := guid_element.attrib.get("id"))
+    ]
+    group_rating_key = video.attrib.get("grandparentRatingKey") or video.attrib.get(
+        "ratingKey"
+    )
     # Prefer the exact part the session was playing — an item can have more than
     # one Media (version/edition), each with its own Part. When the exact part
     # can't be identified, only fall back if there's a single unambiguous
@@ -450,6 +463,8 @@ def parse_media_part_metadata(payload: bytes, *, part_id: str | None) -> PlexPar
             metadata = PlexPartMetadata(
                 file=file_path,
                 streams=[_parse_part_stream(stream) for stream in _children(part, "Stream")],
+                external_ids=external_ids,
+                group_rating_key=group_rating_key,
             )
             if part_id is not None and part.attrib.get("id") == part_id:
                 return metadata

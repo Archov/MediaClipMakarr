@@ -1,6 +1,7 @@
 import type {
   ApplicationSettings,
   ApplicationSettingsUpdate,
+  AspectRatioOverrideResponse,
   ClipCreateRequest,
   ClipMetadataUpdate,
   ClipPage,
@@ -8,6 +9,9 @@ import type {
   ClipTrimSaveRequest,
   ClipDeleteResult,
   ClipFilterOptions,
+  CropBox,
+  CropDetectRequest,
+  CropDetectResponse,
   GifExportResponse,
   HealthResponse,
   ImmichAssetCheckResult,
@@ -167,6 +171,7 @@ export function sessionFrameUrl(
   positionMs: number,
   captureVersion: number,
   download = false,
+  crop?: CropBox | null,
 ): string {
   const params = new URLSearchParams({
     media_identity: mediaIdentity,
@@ -174,7 +179,53 @@ export function sessionFrameUrl(
     v: String(captureVersion),
   });
   if (download) params.set("download", "true");
+  if (crop) {
+    params.set("crop_width", String(crop.width));
+    params.set("crop_height", String(crop.height));
+    params.set("crop_x", String(crop.x));
+    params.set("crop_y", String(crop.y));
+  }
   return `/api/sessions/${encodeURIComponent(sessionIdentity)}/frame?${params}`;
+}
+
+export async function detectCrop(
+  sessionIdentity: string,
+  request: CropDetectRequest,
+): Promise<CropDetectResponse> {
+  const response = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionIdentity)}/crop-detect`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  return parseResponse<CropDetectResponse>(response, "Crop detection request");
+}
+
+export async function fetchAspectRatioOverride(
+  sessionIdentity: string,
+): Promise<AspectRatioOverrideResponse> {
+  const response = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionIdentity)}/aspect-ratio-override`,
+    { headers: { Accept: "application/json" } },
+  );
+  return parseResponse<AspectRatioOverrideResponse>(response, "Aspect ratio override request");
+}
+
+export async function saveAspectRatioOverride(
+  sessionIdentity: string,
+  aspectRatio: string | null,
+): Promise<AspectRatioOverrideResponse> {
+  const response = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionIdentity)}/aspect-ratio-override`,
+    {
+      method: "PUT",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ aspect_ratio: aspectRatio }),
+    },
+  );
+  return parseResponse<AspectRatioOverrideResponse>(response, "Aspect ratio override request");
 }
 
 export async function createClip(request: ClipCreateRequest): Promise<JobSnapshot> {

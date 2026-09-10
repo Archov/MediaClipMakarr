@@ -96,6 +96,31 @@ def _movie_metadata(path: PurePosixPath, stem: str) -> SourceOrganizingMetadata:
     )
 
 
+def derive_aspect_ratio_group_path(source_path: str, media_type: str) -> str | None:
+    """The folder-level path used to group content for aspect-ratio persistence:
+    a show's root folder for episodes, a movie's own folder for movies. Returns
+    `None` when the source isn't laid out in Plex's structured
+    Library/Show/Season or Library/Movie (Year)/file layout — an unstructured
+    layout has no folder boundary reliable enough to share across a whole
+    show/movie without also grouping unrelated titles together.
+    """
+    normalized = source_path.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    path = PurePosixPath(normalized)
+    if media_type.casefold() == "episode":
+        parents = path.parents
+        if len(parents) >= 3 and _SEASON_DIRECTORY.match(parents[0].name) is not None:
+            return str(parents[1])
+        return None
+    if media_type.casefold() == "movie":
+        parent_name = _clean(path.parent.name)
+        if _MOVIE_YEAR.match(parent_name) is not None and len(path.parents) >= 2:
+            return str(path.parent)
+        return None
+    return None
+
+
 def _valid_movie_year(value: str) -> int | None:
     year = int(value)
     return year if 1800 <= year <= 3000 else None

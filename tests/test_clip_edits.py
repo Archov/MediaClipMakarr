@@ -122,6 +122,28 @@ def test_trim_plan_translates_original_source_range_and_records_direct_parent(
     assert parent["revision"] == 3
 
 
+def test_trim_plan_does_not_reapply_the_parents_crop(tmp_path: Path) -> None:
+    # A trim decodes from the already-rendered managed clip file
+    # (`managed_source` below), which is already cropped and scaled — not
+    # from the original pristine source. Reapplying the parent's crop box
+    # (sized for the original, larger source) against that already-smaller
+    # frame is invalid and made every trim of a cropped clip fail outright.
+    path = tmp_path / "Example.mp4"
+    path.write_bytes(b"managed clip")
+    parent = parent_payload(path)
+    parent.update({"crop_width": 1440, "crop_height": 1080, "crop_x": 240, "crop_y": 0})
+
+    plan = trim_plan(parent, path)
+
+    assert plan.crop_box is None
+    assert (plan.crop_width, plan.crop_height, plan.crop_x, plan.crop_y) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
 def test_replace_plan_preserves_identity_and_rejects_stale_revision(tmp_path: Path) -> None:
     path = tmp_path / "Example.mp4"
     path.write_bytes(b"managed clip")
