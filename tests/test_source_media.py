@@ -736,30 +736,6 @@ async def test_media_capabilities_report_unavailable_subtitle_warnings(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_media_capabilities_reports_video_dimensions(tmp_path) -> None:
-    # The frontend needs the source's own dimensions to size preview boxes
-    # correctly — a fixed 16:9 assumption pads a wider (e.g. cinematic-ratio)
-    # source into fake letterbox bars that aren't in the actual frame.
-    source_root = tmp_path / "source"
-    source_root.mkdir()
-    (source_root / "Movie.mkv").write_bytes(b"fake media")
-
-    async def runner(argv, **_kwargs):
-        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
-
-    result = await resolve_media_capabilities(
-        session(),
-        effective_settings(source_root),
-        Settings(_env_file=None, source_dirs=[source_root]),
-        run_blocking=run_blocking,
-        runner=runner,
-    )
-
-    assert result.capabilities is not None
-    assert (result.capabilities.width, result.capabilities.height) == (1920, 1080)
-
-
-@pytest.mark.asyncio
 async def test_media_capabilities_frame_rate_prefers_average_over_nominal(tmp_path) -> None:
     source_root = tmp_path / "source"
     source_root.mkdir()

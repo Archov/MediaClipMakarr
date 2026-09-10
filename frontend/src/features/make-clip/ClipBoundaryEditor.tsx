@@ -23,20 +23,6 @@ function formatMilliseconds(value: number | null): string {
   return formatTimestampMs(value) || "--:--";
 }
 
-// The preview must reflect the source's own shape, not an assumed 16:9 —
-// a cinematic-ratio source (e.g. 2.39:1) shown in a 16:9 box gets padded by
-// `object-fit: contain` into fake letterbox bars that aren't in the actual
-// frame or the rendered clip, even though nothing was ever cropped.
-function previewAspectRatio(
-  crop: CropBox | null | undefined,
-  mediaWidth: number | null,
-  mediaHeight: number | null,
-): string {
-  if (crop) return `${crop.width} / ${crop.height}`;
-  if (mediaWidth && mediaHeight) return `${mediaWidth} / ${mediaHeight}`;
-  return "16 / 9";
-}
-
 interface ClipBoundaryEditorProps {
   startInput: string;
   endInput: string;
@@ -47,8 +33,6 @@ interface ClipBoundaryEditorProps {
   mediaIdentity: string;
   mediaDurationMs: number | null | undefined;
   mediaFrameRate: number | null;
-  mediaWidth?: number | null;
-  mediaHeight?: number | null;
   crop?: CropBox | null;
   onStartChange: (input: string, value: number | null) => void;
   onEndChange: (input: string, value: number | null) => void;
@@ -66,16 +50,11 @@ function PreviewSlot({
   label,
   preview,
   crop,
-  mediaWidth,
-  mediaHeight,
 }: {
   label: "Start" | "End";
   preview: BoundaryPreview | null;
   crop?: CropBox | null;
-  mediaWidth: number | null;
-  mediaHeight: number | null;
 }) {
-  const aspectRatio = previewAspectRatio(crop, mediaWidth, mediaHeight);
   return (
     <Stack spacing={0.75}>
       <Typography variant="body2" color="text.secondary">
@@ -93,13 +72,15 @@ function PreviewSlot({
           )}
           alt={`${label} frame at ${formatMilliseconds(preview.positionMs)}`}
           width="100%"
-          aspectRatio={aspectRatio}
         />
       ) : (
         <Box
           sx={{
             width: "100%",
-            aspectRatio,
+            // No frame has been captured here yet, so there's nothing real
+            // to size from — 16:9 is just this placeholder's own shape, not
+            // a claim about the video.
+            aspectRatio: crop ? `${crop.width} / ${crop.height}` : "16 / 9",
             display: "grid",
             placeItems: "center",
             border: 1,
@@ -132,8 +113,6 @@ export function ClipBoundaryEditor({
   mediaIdentity,
   mediaDurationMs,
   mediaFrameRate,
-  mediaWidth = null,
-  mediaHeight = null,
   crop,
   onStartChange,
   onEndChange,
@@ -226,13 +205,7 @@ export function ClipBoundaryEditor({
     <Stack spacing={2}>
       <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" alignItems="flex-start" justifyContent="center">
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
-          <PreviewSlot
-            label="Start"
-            preview={startPreview}
-            crop={crop}
-            mediaWidth={mediaWidth}
-            mediaHeight={mediaHeight}
-          />
+          <PreviewSlot label="Start" preview={startPreview} crop={crop} />
           <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="Start"
@@ -280,13 +253,7 @@ export function ClipBoundaryEditor({
           </Stack>
         </Stack>
         <Stack spacing={1} sx={{ width: 260, maxWidth: "100%" }}>
-          <PreviewSlot
-            label="End"
-            preview={endPreview}
-            crop={crop}
-            mediaWidth={mediaWidth}
-            mediaHeight={mediaHeight}
-          />
+          <PreviewSlot label="End" preview={endPreview} crop={crop} />
           <Stack direction="row" spacing={1} alignItems="flex-start" justifyContent="center">
             <TextField
               label="End"

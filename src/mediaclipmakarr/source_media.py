@@ -111,8 +111,6 @@ class TrackDescriptor(BaseModel):
 class MediaCapabilities(BaseModel):
     duration_ms: int | None
     frame_rate: float | None = None
-    width: int | None = None
-    height: int | None = None
     video_tracks: list[TrackDescriptor]
     audio_tracks: list[TrackDescriptor]
     subtitle_tracks: list[TrackDescriptor]
@@ -508,8 +506,6 @@ async def probe_managed_media_file(
         capabilities=MediaCapabilities(
             duration_ms=_duration_ms(probe),
             frame_rate=_video_frame_rate(video),
-            width=video.width,
-            height=video.height,
             video_tracks=[
                 _track_descriptor(stream, kind="video", selected=stream == video)
                 for stream in video_streams
@@ -932,8 +928,6 @@ def _media_capabilities(
     return MediaCapabilities(
         duration_ms=_duration_ms(probe),
         frame_rate=_video_frame_rate(first_video) if first_video is not None else None,
-        width=first_video.width if first_video is not None else None,
-        height=first_video.height if first_video is not None else None,
         video_tracks=[
             _track_descriptor(stream, kind="video", selected=index == 0)
             for index, stream in enumerate(video)

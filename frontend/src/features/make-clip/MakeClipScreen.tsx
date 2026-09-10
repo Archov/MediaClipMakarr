@@ -262,8 +262,6 @@ export function MakeClipScreen() {
                 mediaIdentity={selectedSession.media_identity}
                 mediaDurationMs={selectedSession.duration_ms}
                 mediaFrameRate={capabilities.data?.frame_rate ?? null}
-                mediaWidth={capabilities.data?.width ?? null}
-                mediaHeight={capabilities.data?.height ?? null}
                 crop={crop}
                 onStartChange={handleStartChange}
                 onEndChange={handleEndChange}

@@ -22,10 +22,7 @@ function SessionFramePreview({ session, capture }: {
   session: PlexSession;
   capture: SessionFrameCapture;
 }) {
-  const { crop, aspectRatio } = useSavedCropForSession(
-    session.session_identity,
-    capture.mediaIdentity,
-  );
+  const crop = useSavedCropForSession(session.session_identity, capture.mediaIdentity);
   const source = sessionFrameUrl(
     session.session_identity,
     capture.mediaIdentity,
@@ -41,7 +38,6 @@ function SessionFramePreview({ session, capture }: {
         source={source}
         alt={`Captured frame from ${session.title}`}
         width="100%"
-        aspectRatio={aspectRatio}
       />
     </Box>
   );

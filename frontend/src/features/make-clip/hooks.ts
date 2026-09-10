@@ -1,13 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import {
-  detectCrop,
-  fetchAspectRatioOverride,
-  fetchJob,
-  fetchMediaCapabilities,
-  fetchPlexSessions,
-} from "../../api";
+import { detectCrop, fetchAspectRatioOverride, fetchJob, fetchPlexSessions } from "../../api";
 import { parseUtcMs } from "../../timestamps";
 import type { CropBox, JobSnapshot, PlexSession, PlexSessionSnapshot } from "../../types";
 import { computeRenderDurationMs, isRenderingJob } from "./renderDuration";
@@ -67,45 +61,23 @@ export function useLivePlexSessions() {
   return sessions;
 }
 
-export interface SessionCropPreview {
-  crop: CropBox | null;
-  /** The box a preview thumbnail should render at: the crop's own ratio, or
-   * else the source's native ratio — never an assumed 16:9. A cinematic-ratio
-   * source (e.g. 2.39:1) shown in a 16:9 box gets padded by `object-fit:
-   * contain` into fake letterbox bars that aren't in the actual frame or the
-   * rendered clip, even though nothing was ever cropped. */
-  aspectRatio: string;
-}
-
-/** The crop box for a show/movie's saved aspect-ratio override (or `null` if
- * none is set) plus the aspect ratio a preview thumbnail should render at.
- * The override needs no time range to compute, only the source's
+/** The crop box for a show/movie's saved aspect-ratio override, or `null` if
+ * none is set — the ratio needs no time range to compute, only the source's
  * dimensions, so this works before Start/End (or even a session selection
  * for a clip) has been captured. Used to crop live "stream" preview
- * thumbnails and the boundary-editor Start preview ahead of any detection. */
+ * thumbnails and the boundary-editor Start preview ahead of any detection.
+ * The preview's own box sizes itself from the returned image's real pixels
+ * (see `SessionFrameImage`), so this only needs to report the crop, never a
+ * guessed aspect ratio. */
 export function useSavedCropForSession(
   sessionIdentity: string,
   mediaIdentity: string,
-): SessionCropPreview {
-  const [state, setState] = useState<SessionCropPreview>({ crop: null, aspectRatio: "16 / 9" });
+): CropBox | null {
+  const [crop, setCrop] = useState<CropBox | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setState({ crop: null, aspectRatio: "16 / 9" });
-
-    fetchMediaCapabilities(sessionIdentity)
-      .then((capabilities) => {
-        if (cancelled || !capabilities.width || !capabilities.height) return;
-        setState((current) =>
-          current.crop
-            ? current
-            : { crop: null, aspectRatio: `${capabilities.width} / ${capabilities.height}` },
-        );
-      })
-      .catch(() => {
-        // Capabilities unavailable — keep the 16:9 fallback.
-      });
-
+    setCrop(null);
     fetchAspectRatioOverride(sessionIdentity)
       .then((override) => {
         if (cancelled || !override.aspect_ratio) return null;
@@ -116,20 +88,17 @@ export function useSavedCropForSession(
         });
       })
       .then((result) => {
-        if (cancelled || !result?.crop) return;
-        const { crop } = result;
-        setState({ crop, aspectRatio: `${crop.width} / ${crop.height}` });
+        if (!cancelled && result) setCrop(result.crop);
       })
       .catch(() => {
         // No saved override, or Plex/lookup unavailable — no crop.
       });
-
     return () => {
       cancelled = true;
     };
   }, [sessionIdentity, mediaIdentity]);
 
-  return state;
+  return crop;
 }
 
 /** The elapsed render time to display for `job`: live and ticking while it's
