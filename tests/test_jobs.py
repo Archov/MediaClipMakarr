@@ -1288,13 +1288,109 @@ def test_ffmpeg_args_overlay_bitmap_subtitles_after_packet_preroll(tmp_path) -> 
     assert ["-ss", "0.500"] == argv[argv.index("-ss") : argv.index("-ss") + 2]
     assert "-filter_complex" in argv
     filter_complex = argv[argv.index("-filter_complex") + 1]
-    assert "[0:4]setpts=PTS-STARTPTS[s]" in filter_complex
+    # The subtitle bitmap gets the same scale-to-fit as the video (no crop
+    # here) so the two share a coordinate system at overlay time.
+    assert (
+        "[0:4]scale=w='min(1920,iw)':h='min(1080,ih)':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        "setpts=PTS-STARTPTS[s]" in filter_complex
+    )
     assert "[v][s]overlay" in filter_complex
     assert "trim=start=0.500:duration=3.000" in filter_complex
     assert "[0:1]atrim=start=0.500:duration=3.000,asetpts=PTS-STARTPTS[outa]" in filter_complex
     assert ["-map", "[outv]"] == argv[argv.index("-map") : argv.index("-map") + 2]
     second_map = argv.index("-map", argv.index("-map") + 1)
     assert ["-map", "[outa]"] == argv[second_map : second_map + 2]
+
+
+def test_ffmpeg_args_scale_the_bitmap_subtitle_when_output_resolution_is_capped(
+    tmp_path,
+) -> None:
+    """Regression test: a 16:9 source rendered at a resolution cap below its
+    own (e.g. a 1080p source capped to 720p output) scales the video but,
+    without this fix, would leave the subtitle bitmap at the source's native
+    resolution — same misalignment as the crop case, no crop involved."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="subtitle",
+                    codec_name="hdmv_pgs_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        max_resolution="720p",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+    )
+
+    filter_complex = argv[argv.index("-filter_complex") + 1]
+    video_segment, subtitle_segment, _overlay_segment = filter_complex.split(";")[:3]
+    scale_720p = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    assert scale_720p in video_segment
+    assert scale_720p in subtitle_segment
+    assert subtitle_segment.index(scale_720p) < subtitle_segment.index("setpts=")
+
+
+def test_ffmpeg_args_crop_the_bitmap_subtitle_to_match_the_video(tmp_path) -> None:
+    """Regression test: a crop applied to the video path but not to the
+    overlaid subtitle bitmap misaligns the two coordinate systems, and
+    overlay's default clipping then silently drops the subtitle entirely —
+    the render succeeds with no burned-in subtitle. Both streams must be
+    cropped identically."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=4,
+                    codec_type="subtitle",
+                    codec_name="hdmv_pgs_subtitle",
+                    language="eng",
+                ),
+                strategy="bitmap",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        crop=(1920, 800, 0, 140),
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+    )
+
+    filter_complex = argv[argv.index("-filter_complex") + 1]
+    video_segment, subtitle_segment, _overlay_segment = filter_complex.split(";")[:3]
+    assert "crop=1920:800:0:140" in video_segment
+    assert "crop=1920:800:0:140" in subtitle_segment
+    assert subtitle_segment.index("crop=") < subtitle_segment.index("setpts=")
 
 
 @pytest.mark.asyncio

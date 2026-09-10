@@ -18,6 +18,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.render_plan import ClipRenderPlan
 from mediaclipmakarr.subprocesses import CommandError, CommandFailedError, run_command
 from mediaclipmakarr.video_filters import (
+    build_subtitle_overlay_prefilter,
     build_video_base_filter,
     build_video_base_filter_gpu_hdr,
     output_color_args,
@@ -363,10 +364,18 @@ def _subtitle_video_filter(
             f"0:{plan.source_media.video_streams[0].stream_index}",
         )
     if strategy == "bitmap" and stream is not None:
+        # The subtitle bitmap must be cropped/scaled exactly like the video
+        # (see build_subtitle_overlay_prefilter) or it lands in a different
+        # coordinate system than [v] — overlay then silently clips it away
+        # whenever a crop is active, since the bitmap keeps the source's
+        # original frame size and offset.
+        subtitle_prefilter = build_subtitle_overlay_prefilter(
+            max_width, max_height, crop=plan.crop_box
+        )
         filter_value = (
             f"[0:{plan.source_media.video_streams[0].stream_index}]"
             f"{base},setpts=PTS-STARTPTS[v];"
-            f"[0:{stream.stream_index}]setpts=PTS-STARTPTS[s];"
+            f"[0:{stream.stream_index}]{subtitle_prefilter},setpts=PTS-STARTPTS[s];"
             f"[v][s]overlay,format=yuv420p,{trim}[outv]"
         )
         audio_map = None

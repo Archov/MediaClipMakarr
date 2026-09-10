@@ -172,6 +172,26 @@ def _build_video_filter(
     )
 
 
+def build_subtitle_overlay_prefilter(
+    max_width: int,
+    max_height: int,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
+) -> str:
+    """Crop+scale filter applied to a bitmap subtitle stream before it's
+    overlaid onto the main video path.
+
+    Must mirror the crop and scale steps `build_video_base_filter`/
+    `build_video_base_filter_gpu_hdr` apply to the video, or the two inputs
+    to `overlay` land in different coordinate systems — cropping the video
+    but leaving the subtitle bitmap at the source's original frame size and
+    offset pushes it outside the now-smaller cropped canvas, where
+    `overlay`'s default clipping silently drops it. The render still
+    succeeds; the subtitle just never appears.
+    """
+    return f"{_crop_filter_segment(crop)}{_bounded_size_filter(max_width, max_height)}"
+
+
 def _bounded_size_filter(max_width: int, max_height: int) -> str:
     if max_width <= 0 or max_height <= 0:
         raise ValueError("Maximum frame dimensions must be positive.")
