@@ -818,7 +818,23 @@ def build_immich_tag_paths(
     return paths
 
 
-def recovery_envelope(metadata: dict[str, Any]) -> str:
+def recovery_envelope(
+    metadata: dict[str, Any], *, selected_subtitle: dict[str, Any] | None = None
+) -> str:
+    """The comment-tag envelope written by a metadata-only edit (title,
+    show/movie info, etc.) — distinct from `_metadata_envelope` in
+    media_renderer.py, which is written at actual render time and carries
+    the full render provenance.
+
+    A metadata edit remuxes the file (`rewrite_clip_metadata`) and replaces
+    this comment tag outright, so anything the last real render embedded
+    that isn't reflected in the `clips` table — currently just the
+    subtitle selection, since audio has a DB column but subtitle choice
+    doesn't — would otherwise be silently lost on the very next rename.
+    `selected_subtitle` is the caller's job: read it from the file's
+    *current* envelope (via `read_embedded_render_metadata`) before this
+    rewrite clobbers it, and thread it through so it survives.
+    """
     payload = {
         "schemaVersion": 4,
         "application": "MediaClipMakarr",
@@ -856,6 +872,8 @@ def recovery_envelope(metadata: dict[str, Any]) -> str:
         },
         "renderPlanHash": metadata.get("render_plan_hash"),
     }
+    if selected_subtitle is not None:
+        payload["selectedSubtitle"] = selected_subtitle
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     payload["checksum"] = hashlib.sha256(encoded.encode()).hexdigest()
     return "MediaClipMakarr " + json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -868,6 +886,7 @@ async def rewrite_clip_metadata(
     *,
     ffmpeg_path: Path,
     timeout_seconds: float,
+    selected_subtitle: dict[str, Any] | None = None,
 ) -> None:
     await asyncio.to_thread(output.parent.mkdir, parents=True, exist_ok=True)
     await run_command(
@@ -883,7 +902,7 @@ async def rewrite_clip_metadata(
             "copy",
             "-map_metadata",
             "0",
-            *_conventional_metadata_args(metadata),
+            *_conventional_metadata_args(metadata, selected_subtitle=selected_subtitle),
             "-movflags",
             "+faststart",
             output,
@@ -892,7 +911,9 @@ async def rewrite_clip_metadata(
     )
 
 
-def _conventional_metadata_args(metadata: dict[str, Any]) -> list[str]:
+def _conventional_metadata_args(
+    metadata: dict[str, Any], *, selected_subtitle: dict[str, Any] | None = None
+) -> list[str]:
     values = {
         "title": metadata.get("title"),
         "description": metadata.get("title"),
@@ -900,7 +921,7 @@ def _conventional_metadata_args(metadata: dict[str, Any]) -> list[str]:
         "season_number": metadata.get("season_number"),
         "episode_sort": metadata.get("episode_number"),
         "date": metadata.get("movie_year"),
-        "comment": recovery_envelope(metadata),
+        "comment": recovery_envelope(metadata, selected_subtitle=selected_subtitle),
     }
     return [
         item

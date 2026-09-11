@@ -37,6 +37,7 @@ from mediaclipmakarr.clip_library import (
     gif_path,
     gif_url,
     purge_gif_cache,
+    read_embedded_render_metadata,
     rewrite_clip_metadata,
     thumbnail_path,
 )
@@ -821,12 +822,27 @@ class JobRunner:
         proposed["thumbnail_path"] = None
         proposed["thumbnail_source_size"] = None
         proposed["thumbnail_source_modified_ns"] = None
+        # This rewrite replaces the comment tag outright — read whatever the
+        # last real render embedded there first, or a subtitle selection
+        # that only ever lives in that tag (never in the `clips` table) is
+        # silently lost on the very next metadata edit. See
+        # `recovery_envelope`'s docstring.
+        existing_embedded = await self.run_blocking(
+            read_embedded_render_metadata,
+            source,
+            str(clip["id"]),
+            int(clip["revision"]),
+        )
+        selected_subtitle = (
+            existing_embedded.get("selectedSubtitle") if existing_embedded is not None else None
+        )
         await rewrite_clip_metadata(
             source,
             temp,
             proposed,
             ffmpeg_path=self.settings.ffmpeg_path,
             timeout_seconds=self.settings.media_preparation_timeout_seconds,
+            selected_subtitle=selected_subtitle,
         )
         temp_stat = await self.run_blocking(temp.stat)
         proposed["file_size_bytes"] = temp_stat.st_size
