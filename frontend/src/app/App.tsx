@@ -7,12 +7,25 @@ import { useEffect, useState } from "react";
 import { MakeClipScreen } from "../features/make-clip/MakeClipScreen";
 import { LibraryScreen } from "../features/library/LibraryScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { SettingsSaveStatusProvider, useSettingsSaveStatus } from "./settingsSaveStatus";
 import { theme } from "./theme";
 
 type AppPage = "make-clip" | "library" | "settings";
 
 export function App() {
+  return (
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <SettingsSaveStatusProvider>
+        <AppShell />
+      </SettingsSaveStatusProvider>
+    </ThemeProvider>
+  );
+}
+
+function AppShell() {
   const [page, setPageState] = useState<AppPage>(() => window.location.pathname === "/library" ? "library" : window.location.pathname === "/settings" ? "settings" : "make-clip");
+  const { text: settingsSaveStatusText } = useSettingsSaveStatus();
   const setPage = (next: AppPage) => {
     setPageState(next);
     window.history.pushState(null, "", next === "make-clip" ? "/" : `/${next}`);
@@ -23,8 +36,7 @@ export function App() {
     return () => window.removeEventListener("popstate", navigate);
   }, []);
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
+    <>
       <AppBar
         position="sticky"
         color="transparent"
@@ -67,6 +79,13 @@ export function App() {
           <Stack direction="row" justifyContent={{ xs: "flex-start", sm: "flex-end" }} sx={{ justifySelf: { sm: "end" } }} />
 
         </Toolbar>
+        {page === "settings" && settingsSaveStatusText && (
+          <Box sx={{ display: "flex", justifyContent: "center", pb: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              {settingsSaveStatusText}
+            </Typography>
+          </Box>
+        )}
       </AppBar>
       <Container
         maxWidth={page === "library" || page === "settings" ? "xl" : "md"}
@@ -74,6 +93,6 @@ export function App() {
       >
         <Box>{page === "make-clip" ? <MakeClipScreen /> : page === "library" ? <LibraryScreen /> : <SettingsScreen />}</Box>
       </Container>
-    </ThemeProvider>
+    </>
   );
 }

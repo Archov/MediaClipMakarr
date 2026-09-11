@@ -42,6 +42,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { bulkUploadClipsToImmich, testImmichConnection, testPlexConnection, updateSettings } from "../../api";
+import { useSettingsSaveStatus } from "../../app/settingsSaveStatus";
 import { useJobSnapshot } from "../make-clip/hooks";
 import type {
   ApplicationSettingField,
@@ -347,6 +348,21 @@ export function SettingsForm({
       queryClient.setQueryData(["settings"], updated);
     },
   });
+
+  // Published to the app header (see settingsSaveStatus), which renders it
+  // centered below the nav buttons only while the Settings screen is
+  // mounted — cleared on unmount so it doesn't linger on other screens.
+  const { setText: setSettingsSaveStatusText } = useSettingsSaveStatus();
+  useEffect(() => {
+    setSettingsSaveStatusText(
+      autoSave.isPending
+        ? "Saving…"
+        : autoSave.isSuccess
+          ? "All changes saved"
+          : "Changes save automatically.",
+    );
+    return () => setSettingsSaveStatusText(null);
+  }, [autoSave.isPending, autoSave.isSuccess, setSettingsSaveStatusText]);
 
   // Everything here is plain configuration, not a secret — it saves itself shortly
   // after the user stops changing it. Only the Plex token and Immich API key are
@@ -1419,13 +1435,6 @@ export function SettingsForm({
               </Stack>
 
               {autoSave.error && <Alert severity="error">{autoSave.error.message}</Alert>}
-              <Typography variant="body2" color="text.secondary">
-                {autoSave.isPending
-                  ? "Saving…"
-                  : autoSave.isSuccess
-                    ? "All changes saved"
-                    : "Changes save automatically."}
-              </Typography>
             </Stack>
           </CardContent>
         </Card>

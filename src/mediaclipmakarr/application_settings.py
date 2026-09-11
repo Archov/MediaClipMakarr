@@ -49,6 +49,10 @@ VIDEO_MAX_RESOLUTION_DIMENSIONS: dict[str, tuple[int, int]] = {
     "480p": (854, 480),
 }
 VIDEO_MAX_FPS_OPTIONS = (30, 60)
+# The Library screen's "Show" page-size control — persisted server-side (not
+# environment-managed; this is purely a UI preference) so it follows the
+# user across sessions and devices instead of just this browser.
+LIBRARY_PAGE_SIZES = ("25", "50", "100", "all")
 SETTING_FIELDS = (
     "plex_url",
     "plex_token",
@@ -69,6 +73,7 @@ SETTING_FIELDS = (
     "immich_tag_library",
     "immich_tag_show",
     "immich_tag_episode",
+    "library_page_size",
 )
 _BOOLEAN_FIELDS = frozenset(
     {
@@ -194,6 +199,13 @@ def validate_video_max_fps(value: int) -> int:
     return value
 
 
+def validate_library_page_size(value: str) -> str:
+    value = value.strip().lower()
+    if value not in LIBRARY_PAGE_SIZES:
+        raise ValueError(f"Library page size must be one of: {', '.join(LIBRARY_PAGE_SIZES)}.")
+    return value
+
+
 class ApplicationSettingsResponse(BaseModel):
     plex_url: str
     plex_token_configured: bool
@@ -216,6 +228,7 @@ class ApplicationSettingsResponse(BaseModel):
     immich_tag_library: bool
     immich_tag_show: bool
     immich_tag_episode: bool
+    library_page_size: str
     environment_managed: dict[str, bool]
 
 
@@ -243,6 +256,7 @@ class ApplicationSettingsUpdate(BaseModel):
     immich_tag_library: bool | None = None
     immich_tag_show: bool | None = None
     immich_tag_episode: bool | None = None
+    library_page_size: str | None = None
 
     @field_validator("plex_url")
     @classmethod
@@ -294,6 +308,11 @@ class ApplicationSettingsUpdate(BaseModel):
     def validate_max_fps(cls, value: int | None) -> int | None:
         return None if value is None else validate_video_max_fps(value)
 
+    @field_validator("library_page_size")
+    @classmethod
+    def validate_page_size(cls, value: str | None) -> str | None:
+        return None if value is None else validate_library_page_size(value)
+
     @model_validator(mode="after")
     def validate_token_operation(self) -> ApplicationSettingsUpdate:
         if self.clear_plex_token and self.plex_token and self.plex_token.strip():
@@ -326,6 +345,7 @@ class EffectiveApplicationSettings:
     immich_tag_library: bool = True
     immich_tag_show: bool = True
     immich_tag_episode: bool = True
+    library_page_size: str = "25"
 
     def to_response(self) -> ApplicationSettingsResponse:
         return ApplicationSettingsResponse(
@@ -350,6 +370,7 @@ class EffectiveApplicationSettings:
             immich_tag_library=self.immich_tag_library,
             immich_tag_show=self.immich_tag_show,
             immich_tag_episode=self.immich_tag_episode,
+            library_page_size=self.library_page_size,
             environment_managed=self.environment_managed,
         )
 
@@ -434,6 +455,9 @@ async def get_effective_application_settings(
         "immich_tag_library": bootstrap.immich_tag_library,
         "immich_tag_show": bootstrap.immich_tag_show,
         "immich_tag_episode": bootstrap.immich_tag_episode,
+        # No environment variable backs this — it's a UI preference, not
+        # deployment config — so it's never environment-managed.
+        "library_page_size": None,
     }
     managed = {field: environment_values[field] is not None for field in SETTING_FIELDS}
 
@@ -485,6 +509,7 @@ async def get_effective_application_settings(
     if video_max_fps_raw is None:
         video_max_fps_raw = persisted.get("video_max_fps", "60")
     video_max_fps = validate_video_max_fps(int(video_max_fps_raw))
+    library_page_size = validate_library_page_size(persisted.get("library_page_size", "25"))
     token_value = environment_values["plex_token"] or persisted.get("plex_token")
     immich_api_key_value = environment_values["immich_api_key"] or persisted.get("immich_api_key")
 
@@ -519,6 +544,7 @@ async def get_effective_application_settings(
         immich_tag_library=resolve_bool("immich_tag_library", True),
         immich_tag_show=resolve_bool("immich_tag_show", True),
         immich_tag_episode=resolve_bool("immich_tag_episode", True),
+        library_page_size=library_page_size,
         environment_managed=managed,
     )
 

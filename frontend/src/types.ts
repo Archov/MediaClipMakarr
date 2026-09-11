@@ -45,7 +45,8 @@ export type ApplicationSettingField =
   | "immich_manage_remote"
   | "immich_tag_library"
   | "immich_tag_show"
-  | "immich_tag_episode";
+  | "immich_tag_episode"
+  | "library_page_size";
 
 export interface ApplicationSettings {
   plex_url: string;
@@ -69,6 +70,7 @@ export interface ApplicationSettings {
   immich_tag_library: boolean;
   immich_tag_show: boolean;
   immich_tag_episode: boolean;
+  library_page_size: string;
   environment_managed: Record<ApplicationSettingField, boolean>;
 }
 
@@ -94,6 +96,7 @@ export interface ApplicationSettingsUpdate {
   immich_tag_library?: boolean;
   immich_tag_show?: boolean;
   immich_tag_episode?: boolean;
+  library_page_size?: string;
 }
 
 export interface PlexConnectionResult {

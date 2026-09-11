@@ -53,6 +53,7 @@ import {
   retryImmichAssetDelete,
   reuploadClipToImmich,
   updateClipMetadata,
+  updateSettings,
   uploadClipToImmich,
 } from "../../api";
 import type { ClipMetadataUpdate, ClipRecord, ImmichUploadJobResult, ImmichUploadJobSummary, JobSnapshot } from "../../types";
@@ -262,7 +263,9 @@ export function LibraryScreen() {
   const [episodes, setEpisodes] = useState<string[]>(initial.getAll("episode"));
   const [sort, setSort] = useState(initial.get("sort") ?? "newest");
   const [page, setPage] = useState(Number(initial.get("page") ?? 1));
-  const [pageSize, setPageSize] = useState<PageSize>(() => parsePageSize(initial.get("page_size")));
+  const initialPageSizeParam = initial.get("page_size");
+  const [pageSize, setPageSize] = useState<PageSize>(() => parsePageSize(initialPageSizeParam));
+  const appliedServerPageSizeRef = useRef(false);
   const [mode, setMode] = useState<ViewMode>(() => storedValue("mcm.library.mode", "grid"));
   const [size, setSize] = useState<ThumbnailSize>(() => storedValue("mcm.library.size", "medium"));
   const [groupMode, setGroupMode] = useState<GroupMode>("none");
@@ -321,6 +324,18 @@ export function LibraryScreen() {
   const filterOptions = useQuery({ queryKey: ["clip-filter-options"], queryFn: fetchClipFilterOptions });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
   const immichConfigured = Boolean(settings.data?.immich_url && settings.data?.immich_api_key_configured);
+  // A page_size URL param (a shared/bookmarked link) wins over the saved
+  // preference; otherwise adopt whatever's saved server-side, once, so a
+  // later in-session change here isn't clobbered by a stale refetch.
+  useEffect(() => {
+    if (initialPageSizeParam || appliedServerPageSizeRef.current || !settings.data) return;
+    appliedServerPageSizeRef.current = true;
+    setPageSize(parsePageSize(settings.data.library_page_size));
+  }, [settings.data, initialPageSizeParam]);
+  const savePageSizeMutation = useMutation({
+    mutationFn: (value: string) => updateSettings({ library_page_size: value }),
+    onSuccess: (updated) => queryClient.setQueryData(["settings"], updated),
+  });
   const editJob = useQuery({
     queryKey: ["job", editJobId],
     queryFn: () => fetchJob(editJobId!),
@@ -526,6 +541,7 @@ export function LibraryScreen() {
     setPageSize(next);
     setPage(1);
     writeParams({ page_size: next === 25 ? null : String(next), page: null });
+    savePageSizeMutation.mutate(String(next));
   };
   const selectGroupMode = (next: GroupMode) => {
     setGroupMode(next);

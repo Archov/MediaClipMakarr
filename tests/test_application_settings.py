@@ -111,6 +111,52 @@ async def test_default_video_encoder_and_quality(tmp_path) -> None:
     assert effective.video_quality == 18
 
 
+@pytest.mark.asyncio
+async def test_library_page_size_defaults_to_25_and_persists(tmp_path) -> None:
+    database_path = tmp_path / "application.db"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+    bootstrap = Settings(_env_file=None)
+    try:
+        defaults = await get_effective_application_settings(engine, bootstrap)
+        await save_persisted_application_settings(engine, {"library_page_size": "100"})
+        configured = await get_effective_application_settings(engine, bootstrap)
+    finally:
+        await engine.dispose()
+
+    assert defaults.library_page_size == "25"
+    assert defaults.environment_managed["library_page_size"] is False
+    assert configured.library_page_size == "100"
+    assert configured.environment_managed["library_page_size"] is False
+
+
+def test_library_page_size_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="Library page size must be one of"):
+        ApplicationSettingsUpdate(library_page_size="250")
+
+
+def test_settings_api_round_trips_library_page_size(tmp_path, monkeypatch) -> None:
+    async def healthy_media_tools(_settings):
+        return MediaToolInspection(
+            status="ok",
+            message="Media tools are ready.",
+            details={"identity_ok": True, "libx264": True, "aac": True},
+        )
+
+    monkeypatch.setattr(main_module, "inspect_media_tools", healthy_media_tools)
+    settings = api_settings(tmp_path)
+
+    with TestClient(main_module.create_app(settings)) as client:
+        default = client.get("/api/settings")
+        updated = client.put("/api/settings", json={"library_page_size": "all"})
+        rejected = client.put("/api/settings", json={"library_page_size": "12"})
+
+    assert default.json()["library_page_size"] == "25"
+    assert updated.status_code == 200
+    assert updated.json()["library_page_size"] == "all"
+    assert rejected.status_code == 422
+
+
 def test_video_encoder_rejects_unknown_values() -> None:
     with pytest.raises(ValueError, match="Video encoder must be one of"):
         ApplicationSettingsUpdate(video_encoder="quicksync")
@@ -240,7 +286,15 @@ async def test_non_empty_environment_values_override_persisted_settings(tmp_path
     assert effective.immich_tag_library is True
     assert effective.immich_tag_show is True
     assert effective.immich_tag_episode is True
-    assert all(effective.environment_managed.values())
+    # library_page_size has no environment variable of its own (it's a UI
+    # preference, not deployment config) — it's the one field that's never
+    # environment-managed no matter how much else the environment sets.
+    assert all(
+        managed
+        for field, managed in effective.environment_managed.items()
+        if field != "library_page_size"
+    )
+    assert effective.environment_managed["library_page_size"] is False
     assert empty_overrides.plex_url == "http://database-plex:32400"
     assert empty_overrides.plex_token == "database-secret"
     assert empty_overrides.x264_preset == "slow"
