@@ -1500,6 +1500,107 @@ def test_ffmpeg_args_crop_the_bitmap_subtitle_to_match_the_video(tmp_path) -> No
     assert subtitle_segment.index("crop=") < subtitle_segment.index("setpts=")
 
 
+def test_ffmpeg_args_burn_in_ass_subtitles_before_crop_so_positions_stay_correct(
+    tmp_path,
+) -> None:
+    """Regression test: unlike a bitmap subtitle, burned-in ASS/SRT text is
+    positioned by libass relative to whatever frame the `subtitles=` filter
+    hands it. libass already rescales correctly for a plain resolution cap
+    (it compares the script's own PlayResX/PlayResY to the actual frame
+    size), but a crop shifts the frame's *origin*, which libass has no way
+    to know about — burning in after crop applies the script's coordinates
+    to the wrong region, potentially pushing subtitles outside the visible
+    frame. The burn-in must happen before crop/scale, with crop/scale
+    applied to the composited result afterward."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        crop=(1920, 800, 0, 140),
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "subtitles" / "selected-subtitle.ass",
+            fonts_dir=tmp_path / "fonts",
+            has_content=True,
+        ),
+    )
+
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "subtitles=filename=" in video_filter
+    assert "crop=1920:800:0:140" in video_filter
+    assert video_filter.index("subtitles=") < video_filter.index("crop=1920:800:0:140")
+
+
+def test_ffmpeg_args_do_not_defer_crop_for_ass_subtitles_without_a_crop(tmp_path) -> None:
+    """A plain resolution cap needs no reordering — libass already rescales
+    to whatever frame it's given, so the existing crop-then-scale-then-burn
+    chain (cheaper, since scale/burn work on fewer pixels) is left alone
+    whenever there's no crop to misalign against."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        max_resolution="720p",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "subtitles" / "selected-subtitle.ass",
+            fonts_dir=tmp_path / "fonts",
+            has_content=True,
+        ),
+    )
+
+    video_filter = argv[argv.index("-vf") + 1]
+    scale_720p = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    assert scale_720p in video_filter
+    assert video_filter.index(scale_720p) < video_filter.index("subtitles=")
+
+
 @pytest.mark.asyncio
 async def test_finalizing_job_recovers_pending_temp_install_after_restart(tmp_path) -> None:
     database_path = tmp_path / "application.db"
