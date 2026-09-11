@@ -8,7 +8,17 @@ from pathlib import Path
 import pytest
 
 import mediaclipmakarr.jobs.runner as runner_module
-from mediaclipmakarr.clip_edits import ClipEditError, ClipTrimSaveRequest, build_trim_render_plan
+from mediaclipmakarr.clip_edits import (
+    ClipEditError,
+    ClipTrimSaveRequest,
+    build_extended_trim_render_plan,
+    build_trim_render_plan,
+    is_extended_trim_request,
+    recovered_audio_selection,
+    recovered_subtitle_selection,
+    source_fingerprint_matches,
+    track_changed,
+)
 from mediaclipmakarr.clips import get_clip, insert_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
@@ -23,9 +33,11 @@ from mediaclipmakarr.jobs import (
 )
 from mediaclipmakarr.media_renderer import RenderedClipFile
 from mediaclipmakarr.source_media import (
+    NO_AUDIO_STREAM_INDEX,
     MediaStreamIdentity,
     ResolvedSourceMedia,
     SourceFingerprint,
+    SubtitleSelection,
     VideoStreamIdentity,
 )
 
@@ -142,6 +154,237 @@ def test_trim_plan_does_not_reapply_the_parents_crop(tmp_path: Path) -> None:
         None,
         None,
     )
+
+
+_UNSET = object()
+
+
+def original_source(
+    path: Path,
+    *,
+    duration_ms: int = 120_000,
+    selected_audio_stream: object = _UNSET,
+    selected_subtitle: SubtitleSelection | None = None,
+) -> ResolvedSourceMedia:
+    """A probe of the *original pristine source* (unlike `managed_source`
+    above, which represents the already-rendered managed clip)."""
+    stat = path.stat()
+    if selected_audio_stream is _UNSET:
+        selected_audio_stream = MediaStreamIdentity(stream_index=4, codec_type="audio", codec_name="aac")
+    return ResolvedSourceMedia(
+        plex_path=str(path),
+        local_path=str(path),
+        fingerprint=SourceFingerprint(
+            size_bytes=stat.st_size,
+            modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
+        ),
+        duration_ms=duration_ms,
+        video_streams=[
+            VideoStreamIdentity(
+                stream_index=0,
+                codec_type="video",
+                codec_name="h264",
+                width=1920,
+                height=1080,
+                color=VideoColorMetadata(color_transfer="bt709"),
+            )
+        ],
+        audio_streams=[selected_audio_stream] if selected_audio_stream is not None else [],
+        subtitle_streams=[],
+        selected_audio_stream=selected_audio_stream,
+        selected_subtitle=selected_subtitle or SubtitleSelection(),
+    )
+
+
+def test_extended_trim_plan_reapplies_the_parents_crop(tmp_path: Path) -> None:
+    # Unlike a normal trim, this decodes from the uncropped original source —
+    # the crop box must be reapplied or the render comes out unframed.
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)
+    parent.update({"crop_width": 1440, "crop_height": 1080, "crop_x": 240, "crop_y": 0})
+
+    plan = build_extended_trim_render_plan(
+        parent,
+        ClipTrimSaveRequest(start_ms=-5_000, end_ms=7_500, expected_revision=3, mode="new"),
+        original_source(path),
+        path.stat(),
+        x264_preset="veryfast",
+    )
+
+    assert plan.crop_box == (1440, 1080, 240, 0)
+
+
+def test_extended_trim_plan_uses_the_current_selection_not_the_granted_extend_amount(
+    tmp_path: Path,
+) -> None:
+    """Regression: the absolute source range must come from the CURRENT
+    selection (start_ms/end_ms), not whatever amount the extend buttons ever
+    granted — extending left 5s then nudging Start back in 2s must save at
+    source_start_ms - 3000, not - 5000."""
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)  # source_start_ms=50_000, source_end_ms=60_000
+
+    plan = build_extended_trim_render_plan(
+        parent,
+        ClipTrimSaveRequest(start_ms=-3_000, end_ms=7_500, expected_revision=3, mode="new"),
+        original_source(path),
+        path.stat(),
+        x264_preset="veryfast",
+    )
+
+    assert (plan.source_start_ms, plan.source_end_ms) == (47_000, 57_500)
+    assert (plan.provenance_start_ms, plan.provenance_end_ms) == (47_000, 57_500)
+
+
+def test_extended_trim_plan_allows_a_selection_entirely_in_the_extended_region(
+    tmp_path: Path,
+) -> None:
+    """Regression: `ClipTrimSaveRequest.end_ms` used to require `> 0`, which
+    rejected a selection that sits wholly before the original clip's start
+    (both start_ms and end_ms negative) once extend has granted that room —
+    exactly the "trim entirely within the new extended portion" workflow."""
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)  # source_start_ms=50_000, source_end_ms=60_000
+
+    plan = build_extended_trim_render_plan(
+        parent,
+        ClipTrimSaveRequest(start_ms=-8_000, end_ms=-2_000, expected_revision=3, mode="new"),
+        original_source(path),
+        path.stat(),
+        x264_preset="veryfast",
+    )
+
+    assert (plan.source_start_ms, plan.source_end_ms) == (42_000, 48_000)
+
+
+def test_extended_trim_plan_rejects_a_range_before_the_source_starts(tmp_path: Path) -> None:
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)  # source_start_ms=50_000
+
+    with pytest.raises(ClipEditError) as error:
+        build_extended_trim_render_plan(
+            parent,
+            ClipTrimSaveRequest(start_ms=-60_000, end_ms=7_500, expected_revision=3, mode="new"),
+            original_source(path),
+            path.stat(),
+            x264_preset="veryfast",
+        )
+
+    assert error.value.job_error_code == "CLIP_RANGE_BEFORE_SOURCE_START"
+
+
+def test_extended_trim_plan_rejects_a_range_past_the_source_end(tmp_path: Path) -> None:
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)  # source_start_ms=50_000
+
+    with pytest.raises(ClipEditError) as error:
+        build_extended_trim_render_plan(
+            parent,
+            ClipTrimSaveRequest(start_ms=0, end_ms=20_000, expected_revision=3, mode="new"),
+            original_source(path, duration_ms=65_000),  # absolute end would be 70_000
+            path.stat(),
+            x264_preset="veryfast",
+        )
+
+    assert error.value.job_error_code == "CLIP_RANGE_AFTER_SOURCE_END"
+
+
+def test_extended_trim_plan_records_the_no_audio_sentinel_when_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    parent = parent_payload(path)
+
+    plan = build_extended_trim_render_plan(
+        parent,
+        ClipTrimSaveRequest(
+            start_ms=0, end_ms=5_000, expected_revision=3, mode="new", audio_disabled=True
+        ),
+        original_source(path, selected_audio_stream=None),
+        path.stat(),
+        x264_preset="veryfast",
+    )
+
+    assert plan.selected_audio_stream is None
+    assert plan.provenance_audio_stream_index == NO_AUDIO_STREAM_INDEX
+
+
+def test_recovered_audio_selection_maps_the_no_audio_sentinel() -> None:
+    assert recovered_audio_selection({"selected_audio_stream_index": NO_AUDIO_STREAM_INDEX}) == (
+        None,
+        True,
+    )
+    assert recovered_audio_selection({"selected_audio_stream_index": 4}) == (4, False)
+
+
+def test_recovered_subtitle_selection_preserves_an_external_selection() -> None:
+    embedded = {
+        "selectedSubtitle": {
+            "enabled": True,
+            "stream": None,
+            "strategy": "external_text",
+            "external_url": "http://plex.example:32400/library/streams/501.srt",
+        }
+    }
+
+    recovered = recovered_subtitle_selection(embedded)
+
+    assert recovered.enabled is True
+    assert recovered.strategy == "external_text"
+    assert recovered.external_url == "http://plex.example:32400/library/streams/501.srt"
+
+
+def test_recovered_subtitle_selection_defaults_to_off_without_embedded_metadata() -> None:
+    assert recovered_subtitle_selection(None) == SubtitleSelection()
+    assert recovered_subtitle_selection({}) == SubtitleSelection()
+
+
+def test_track_changed_treats_explicit_audio_disabled_as_a_change() -> None:
+    unchanged = ClipTrimSaveRequest(start_ms=0, end_ms=5_000, expected_revision=1, mode="new")
+    assert track_changed(unchanged) is False
+
+    # audio_disabled defaults False, so "changed" can't be inferred from mere
+    # field presence — an explicit False-that-means-disabled must still count.
+    explicitly_disabled = ClipTrimSaveRequest(
+        start_ms=0, end_ms=5_000, expected_revision=1, mode="new", audio_disabled=True
+    )
+    assert track_changed(explicitly_disabled) is True
+
+
+def test_is_extended_trim_request_covers_out_of_bounds_ranges_and_track_changes() -> None:
+    duration_ms = 10_000
+    in_bounds = ClipTrimSaveRequest(start_ms=0, end_ms=5_000, expected_revision=1, mode="new")
+    assert is_extended_trim_request(in_bounds, duration_ms) is False
+
+    extended_before = ClipTrimSaveRequest(start_ms=-1, end_ms=5_000, expected_revision=1, mode="new")
+    assert is_extended_trim_request(extended_before, duration_ms) is True
+
+    extended_after = ClipTrimSaveRequest(
+        start_ms=0, end_ms=duration_ms + 1, expected_revision=1, mode="new"
+    )
+    assert is_extended_trim_request(extended_after, duration_ms) is True
+
+    track_only = ClipTrimSaveRequest(
+        start_ms=0, end_ms=5_000, expected_revision=1, mode="new", subtitle_stream_index=2
+    )
+    assert is_extended_trim_request(track_only, duration_ms) is True
+
+
+def test_source_fingerprint_matches_compares_size_and_modified_time(tmp_path: Path) -> None:
+    path = tmp_path / "Example.mkv"
+    path.write_bytes(b"original source")
+    stat = path.stat()
+    clip = {
+        "source_size_bytes": stat.st_size,
+        "source_modified_at": datetime.fromtimestamp(stat.st_mtime, UTC),
+    }
+
+    assert source_fingerprint_matches(clip, stat) is True
+    assert source_fingerprint_matches(dict(clip, source_size_bytes=stat.st_size + 1), stat) is False
 
 
 def test_replace_plan_preserves_identity_and_rejects_stale_revision(tmp_path: Path) -> None:

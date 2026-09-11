@@ -2,7 +2,7 @@ import { Alert, FormControl, InputLabel, MenuItem, Select, Stack } from "@mui/ma
 
 import type { MediaCapabilities, TrackDescriptor } from "../../types";
 
-function trackLabel(track: TrackDescriptor): string {
+export function trackLabel(track: TrackDescriptor): string {
   const parts = [
     track.language?.toUpperCase(),
     track.title,

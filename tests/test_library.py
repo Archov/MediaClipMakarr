@@ -21,6 +21,7 @@ from mediaclipmakarr.clip_library import (
     list_clips,
     list_filter_options,
     list_unlinked_clip_ids,
+    read_embedded_render_metadata,
 )
 from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
 from mediaclipmakarr.config import Settings
@@ -98,6 +99,39 @@ def test_embedded_revision_matches_rejects_mismatched_clip_id_or_revision(tmp_pa
 
     assert embedded_revision_matches(path, "clip-two", 1) is False
     assert embedded_revision_matches(path, "clip-one", 2) is False
+
+
+def test_read_embedded_render_metadata_recovers_the_full_payload(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    subtitle = {
+        "enabled": True,
+        "stream": None,
+        "strategy": "external_text",
+        "external_url": "http://plex.example:32400/library/streams/501.srt",
+    }
+    path.write_bytes(_envelope(selectedSubtitle=subtitle))
+
+    payload = read_embedded_render_metadata(path, "clip-one", 1)
+
+    assert payload is not None
+    assert payload["selectedSubtitle"] == subtitle
+
+
+def test_read_embedded_render_metadata_returns_none_for_a_different_clip_or_revision(
+    tmp_path,
+) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(_envelope())
+
+    assert read_embedded_render_metadata(path, "clip-two", 1) is None
+    assert read_embedded_render_metadata(path, "clip-one", 2) is None
+
+
+def test_read_embedded_render_metadata_returns_none_for_a_fabricated_marker(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b'padding MediaClipMakarr {"clipId":"clip-one","revision":1}')
+
+    assert read_embedded_render_metadata(path, "clip-one", 1) is None
 
 
 def clip_payload(path: Path, *, clip_id: str = "clip-one", title: str = "Pilot"):

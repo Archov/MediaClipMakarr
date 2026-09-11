@@ -10,6 +10,7 @@ from mediaclipmakarr.config import Settings
 from mediaclipmakarr.plex import PlexPartMetadata, PlexPartStream, PlexSession
 from mediaclipmakarr.source_media import (
     SourceMediaError,
+    probe_original_source_media,
     resolve_and_probe_source_media,
     resolve_media_capabilities,
 )
@@ -902,3 +903,68 @@ async def test_probe_managed_media_file_tolerates_a_clip_rendered_without_audio(
     assert result.audio_streams == []
     assert result.capabilities is not None
     assert result.capabilities.default_audio_stream_index is None
+
+
+@pytest.mark.asyncio
+async def test_probe_original_source_media_resolves_the_requested_tracks(tmp_path) -> None:
+    media = tmp_path / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    async def runner(argv, **kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(audio_indexes=(1, 2)), "")
+
+    result = await probe_original_source_media(
+        media,
+        Settings(_env_file=None, ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_audio_stream_index=2,
+        requested_subtitle_stream_index=3,
+        subtitles_enabled=True,
+    )
+
+    assert result.selected_audio_stream is not None
+    assert result.selected_audio_stream.stream_index == 2
+    assert result.selected_subtitle.enabled is True
+    assert result.selected_subtitle.stream is not None
+    assert result.selected_subtitle.stream.stream_index == 3
+    assert result.capabilities is not None
+    assert {track.stream_index for track in result.capabilities.audio_tracks} == {1, 2}
+    assert result.local_path == str(media)
+
+
+@pytest.mark.asyncio
+async def test_probe_original_source_media_supports_audio_disabled(tmp_path) -> None:
+    media = tmp_path / "Movie.mkv"
+    media.write_bytes(b"fake media")
+
+    async def runner(argv, **kwargs):
+        return CommandResult(tuple(str(value) for value in argv), 0, probe_payload(), "")
+
+    result = await probe_original_source_media(
+        media,
+        Settings(_env_file=None, ffprobe_path=Path("test-ffprobe")),
+        run_blocking=run_blocking,
+        runner=runner,
+        requested_audio_stream_index=None,
+        audio_disabled=True,
+    )
+
+    assert result.selected_audio_stream is None
+    assert result.capabilities is not None
+    assert result.capabilities.default_audio_stream_index is None
+
+
+@pytest.mark.asyncio
+async def test_probe_original_source_media_raises_when_the_file_is_missing(tmp_path) -> None:
+    missing = tmp_path / "gone.mkv"
+
+    with pytest.raises(SourceMediaError) as error:
+        await probe_original_source_media(
+            missing,
+            Settings(_env_file=None, ffprobe_path=Path("test-ffprobe")),
+            run_blocking=run_blocking,
+            requested_audio_stream_index=1,
+        )
+
+    assert error.value.code == "SOURCE_PATH_MISSING"

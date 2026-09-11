@@ -1150,13 +1150,11 @@ def purge_gif_cache(gif_root: Path, clip_id: str, keep: Path | None = None) -> N
             stale.unlink()
 
 
-def embedded_revision_matches(
-    path: Path,
-    clip_id: str,
-    revision: int,
-    render_plan_hash: str | None = None,
-) -> bool:
-    """Inspect bounded MP4 regions for the current recovery envelope."""
+def _scan_embedded_payload(
+    path: Path, predicate: Callable[[dict[str, Any]], bool]
+) -> dict[str, Any] | None:
+    """Scan bounded MP4 regions for the first embedded recovery envelope
+    (see `_metadata_envelope` in media_renderer.py) satisfying `predicate`."""
     marker = b"MediaClipMakarr "
     try:
         size = path.stat().st_size
@@ -1166,7 +1164,7 @@ def embedded_revision_matches(
                 handle.seek(max(0, size - 4 * 1024 * 1024))
                 chunks.append(handle.read(4 * 1024 * 1024))
     except OSError:
-        return False
+        return None
     for chunk in chunks:
         start = chunk.find(marker)
         while start >= 0:
@@ -1179,22 +1177,50 @@ def embedded_revision_matches(
             except (json.JSONDecodeError, UnicodeDecodeError):
                 start = chunk.find(marker, payload_start)
                 continue
-            # Require the full envelope shape, not just a clipId/revision pair
-            # that happens to match — a truncated or hand-crafted marker with
-            # only those two fields must not be mistaken for a genuine one.
+            # Require the full envelope shape, not just fields that happen to
+            # match — a truncated or hand-crafted marker must not be mistaken
+            # for a genuine one.
             if (
-                payload.get("application") == "MediaClipMakarr"
+                isinstance(payload, dict)
+                and payload.get("application") == "MediaClipMakarr"
                 and isinstance(payload.get("schemaVersion"), int)
-                and payload.get("clipId") == clip_id
-                and payload.get("revision") == revision
-                and (
-                    render_plan_hash is None
-                    or payload.get("renderPlanHash") == render_plan_hash
-                )
+                and predicate(payload)
             ):
-                return True
+                return payload
             start = chunk.find(marker, payload_start)
-    return False
+    return None
+
+
+def embedded_revision_matches(
+    path: Path,
+    clip_id: str,
+    revision: int,
+    render_plan_hash: str | None = None,
+) -> bool:
+    """Inspect bounded MP4 regions for the current recovery envelope."""
+
+    def matches(payload: dict[str, Any]) -> bool:
+        return (
+            payload.get("clipId") == clip_id
+            and payload.get("revision") == revision
+            and (render_plan_hash is None or payload.get("renderPlanHash") == render_plan_hash)
+        )
+
+    return _scan_embedded_payload(path, matches) is not None
+
+
+def read_embedded_render_metadata(
+    path: Path, clip_id: str, revision: int
+) -> dict[str, Any] | None:
+    """Recover the full embedded envelope (see `_metadata_envelope` in
+    media_renderer.py) for a specific clip revision — used to restore a
+    selection (e.g. the original subtitle choice) that isn't stored in the
+    database, only baked into the rendered file itself."""
+
+    def matches(payload: dict[str, Any]) -> bool:
+        return payload.get("clipId") == clip_id and payload.get("revision") == revision
+
+    return _scan_embedded_payload(path, matches)
 
 
 def embedded_render_matches(

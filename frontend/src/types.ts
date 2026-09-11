@@ -460,6 +460,37 @@ export interface ClipTrimSaveRequest {
   end_ms: number;
   expected_revision: number;
   mode: "new" | "replace";
+  // Track overrides: omit (or leave undefined) to keep whatever the clip
+  // already had. audio_disabled must be explicit (not just omitted) to mean
+  // "turn audio off" — see track_changed() on the backend.
+  audio_stream_index?: number;
+  audio_disabled?: boolean;
+  subtitle_stream_index?: number;
+  subtitles_enabled?: boolean;
+}
+
+export interface ClipSourceTrackInfo {
+  available: boolean;
+  unavailable_reason: string | null;
+  audio_tracks: TrackDescriptor[];
+  subtitle_tracks: TrackDescriptor[];
+  max_extend_before_ms: number;
+  max_extend_after_ms: number;
+}
+
+export interface ClipTrimPreviewRequest {
+  start_ms: number;
+  end_ms: number;
+  audio_stream_index?: number;
+  audio_disabled?: boolean;
+  subtitle_stream_index?: number;
+  subtitles_enabled?: boolean;
+  preview_token: string;
+}
+
+export interface ClipTrimPreviewResponse {
+  play_url: string;
+  duration_ms: number;
 }
 
 export interface ClipFilterOptions {

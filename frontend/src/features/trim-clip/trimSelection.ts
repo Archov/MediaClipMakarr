@@ -3,22 +3,31 @@ export interface TrimRange {
   endMs: number;
 }
 
+// `rangeStartMs` defaults to 0 (the plain trim case: the editable range is
+// exactly the managed clip's own span) but can go negative once the
+// trim/extend dialog has granted room before the clip's original start.
 export function clampTrimRange(
   startMs: number,
   endMs: number,
   durationMs: number,
   activeBoundary: "start" | "end",
+  rangeStartMs = 0,
 ): TrimRange {
-  const duration = Math.max(1, Math.floor(durationMs));
-  let start = Math.min(duration - 1, Math.max(0, Math.floor(startMs)));
-  let end = Math.min(duration, Math.max(1, Math.floor(endMs)));
+  const floor = Math.floor(rangeStartMs);
+  const ceiling = Math.max(floor + 1, Math.floor(durationMs));
+  let start = Math.min(ceiling - 1, Math.max(floor, Math.floor(startMs)));
+  let end = Math.min(ceiling, Math.max(floor + 1, Math.floor(endMs)));
   if (start >= end) {
-    if (activeBoundary === "start") start = Math.max(0, end - 1);
-    else end = Math.min(duration, start + 1);
+    if (activeBoundary === "start") start = Math.max(floor, end - 1);
+    else end = Math.min(ceiling, start + 1);
   }
   return { startMs: start, endMs: end };
 }
 
+// Text-entered timestamps (HH:MM:SS.mmm) have no negative notation, so this
+// still only validates the non-negative portion of an extended range — a
+// granted-but-not-yet-typed negative Start is only reachable via the
+// timeline drag handle or the extend buttons, not by typing into the field.
 export function validateTrimValue(
   parsed: { value: number | null; error: string | null },
   boundary: "start" | "end",
