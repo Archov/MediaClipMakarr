@@ -268,6 +268,55 @@ def test_source_tracks_reports_available_with_track_lists_and_extend_room(
     assert body["max_extend_after_ms"] == 30_000
 
 
+def test_source_tracks_does_not_force_resolve_an_external_subtitle_as_embedded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Regression: an external (Plex sidecar) subtitle selection carries a
+    synthetic stream index that doesn't correspond to any real embedded
+    track in the source. Passing it through as if it were an embedded index
+    makes probe_original_source_media fail to find it, incorrectly
+    reporting an otherwise-valid clip as unavailable for extend/track-switch
+    (see is_extended_trim_request's SUBTITLE_STREAM_UNAVAILABLE case)."""
+    settings = Settings(_env_file=None, work_dir=tmp_path / "work")
+    clip = _clip(tmp_path)
+    captured_kwargs: dict[str, object] = {}
+    embedded = {
+        "selectedSubtitle": {
+            "enabled": True,
+            "stream": {
+                "stream_index": 99,
+                "codec_type": "subtitle",
+                "codec_name": "srt",
+                "language": "eng",
+                "title": None,
+                "filename": None,
+                "mime_type": None,
+            },
+            "strategy": "external_text",
+            "external_url": "http://plex.example:32400/library/streams/501.srt",
+        }
+    }
+
+    async def get_clip(*_args, **_kwargs):
+        return clip
+
+    async def resolve(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _original_source(Path(str(clip["source_path"])), duration_ms=90_000), None
+
+    monkeypatch.setattr(clip_trim_api, "get_clip", get_clip)
+    monkeypatch.setattr(clip_trim_api, "read_embedded_render_metadata", lambda *_a, **_k: embedded)
+    monkeypatch.setattr(clip_trim_api, "_resolve_extended_render_source", resolve)
+
+    with TestClient(_app(settings)) as client:
+        response = client.get("/api/clips/clip-1/source-tracks")
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    assert captured_kwargs["subtitle_stream_index"] is None
+    assert captured_kwargs["subtitles_enabled"] is False
+
+
 def test_source_tracks_reports_unavailable_when_source_is_missing(
     monkeypatch, tmp_path: Path
 ) -> None:

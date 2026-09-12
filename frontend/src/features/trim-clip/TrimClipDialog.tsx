@@ -110,17 +110,36 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
   const [audioMenuAnchor, setAudioMenuAnchor] = useState<HTMLElement | null>(null);
   const [subtitleMenuAnchor, setSubtitleMenuAnchor] = useState<HTMLElement | null>(null);
 
-  const buildOverridePayload = () => ({
-    ...(audioOverride !== undefined
-      ? audioOverride === "off"
+  const buildOverridePayload = (
+    audio: TrackOverride = audioOverride,
+    subtitle: TrackOverride = subtitleOverride,
+  ) => ({
+    ...(audio !== undefined
+      ? audio === "off"
         ? { audio_disabled: true }
-        : { audio_stream_index: audioOverride }
+        : { audio_stream_index: audio }
       : {}),
-    ...(subtitleOverride !== undefined
-      ? subtitleOverride === "off"
+    ...(subtitle !== undefined
+      ? subtitle === "off"
         ? { subtitles_enabled: false }
-        : { subtitle_stream_index: subtitleOverride, subtitles_enabled: true }
+        : { subtitle_stream_index: subtitle, subtitles_enabled: true }
       : {}),
+  });
+
+  // `fireRender` runs from a `setTimeout` scheduled by `scheduleRender`,
+  // which is itself called synchronously right after a state setter
+  // (`bumpExtend`, `applyAudioOverride`, `applySubtitleOverride`) — at that
+  // point in the same tick, the closure `scheduleRender` captures still
+  // reflects the *previous* render's state, since React hasn't re-rendered
+  // yet. A manual tap on the countdown ring works fine (it binds to a fresh
+  // closure from the render the countdown UI actually appears in), but the
+  // natural 5-second timeout would otherwise render whatever was selected
+  // one change ago. This ref is kept in sync after every render (well
+  // before any 5-second timer can fire) so `fireRender` always reads the
+  // latest values regardless of which render scheduled it.
+  const latestRenderParamsRef = useRef({ extendBeforeMs, extendAfterMs, audioOverride, subtitleOverride });
+  useEffect(() => {
+    latestRenderParamsRef.current = { extendBeforeMs, extendAfterMs, audioOverride, subtitleOverride };
   });
 
   const saveMutation = useMutation({
@@ -275,14 +294,16 @@ export function TrimClipDialog({ clip, onClose }: TrimClipDialogProps) {
     cancelScheduledRender();
     setRendering(true);
     setPreviewRenderError(null);
-    const requestStartMs = -extendBeforeMs;
-    const requestEndMs = durationMs + extendAfterMs;
+    // Read from the ref, not the closure — see latestRenderParamsRef above.
+    const current = latestRenderParamsRef.current;
+    const requestStartMs = -current.extendBeforeMs;
+    const requestEndMs = durationMs + current.extendAfterMs;
     try {
       const response = await requestClipTrimPreview(clip.id, {
         start_ms: requestStartMs,
         end_ms: requestEndMs,
         preview_token: previewToken,
-        ...buildOverridePayload(),
+        ...buildOverridePayload(current.audioOverride, current.subtitleOverride),
       });
       setPreviewOriginMs(requestStartMs);
       setPreviewVersion((value) => value + 1);

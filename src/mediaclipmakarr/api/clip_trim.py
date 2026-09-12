@@ -274,13 +274,21 @@ def build_router(application_settings: Settings) -> APIRouter:
             int(clip["revision"]),
         )
         recovered_subtitle = recovered_subtitle_selection(embedded)
-        # Only an embedded-track selection can be marked "selected" against
-        # the enumerated list below — an external sidecar (or no selection)
-        # just leaves nothing marked, which is fine: the picker's default
-        # for "unchanged" doesn't depend on it being present in this list.
+        # Only an embedded-track selection (text or bitmap) can be marked
+        # "selected" against the enumerated list below — an external sidecar
+        # carries a synthetic stream index that doesn't correspond to any
+        # real embedded track, so asking probe_original_source_media to
+        # resolve it as one fails with SUBTITLE_STREAM_UNAVAILABLE and
+        # incorrectly reports the whole clip as unavailable for extend/
+        # track-switch. Leaving it unset (None) here just means nothing gets
+        # marked "selected" in the enumerated list, which is fine — the
+        # picker's default for "unchanged" doesn't depend on it being
+        # present there.
         embedded_subtitle_index = (
             recovered_subtitle.stream.stream_index
-            if recovered_subtitle.enabled and recovered_subtitle.stream is not None
+            if recovered_subtitle.enabled
+            and recovered_subtitle.strategy != "external_text"
+            and recovered_subtitle.stream is not None
             else None
         )
 
