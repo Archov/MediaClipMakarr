@@ -15,6 +15,7 @@ import pytest
 import mediaclipmakarr.jobs.finalization as finalization_module
 import mediaclipmakarr.jobs.runner as jobs_module
 import mediaclipmakarr.media_renderer as media_renderer_module
+from mediaclipmakarr.clip_edits import ClipTrimSaveRequest, build_extended_trim_render_plan
 from mediaclipmakarr.clips import ClipCreateRequest, get_clip
 from mediaclipmakarr.config import Settings
 from mediaclipmakarr.database import create_database_engine, upgrade_database
@@ -106,8 +107,8 @@ def request_range():
     )
 
 
-async def run_blocking(function, *args):
-    return function(*args)
+async def run_blocking(function, *args, **kwargs):
+    return function(*args, **kwargs)
 
 
 async def wait_for_job_state(engine, job_id: str, state: str):
@@ -212,6 +213,112 @@ async def test_job_runner_finalizes_clip_and_serves_by_managed_id(tmp_path) -> N
     assert snapshot.result["clip_id"] == plan.clip_id
     assert clip is not None
     assert await asyncio.to_thread(Path(clip["file_path"]).read_bytes) == b"rendered mp4"
+
+
+@pytest.mark.asyncio
+async def test_extended_trim_replace_overwrites_the_managed_clip_not_the_original_source(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: an extended trim (or a track-change trim) decodes from the
+    original pristine source rather than the managed clip file, so its
+    render plan's `source_media.local_path` points at the source, not
+    `clip["file_path"]`. `_execute_claimed_job` used to assume the two were
+    always the same file for any trim — resolving `trim_replace`'s
+    destination straight from `plan.source_media.local_path` and
+    fingerprint-checking `clip["file_path"]` regardless. For an extended
+    trim that both corrupts the user's original source media (overwritten
+    with the tiny rendered clip) and makes a plain "Save as New" fail with a
+    spurious "the clip changed" error, since it was fingerprinting the wrong
+    file entirely."""
+    database_path = tmp_path / "application.db"
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"original pristine source")
+    clip_dir = tmp_path / "clips"
+    work_dir = tmp_path / "work"
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    async def renderer(plan, settings, *, progress):
+        await progress(1.0, "rendered")
+        output = settings.resolved_work_dir / "jobs" / plan.job_id / "rendered.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(f"rendered:{plan.operation}".encode())
+        return RenderedClipFile(path=output, duration_ms=plan.source_end_ms - plan.source_start_ms)
+
+    async def skip_output_validation(*_args, **_kwargs):
+        return None
+
+    async def fake_generate_thumbnail(_source, temp, *, duration_ms, ffmpeg_path, timeout_seconds):
+        temp.parent.mkdir(parents=True, exist_ok=True)
+        temp.write_bytes(b"thumb")
+
+    monkeypatch.setattr(jobs_module, "validate_trim_rendered_output", skip_output_validation)
+    monkeypatch.setattr(jobs_module, "generate_thumbnail", fake_generate_thumbnail)
+
+    try:
+        settings = Settings(
+            _env_file=None,
+            private_data_dir=tmp_path / "private",
+            work_dir=work_dir,
+            clip_dir=clip_dir,
+            source_dirs=[tmp_path],
+        )
+        events = JobEventBroker()
+        runner = JobRunner(
+            engine,
+            settings,
+            run_blocking=run_blocking,
+            events=events,
+            renderer=renderer,
+        )
+
+        create_plan = build_clip_render_plan(
+            session=session(),
+            request=request_range(),
+            source_media=source_media(source_file),
+            x264_preset="veryfast",
+        )
+        await enqueue_clip_create_job(engine, create_plan)
+        created_claim = await claim_next_job(engine, "run-token-create")
+        assert created_claim is not None
+        await runner._execute_claimed_job(created_claim)
+        # The create job auto-enqueues a thumbnail job; drain it so the next
+        # claim_next_job (FIFO by creation order) picks up the trim job below
+        # rather than this leftover one.
+        thumbnail_claim = await claim_next_job(engine, "run-token-thumbnail")
+        assert thumbnail_claim is not None
+        await runner._execute_claimed_job(thumbnail_claim)
+        parent_clip = await get_clip(engine, create_plan.clip_id, clip_dir)
+        assert parent_clip is not None
+        managed_path = Path(str(parent_clip["file_path"]))
+        assert await asyncio.to_thread(managed_path.read_bytes) == b"rendered:create"
+
+        trim_request = ClipTrimSaveRequest(
+            start_ms=0, end_ms=3_000, expected_revision=1, mode="replace"
+        )
+        extended_plan = build_extended_trim_render_plan(
+            parent_clip,
+            trim_request,
+            source_media(source_file),
+            source_file.stat(),
+            x264_preset="veryfast",
+        )
+        trim_queued = await enqueue_clip_create_job(engine, extended_plan)
+        trim_claimed = await claim_next_job(engine, "run-token-trim")
+        assert trim_claimed is not None
+        await runner._execute_claimed_job(trim_claimed)
+        trim_snapshot = await get_job_snapshot(engine, trim_queued.id)
+        replaced_clip = await get_clip(engine, create_plan.clip_id, clip_dir)
+    finally:
+        await engine.dispose()
+
+    assert trim_snapshot is not None
+    assert trim_snapshot.state == "SUCCEEDED"
+    assert replaced_clip is not None
+    assert Path(str(replaced_clip["file_path"])) == managed_path
+    assert await asyncio.to_thread(managed_path.read_bytes) == b"rendered:trim_replace"
+    # The whole point of the fix: the original source media must be untouched.
+    assert await asyncio.to_thread(source_file.read_bytes) == b"original pristine source"
 
 
 @pytest.mark.asyncio
@@ -1391,6 +1498,107 @@ def test_ffmpeg_args_crop_the_bitmap_subtitle_to_match_the_video(tmp_path) -> No
     assert "crop=1920:800:0:140" in video_segment
     assert "crop=1920:800:0:140" in subtitle_segment
     assert subtitle_segment.index("crop=") < subtitle_segment.index("setpts=")
+
+
+def test_ffmpeg_args_burn_in_ass_subtitles_before_crop_so_positions_stay_correct(
+    tmp_path,
+) -> None:
+    """Regression test: unlike a bitmap subtitle, burned-in ASS/SRT text is
+    positioned by libass relative to whatever frame the `subtitles=` filter
+    hands it. libass already rescales correctly for a plain resolution cap
+    (it compares the script's own PlayResX/PlayResY to the actual frame
+    size), but a crop shifts the frame's *origin*, which libass has no way
+    to know about — burning in after crop applies the script's coordinates
+    to the wrong region, potentially pushing subtitles outside the visible
+    frame. The burn-in must happen before crop/scale, with crop/scale
+    applied to the composited result afterward."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        crop=(1920, 800, 0, 140),
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "subtitles" / "selected-subtitle.ass",
+            fonts_dir=tmp_path / "fonts",
+            has_content=True,
+        ),
+    )
+
+    video_filter = argv[argv.index("-vf") + 1]
+    assert "subtitles=filename=" in video_filter
+    assert "crop=1920:800:0:140" in video_filter
+    assert video_filter.index("subtitles=") < video_filter.index("crop=1920:800:0:140")
+
+
+def test_ffmpeg_args_do_not_defer_crop_for_ass_subtitles_without_a_crop(tmp_path) -> None:
+    """A plain resolution cap needs no reordering — libass already rescales
+    to whatever frame it's given, so the existing crop-then-scale-then-burn
+    chain (cheaper, since scale/burn work on fewer pixels) is left alone
+    whenever there's no crop to misalign against."""
+    source_file = tmp_path / "Movie.mkv"
+    source_file.write_bytes(b"media")
+    media = source_media(source_file).model_copy(
+        update={
+            "selected_subtitle": SubtitleSelection(
+                enabled=True,
+                stream=MediaStreamIdentity(
+                    stream_index=2,
+                    codec_type="subtitle",
+                    codec_name="subrip",
+                    language="eng",
+                ),
+                strategy="embedded_text",
+            ),
+            "subtitles_forced_off": False,
+        }
+    )
+    plan = build_clip_render_plan(
+        session=session(),
+        request=request_range(),
+        source_media=media,
+        x264_preset="veryfast",
+        max_resolution="720p",
+    )
+
+    argv = build_ffmpeg_clip_args(
+        plan,
+        Settings(_env_file=None, ffmpeg_path=Path("ffmpeg-test")),
+        tmp_path / "out.mp4",
+        prepared_text_subtitle=PreparedTextSubtitle(
+            path=tmp_path / "subtitles" / "selected-subtitle.ass",
+            fonts_dir=tmp_path / "fonts",
+            has_content=True,
+        ),
+    )
+
+    video_filter = argv[argv.index("-vf") + 1]
+    scale_720p = "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    assert scale_720p in video_filter
+    assert video_filter.index(scale_720p) < video_filter.index("subtitles=")
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ def build_video_base_filter(
     max_fps: int,
     source_frame_rate: float | None,
     crop: tuple[int, int, int, int] | None = None,
+    defer_crop_and_scale: bool = False,
 ) -> str:
     """Return the pre-subtitle filter chain for the immutable render strategy.
 
@@ -33,14 +34,21 @@ def build_video_base_filter(
     `crop`, when given, is `(w, h, x, y)` for a fixed letterbox/pillarbox
     trim — applied first, before scale/tonemap, so every downstream step
     (and the resolution cap) operates on the already-cropped frame.
+
+    `defer_crop_and_scale`, when true, omits both `crop` and the size cap
+    from this filter entirely (the caller applies them afterward, via
+    `build_subtitle_overlay_prefilter`) — used when burning in a text
+    subtitle whose positions are authored against the *original* frame, so
+    libass must see that original frame before it's cropped down. See
+    `build_subtitle_overlay_prefilter`'s docstring for why.
     """
     return _build_video_filter(
         hdr,
         strategy,
-        size_filter=_bounded_size_filter(max_width, max_height),
+        size_filter=None if defer_crop_and_scale else _bounded_size_filter(max_width, max_height),
         fps_filter=_fps_filter_segment(source_frame_rate, max_fps),
         output_pixel_format="yuv420p",
-        crop_filter=_crop_filter_segment(crop),
+        crop_filter="" if defer_crop_and_scale else _crop_filter_segment(crop),
     )
 
 
@@ -81,6 +89,7 @@ def build_video_base_filter_gpu_hdr(
     max_fps: int,
     source_frame_rate: float | None,
     crop: tuple[int, int, int, int] | None = None,
+    defer_crop_and_scale: bool = False,
 ) -> str:
     """GPU HDR->SDR path for a full clip render: `libplacebo` does scale,
 
@@ -106,17 +115,27 @@ def build_video_base_filter_gpu_hdr(
     moving the identical cap to a plain trailing `fps=` filter produced the
     correct frame count with no other change. A real bug in libplacebo's
     own frame-rate handling on some real-world content, not a config issue.
+
+    `defer_crop_and_scale` — see `build_video_base_filter`'s docstring —
+    drops both `crop` and the size cap from libplacebo's own `w`/`h`
+    (passed through as a no-op `iw`/`ih`), leaving the caller to crop/scale
+    afterward via `build_subtitle_overlay_prefilter`.
     """
     _validate_strategy(hdr, strategy)
     if strategy == "sdr":
         raise ValueError("build_video_base_filter_gpu_hdr is only for HDR tonemap strategies.")
-    crop_filter = _crop_filter_segment(crop)
+    crop_filter = "" if defer_crop_and_scale else _crop_filter_segment(crop)
     fps_filter = _fps_filter_segment(source_frame_rate, max_fps)
     fps_suffix = f",{fps_filter.rstrip(',')}" if fps_filter else ""
+    size_expr = (
+        "w='iw':h='ih'"
+        if defer_crop_and_scale
+        else f"w='min({max_width},iw)':h='min({max_height},ih)':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
     return (
         f"{crop_filter}"
-        f"libplacebo=w='min({max_width},iw)':h='min({max_height},ih)':"
-        "force_original_aspect_ratio=decrease:force_divisible_by=2:"
+        f"libplacebo={size_expr}:"
         "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
         f"tonemapping=mobius:tonemapping_param=0.3:format=yuv420p{fps_suffix}"
     )
@@ -178,16 +197,29 @@ def build_subtitle_overlay_prefilter(
     *,
     crop: tuple[int, int, int, int] | None = None,
 ) -> str:
-    """Crop+scale filter applied to a bitmap subtitle stream before it's
-    overlaid onto the main video path.
+    """Crop+scale filter for a bitmap subtitle stream before it's overlaid
+    onto the main video path — or for the composited video+burned-in-text
+    frame, once a crop has deferred cropping/scaling past the `subtitles=`
+    filter (see `build_video_base_filter`'s `defer_crop_and_scale`).
 
     Must mirror the crop and scale steps `build_video_base_filter`/
-    `build_video_base_filter_gpu_hdr` apply to the video, or the two inputs
-    to `overlay` land in different coordinate systems — cropping the video
-    but leaving the subtitle bitmap at the source's original frame size and
-    offset pushes it outside the now-smaller cropped canvas, where
-    `overlay`'s default clipping silently drops it. The render still
-    succeeds; the subtitle just never appears.
+    `build_video_base_filter_gpu_hdr` apply to the video, or the two
+    coordinate systems land out of sync:
+
+    - Bitmap (PGS) subtitles are a fixed-size image with an absolute
+      offset baked in by the source format — cropping the video but
+      leaving the bitmap at the source's original frame size and offset
+      pushes it outside the now-smaller cropped canvas, where `overlay`'s
+      default clipping silently drops it. The render still succeeds; the
+      subtitle just never appears.
+    - Burned-in text (ASS/SRT via libass) is positioned relative to
+      whatever frame `subtitles=` gives it: libass already rescales
+      correctly for a plain resolution cap (it compares the script's own
+      PlayResX/PlayResY to the actual frame size), but a *crop* shifts the
+      frame's origin, which libass has no way to know about — burning in
+      after crop applies the script's coordinates to the wrong region.
+      Deferring crop/scale until after the burn-in keeps libass looking at
+      the same frame the subtitle file was authored against.
     """
     return f"{_crop_filter_segment(crop)}{_bounded_size_filter(max_width, max_height)}"
 

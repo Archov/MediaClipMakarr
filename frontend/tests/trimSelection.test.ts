@@ -32,4 +32,25 @@ assert.equal(nudgeStepMs("seconds", 5, null), 5_000);
 assert.equal(shouldStopPreview(1.999, 2_000), false);
 assert.equal(shouldStopPreview(2, 2_000), true);
 
+// A trim/extend dialog widens the editable range below 0 once room has been
+// granted before the clip's original start — clampTrimRange must accept and
+// preserve a negative floor instead of clamping everything back to 0.
+assert.deepEqual(clampTrimRange(-3_000, 7_500, 10_000, "start", -5_000), {
+  startMs: -3_000,
+  endMs: 7_500,
+});
+assert.deepEqual(clampTrimRange(-9_000, 7_500, 10_000, "start", -5_000), {
+  startMs: -5_000,
+  endMs: 7_500,
+});
+assert.deepEqual(clampTrimRange(-3_000, -3_000, 10_000, "start", -5_000), {
+  startMs: -3_001,
+  endMs: -3_000,
+});
+// Omitting rangeStartMs still behaves exactly as before (floor of 0).
+assert.deepEqual(clampTrimRange(-20, 12_000, 10_000, "end"), {
+  startMs: 0,
+  endMs: 10_000,
+});
+
 console.log("trim selection tests passed");

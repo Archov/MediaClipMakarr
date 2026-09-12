@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mediaclipmakarr.application_settings import EffectiveApplicationSettings
 from mediaclipmakarr.config import Settings
-from mediaclipmakarr.hdr import HdrCapabilities, VideoColorMetadata, classify_hdr
+from mediaclipmakarr.hdr import HdrCapabilities, PlexVideoMetadata, VideoColorMetadata, classify_hdr
 from mediaclipmakarr.plex import (
     PlexClient,
     PlexPartMetadata,
@@ -37,6 +37,7 @@ SourceMediaErrorCode = Literal[
     "SOURCE_PATH_UNMAPPED",
     "SOURCE_PATH_REJECTED",
     "SOURCE_PATH_MISSING",
+    "SOURCE_MEDIA_CHANGED",
     "SOURCE_PROBE_UNAVAILABLE",
     "SOURCE_PROBE_FAILED",
     "SOURCE_PROBE_INVALID",
@@ -388,7 +389,10 @@ async def resolve_and_probe_source_media(
     )
     capabilities = _media_capabilities(
         probe,
-        session,
+        video_metadata=session.video_metadata,
+        selected_audio_streams=session.selected_audio_streams,
+        subtitle_streams=session.subtitle_streams,
+        selected_subtitle_streams=session.selected_subtitle_streams,
         selected_audio_stream=selected_audio,
         selected_subtitle=selected_subtitle,
     )
@@ -529,6 +533,106 @@ async def probe_managed_media_file(
         selected_audio_stream=selected_audio,
         selected_subtitle=SubtitleSelection(),
         subtitles_forced_off=True,
+    )
+
+
+async def probe_original_source_media(
+    path: Path,
+    settings: Settings,
+    *,
+    run_blocking: BlockingRunner,
+    runner: CommandRunner = run_command,
+    requested_audio_stream_index: int | None,
+    audio_disabled: bool = False,
+    requested_subtitle_stream_index: int | None = None,
+    subtitles_enabled: bool = False,
+) -> ResolvedSourceMedia:
+    """Probe the original pristine source file directly by path, with no live
+    Plex session — used by the trim/extend flow to reach back past a clip's
+    own already-rendered boundaries. Unlike `probe_managed_media_file` (which
+    blindly trusts the managed clip's single baked-in audio stream and never
+    looks for subtitles), this does real per-track resolution so the caller
+    can offer alternate audio/subtitle tracks the same way clip creation does.
+
+    Every caller must supply either `requested_audio_stream_index` or
+    `audio_disabled=True` — there is no Plex hint list here to fall back on.
+    """
+    try:
+        stat = await run_blocking(path.stat)
+    except OSError as error:
+        raise SourceMediaError(
+            "SOURCE_PATH_MISSING",
+            "The original source media is no longer available.",
+            retryable=True,
+        ) from error
+    probe = await _probe_source(path, settings, runner=runner)
+    video_streams = _video_streams(probe)
+    if not video_streams:
+        raise SourceMediaError(
+            "VIDEO_STREAM_UNAVAILABLE",
+            "The original source media does not contain a usable video stream.",
+        )
+    selected_audio = (
+        None
+        if audio_disabled
+        else _select_audio_stream(probe, [], requested_stream_index=requested_audio_stream_index)
+    )
+    selected_subtitle = _select_subtitle_stream(
+        probe,
+        [],
+        [],
+        requested_stream_index=requested_subtitle_stream_index,
+        subtitles_enabled=subtitles_enabled,
+        plex_url="",
+    )
+    capabilities = _media_capabilities(
+        probe,
+        video_metadata=None,
+        selected_audio_streams=[],
+        subtitle_streams=[],
+        selected_subtitle_streams=[],
+        selected_audio_stream=selected_audio,
+        selected_subtitle=selected_subtitle,
+    )
+    return ResolvedSourceMedia(
+        plex_path=str(path),
+        local_path=str(path),
+        fingerprint=SourceFingerprint(
+            size_bytes=stat.st_size,
+            modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
+        ),
+        duration_ms=_duration_ms(probe),
+        video_streams=[
+            VideoStreamIdentity(
+                stream_index=stream.index,
+                codec_type=stream.codec_type,
+                codec_name=stream.codec_name,
+                language=_stream_language(stream),
+                title=_stream_title(stream),
+                width=stream.width,
+                height=stream.height,
+                color=VideoColorMetadata(
+                    color_space=stream.color_space,
+                    color_transfer=stream.color_transfer,
+                    color_primaries=stream.color_primaries,
+                    color_range=stream.color_range,
+                ),
+            )
+            for stream in video_streams
+        ],
+        audio_streams=[_stream_identity(stream) for stream in _audio_streams(probe)],
+        subtitle_streams=[
+            _stream_identity(stream) for stream in probe.streams if stream.codec_type == "subtitle"
+        ],
+        attachment_streams=[
+            _stream_identity(stream)
+            for stream in probe.streams
+            if stream.codec_type == "attachment"
+        ],
+        capabilities=capabilities,
+        selected_audio_stream=selected_audio,
+        selected_subtitle=selected_subtitle,
+        subtitles_forced_off=not selected_subtitle.enabled,
     )
 
 
@@ -900,20 +1004,23 @@ def _same_plex_stream(left: PlexPartStream, right: PlexPartStream) -> bool:
 
 def _media_capabilities(
     probe: FFProbePayload,
-    session: PlexSession,
     *,
+    video_metadata: PlexVideoMetadata | None,
+    selected_audio_streams: Sequence[PlexPartStream],
+    subtitle_streams: Sequence[PlexPartStream],
+    selected_subtitle_streams: Sequence[PlexPartStream],
     selected_audio_stream: MediaStreamIdentity | None,
     selected_subtitle: SubtitleSelection,
 ) -> MediaCapabilities:
     video = _video_streams(probe)
     audio = _audio_streams(probe)
     subtitles = [stream for stream in probe.streams if stream.codec_type == "subtitle"]
-    external_subtitles = _external_text_subtitle_streams(probe, session.subtitle_streams)
+    external_subtitles = _external_text_subtitle_streams(probe, subtitle_streams)
     attachments = [stream for stream in probe.streams if stream.codec_type == "attachment"]
     selected_subtitle_index = (
         selected_subtitle.stream.stream_index
         if selected_subtitle.stream is not None
-        else _default_plex_stream_index(session.selected_subtitle_streams, external_subtitles)
+        else _default_plex_stream_index(selected_subtitle_streams, external_subtitles)
     )
     first_video = video[0] if video else None
     selected_audio_index = (
@@ -924,7 +1031,7 @@ def _media_capabilities(
             stream,
             kind="subtitle",
             selected=stream.index == selected_subtitle_index,
-            plex_stream=_matching_plex_stream(stream, session.selected_subtitle_streams),
+            plex_stream=_matching_plex_stream(stream, selected_subtitle_streams),
         )
         for stream in subtitles
     ] + [
@@ -946,7 +1053,7 @@ def _media_capabilities(
                 stream,
                 kind="audio",
                 selected=stream.index == selected_audio_index,
-                plex_stream=_matching_plex_stream(stream, session.selected_audio_streams),
+                plex_stream=_matching_plex_stream(stream, selected_audio_streams),
             )
             for stream in audio
         ],
@@ -957,7 +1064,7 @@ def _media_capabilities(
         default_audio_stream_index=selected_audio_index,
         default_subtitle_stream_index=selected_subtitle_index,
         subtitles_forced_off=selected_subtitle_index is None,
-        hdr=classify_hdr(first_video, session.video_metadata),
+        hdr=classify_hdr(first_video, video_metadata),
         warnings=[
             track.unavailable_reason
             for track in subtitle_tracks

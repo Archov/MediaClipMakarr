@@ -181,6 +181,29 @@ def test_base_filter_omits_crop_when_not_given() -> None:
     assert "crop=" not in graph
 
 
+def test_base_filter_defers_crop_and_scale_when_requested() -> None:
+    """`defer_crop_and_scale` is used to burn in a text subtitle before crop
+    (see `_text_subtitle_burn_in_filter`) — the caller applies crop/scale
+    afterward via `build_subtitle_overlay_prefilter`, so this filter alone
+    must produce neither."""
+    hdr = HdrCapabilities()
+
+    graph = build_video_base_filter(
+        hdr,
+        "sdr",
+        max_width=1920,
+        max_height=1080,
+        max_fps=60,
+        source_frame_rate=None,
+        crop=(1440, 1080, 240, 0),
+        defer_crop_and_scale=True,
+    )
+
+    assert "crop=" not in graph
+    assert "scale=" not in graph
+    assert graph == "format=yuv420p"
+
+
 def test_gpu_hdr_filter_applies_crop_before_libplacebo() -> None:
     hdr = HdrCapabilities(
         hdr10=True,
@@ -203,6 +226,34 @@ def test_gpu_hdr_filter_applies_crop_before_libplacebo() -> None:
     )
 
     assert graph.startswith("crop=1440:1080:240:0,libplacebo=")
+
+
+def test_gpu_hdr_filter_defers_crop_and_scale_when_requested() -> None:
+    hdr = HdrCapabilities(
+        hdr10=True,
+        color=VideoColorMetadata(
+            color_space="bt2020nc",
+            color_transfer="smpte2084",
+            color_primaries="bt2020",
+            color_range="tv",
+        ),
+    )
+
+    graph = build_video_base_filter_gpu_hdr(
+        hdr,
+        "tone_map_hdr10",
+        max_width=1920,
+        max_height=1080,
+        max_fps=60,
+        source_frame_rate=None,
+        crop=(1440, 1080, 240, 0),
+        defer_crop_and_scale=True,
+    )
+
+    assert "crop=" not in graph
+    assert "min(1920" not in graph
+    assert "min(1080" not in graph
+    assert graph.startswith("libplacebo=w='iw':h='ih':")
 
 
 def test_frame_filter_applies_crop_for_preview_reuse() -> None:

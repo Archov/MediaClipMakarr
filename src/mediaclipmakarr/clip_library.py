@@ -818,7 +818,23 @@ def build_immich_tag_paths(
     return paths
 
 
-def recovery_envelope(metadata: dict[str, Any]) -> str:
+def recovery_envelope(
+    metadata: dict[str, Any], *, selected_subtitle: dict[str, Any] | None = None
+) -> str:
+    """The comment-tag envelope written by a metadata-only edit (title,
+    show/movie info, etc.) — distinct from `_metadata_envelope` in
+    media_renderer.py, which is written at actual render time and carries
+    the full render provenance.
+
+    A metadata edit remuxes the file (`rewrite_clip_metadata`) and replaces
+    this comment tag outright, so anything the last real render embedded
+    that isn't reflected in the `clips` table — currently just the
+    subtitle selection, since audio has a DB column but subtitle choice
+    doesn't — would otherwise be silently lost on the very next rename.
+    `selected_subtitle` is the caller's job: read it from the file's
+    *current* envelope (via `read_embedded_render_metadata`) before this
+    rewrite clobbers it, and thread it through so it survives.
+    """
     payload = {
         "schemaVersion": 4,
         "application": "MediaClipMakarr",
@@ -856,6 +872,8 @@ def recovery_envelope(metadata: dict[str, Any]) -> str:
         },
         "renderPlanHash": metadata.get("render_plan_hash"),
     }
+    if selected_subtitle is not None:
+        payload["selectedSubtitle"] = selected_subtitle
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     payload["checksum"] = hashlib.sha256(encoded.encode()).hexdigest()
     return "MediaClipMakarr " + json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -868,6 +886,7 @@ async def rewrite_clip_metadata(
     *,
     ffmpeg_path: Path,
     timeout_seconds: float,
+    selected_subtitle: dict[str, Any] | None = None,
 ) -> None:
     await asyncio.to_thread(output.parent.mkdir, parents=True, exist_ok=True)
     await run_command(
@@ -883,7 +902,7 @@ async def rewrite_clip_metadata(
             "copy",
             "-map_metadata",
             "0",
-            *_conventional_metadata_args(metadata),
+            *_conventional_metadata_args(metadata, selected_subtitle=selected_subtitle),
             "-movflags",
             "+faststart",
             output,
@@ -892,7 +911,9 @@ async def rewrite_clip_metadata(
     )
 
 
-def _conventional_metadata_args(metadata: dict[str, Any]) -> list[str]:
+def _conventional_metadata_args(
+    metadata: dict[str, Any], *, selected_subtitle: dict[str, Any] | None = None
+) -> list[str]:
     values = {
         "title": metadata.get("title"),
         "description": metadata.get("title"),
@@ -900,7 +921,7 @@ def _conventional_metadata_args(metadata: dict[str, Any]) -> list[str]:
         "season_number": metadata.get("season_number"),
         "episode_sort": metadata.get("episode_number"),
         "date": metadata.get("movie_year"),
-        "comment": recovery_envelope(metadata),
+        "comment": recovery_envelope(metadata, selected_subtitle=selected_subtitle),
     }
     return [
         item
@@ -1150,13 +1171,11 @@ def purge_gif_cache(gif_root: Path, clip_id: str, keep: Path | None = None) -> N
             stale.unlink()
 
 
-def embedded_revision_matches(
-    path: Path,
-    clip_id: str,
-    revision: int,
-    render_plan_hash: str | None = None,
-) -> bool:
-    """Inspect bounded MP4 regions for the current recovery envelope."""
+def _scan_embedded_payload(
+    path: Path, predicate: Callable[[dict[str, Any]], bool]
+) -> dict[str, Any] | None:
+    """Scan bounded MP4 regions for the first embedded recovery envelope
+    (see `_metadata_envelope` in media_renderer.py) satisfying `predicate`."""
     marker = b"MediaClipMakarr "
     try:
         size = path.stat().st_size
@@ -1166,7 +1185,7 @@ def embedded_revision_matches(
                 handle.seek(max(0, size - 4 * 1024 * 1024))
                 chunks.append(handle.read(4 * 1024 * 1024))
     except OSError:
-        return False
+        return None
     for chunk in chunks:
         start = chunk.find(marker)
         while start >= 0:
@@ -1179,22 +1198,50 @@ def embedded_revision_matches(
             except (json.JSONDecodeError, UnicodeDecodeError):
                 start = chunk.find(marker, payload_start)
                 continue
-            # Require the full envelope shape, not just a clipId/revision pair
-            # that happens to match — a truncated or hand-crafted marker with
-            # only those two fields must not be mistaken for a genuine one.
+            # Require the full envelope shape, not just fields that happen to
+            # match — a truncated or hand-crafted marker must not be mistaken
+            # for a genuine one.
             if (
-                payload.get("application") == "MediaClipMakarr"
+                isinstance(payload, dict)
+                and payload.get("application") == "MediaClipMakarr"
                 and isinstance(payload.get("schemaVersion"), int)
-                and payload.get("clipId") == clip_id
-                and payload.get("revision") == revision
-                and (
-                    render_plan_hash is None
-                    or payload.get("renderPlanHash") == render_plan_hash
-                )
+                and predicate(payload)
             ):
-                return True
+                return payload
             start = chunk.find(marker, payload_start)
-    return False
+    return None
+
+
+def embedded_revision_matches(
+    path: Path,
+    clip_id: str,
+    revision: int,
+    render_plan_hash: str | None = None,
+) -> bool:
+    """Inspect bounded MP4 regions for the current recovery envelope."""
+
+    def matches(payload: dict[str, Any]) -> bool:
+        return (
+            payload.get("clipId") == clip_id
+            and payload.get("revision") == revision
+            and (render_plan_hash is None or payload.get("renderPlanHash") == render_plan_hash)
+        )
+
+    return _scan_embedded_payload(path, matches) is not None
+
+
+def read_embedded_render_metadata(
+    path: Path, clip_id: str, revision: int
+) -> dict[str, Any] | None:
+    """Recover the full embedded envelope (see `_metadata_envelope` in
+    media_renderer.py) for a specific clip revision — used to restore a
+    selection (e.g. the original subtitle choice) that isn't stored in the
+    database, only baked into the rendered file itself."""
+
+    def matches(payload: dict[str, Any]) -> bool:
+        return payload.get("clipId") == clip_id and payload.get("revision") == revision
+
+    return _scan_embedded_payload(path, matches)
 
 
 def embedded_render_matches(

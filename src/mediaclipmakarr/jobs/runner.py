@@ -37,6 +37,7 @@ from mediaclipmakarr.clip_library import (
     gif_path,
     gif_url,
     purge_gif_cache,
+    read_embedded_render_metadata,
     rewrite_clip_metadata,
     thumbnail_path,
 )
@@ -479,7 +480,14 @@ class JobRunner:
             )
             parent_clip = await self._validate_trim_source(plan)
         if plan.operation == "trim_replace":
-            destination = Path(plan.source_media.local_path)
+            # Not `plan.source_media.local_path`: for an extended trim that
+            # decodes from the original pristine source, that path points at
+            # the source media file, not the managed clip being replaced —
+            # using it here would overwrite the user's source file with the
+            # rendered clip. `parent_clip["file_path"]` is always the managed
+            # clip file, regardless of which file the render decoded from.
+            assert parent_clip is not None
+            destination = Path(str(parent_clip["file_path"]))
         else:
             destination = await self.run_blocking(
                 resolve_unique_clip_path,
@@ -611,7 +619,17 @@ class JobRunner:
         clip = await get_clip(self.engine, parent_id, self.settings.resolved_clip_dir)
         if clip is None:
             raise ClipRevisionConflict("The clip no longer exists.")
-        stat = await self.run_blocking(Path(str(clip["file_path"])).stat)
+        # Stat whatever file the plan actually decodes from — the managed
+        # clip file for a normal trim, but the original pristine source for
+        # an extended trim (see `build_extended_trim_render_plan`). Hardcoding
+        # `clip["file_path"]` here would fingerprint-check the wrong file for
+        # an extended trim and always report a spurious conflict.
+        try:
+            stat = await self.run_blocking(Path(plan.source_media.local_path).stat)
+        except OSError as error:
+            raise ClipRevisionConflict(
+                "The clip's source media could not be found."
+            ) from error
         if not trim_source_matches(plan, clip, stat):
             raise ClipRevisionConflict("The clip changed after the trim editor was opened.")
         return clip
@@ -804,12 +822,27 @@ class JobRunner:
         proposed["thumbnail_path"] = None
         proposed["thumbnail_source_size"] = None
         proposed["thumbnail_source_modified_ns"] = None
+        # This rewrite replaces the comment tag outright — read whatever the
+        # last real render embedded there first, or a subtitle selection
+        # that only ever lives in that tag (never in the `clips` table) is
+        # silently lost on the very next metadata edit. See
+        # `recovery_envelope`'s docstring.
+        existing_embedded = await self.run_blocking(
+            read_embedded_render_metadata,
+            source,
+            str(clip["id"]),
+            int(clip["revision"]),
+        )
+        selected_subtitle = (
+            existing_embedded.get("selectedSubtitle") if existing_embedded is not None else None
+        )
         await rewrite_clip_metadata(
             source,
             temp,
             proposed,
             ffmpeg_path=self.settings.ffmpeg_path,
             timeout_seconds=self.settings.media_preparation_timeout_seconds,
+            selected_subtitle=selected_subtitle,
         )
         temp_stat = await self.run_blocking(temp.stat)
         proposed["file_size_bytes"] = temp_stat.st_size

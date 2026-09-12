@@ -21,6 +21,7 @@ from mediaclipmakarr.clip_library import (
     list_clips,
     list_filter_options,
     list_unlinked_clip_ids,
+    read_embedded_render_metadata,
 )
 from mediaclipmakarr.clips import get_clip, insert_clip, set_clip_immich_asset_id
 from mediaclipmakarr.config import Settings
@@ -98,6 +99,39 @@ def test_embedded_revision_matches_rejects_mismatched_clip_id_or_revision(tmp_pa
 
     assert embedded_revision_matches(path, "clip-two", 1) is False
     assert embedded_revision_matches(path, "clip-one", 2) is False
+
+
+def test_read_embedded_render_metadata_recovers_the_full_payload(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    subtitle = {
+        "enabled": True,
+        "stream": None,
+        "strategy": "external_text",
+        "external_url": "http://plex.example:32400/library/streams/501.srt",
+    }
+    path.write_bytes(_envelope(selectedSubtitle=subtitle))
+
+    payload = read_embedded_render_metadata(path, "clip-one", 1)
+
+    assert payload is not None
+    assert payload["selectedSubtitle"] == subtitle
+
+
+def test_read_embedded_render_metadata_returns_none_for_a_different_clip_or_revision(
+    tmp_path,
+) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(_envelope())
+
+    assert read_embedded_render_metadata(path, "clip-two", 1) is None
+    assert read_embedded_render_metadata(path, "clip-one", 2) is None
+
+
+def test_read_embedded_render_metadata_returns_none_for_a_fabricated_marker(tmp_path) -> None:
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b'padding MediaClipMakarr {"clipId":"clip-one","revision":1}')
+
+    assert read_embedded_render_metadata(path, "clip-one", 1) is None
 
 
 def clip_payload(path: Path, *, clip_id: str = "clip-one", title: str = "Pilot"):
@@ -433,6 +467,85 @@ async def test_metadata_edit_job_moves_file_records_history_and_rejects_stale_pl
     assert not source.exists()
     assert snapshot is not None and snapshot.state == "SUCCEEDED"
     assert history_count == 2
+
+
+@pytest.mark.asyncio
+async def test_metadata_edit_job_preserves_the_embedded_subtitle_selection(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: a metadata edit (rename, etc.) remuxes the file and
+    replaces its comment tag outright via `recovery_envelope`, which has no
+    column of its own to recover a subtitle selection from — that only ever
+    lives in the *previous* render's embedded envelope. Without reading and
+    threading it through, the very first rename after a render silently
+    erases the recoverable subtitle choice for any later trim/extend."""
+    database_path = tmp_path / "application.db"
+    clip_root = tmp_path / "clips"
+    source = clip_root / "TV Shows" / "Pilot.mp4"
+    source.parent.mkdir(parents=True)
+    selected_subtitle = {
+        "enabled": True,
+        "stream": {
+            "stream_index": 3,
+            "codec_type": "subtitle",
+            "codec_name": "ass",
+            "language": "eng",
+            "title": None,
+            "filename": None,
+            "mime_type": None,
+        },
+        "strategy": "embedded_text",
+        "external_url": None,
+    }
+    render_envelope = json.dumps(
+        {
+            "application": "MediaClipMakarr",
+            "schemaVersion": 2,
+            "clipId": "clip-one",
+            "revision": 1,
+            "selectedSubtitle": selected_subtitle,
+        }
+    )
+    source.write_bytes(b"rendered clip MediaClipMakarr " + render_envelope.encode())
+    upgrade_database(database_path)
+    engine = create_database_engine(database_path)
+
+    captured_kwargs: dict[str, object] = {}
+
+    async def fake_rewrite(_source, output, metadata, **kwargs):
+        captured_kwargs.update(kwargs)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"renamed clip")
+
+    monkeypatch.setattr(runner_module, "rewrite_clip_metadata", fake_rewrite)
+    try:
+        await insert_clip(engine, clip_payload(source))
+        row = await get_clip(engine, "clip-one", clip_root)
+        assert row is not None
+        plan = build_metadata_edit_plan(
+            row,
+            ClipMetadataUpdate(expected_revision=1, custom_title="Renamed"),
+            clip_root,
+        )
+        await enqueue_metadata_edit_job(engine, plan)
+        claimed = await claim_next_job(engine, "run-one")
+        assert claimed is not None
+        runner = JobRunner(
+            engine,
+            Settings(
+                _env_file=None,
+                work_dir=tmp_path / "work",
+                clip_dir=clip_root,
+                thumbnail_dir=tmp_path / "thumbnails",
+            ),
+            run_blocking=run_blocking,
+            events=JobEventBroker(),
+        )
+        await runner._execute_claimed_job(claimed)
+    finally:
+        await engine.dispose()
+
+    assert captured_kwargs.get("selected_subtitle") == selected_subtitle
 
 
 def _immich_runner(engine, tmp_path, clip_root, *, manage_remote: bool, immich_url: str):

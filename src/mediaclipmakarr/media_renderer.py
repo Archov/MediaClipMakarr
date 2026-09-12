@@ -299,6 +299,77 @@ class VideoFilterPlan:
     complex_filter: bool = False
 
 
+def _text_subtitle_burn_in_filter(
+    plan: ClipRenderPlan,
+    max_width: int,
+    max_height: int,
+    source_frame_rate: float | None,
+    source: str,
+    fonts_arg: str,
+) -> str:
+    """Filter chain that burns a prepared ASS/SRT file into the video via
+    libass's `subtitles=` filter.
+
+    Without a crop, this can happily reuse the normal crop-then-scale `base`
+    chain: libass reads PlayResX/PlayResY from the subtitle file and rescales
+    to whatever frame it's given, so a plain resolution cap is already
+    handled correctly. A *crop* is different — it shifts the frame's origin,
+    which libass has no way to detect, so burning in after crop applies the
+    script's coordinates to the wrong region and can push subtitles outside
+    the visible frame. When a crop is active, defer crop/scale (see
+    `build_video_base_filter`'s `defer_crop_and_scale`) until after the
+    burn-in, so libass sees the same frame the subtitle file was authored
+    against, then crop/scale the composited result — same trick as the
+    bitmap-subtitle overlay path, just applied after the burn-in instead of
+    to a second, separate input.
+    """
+    tonemap_gpu = _tonemap_uses_gpu(plan)
+    if plan.crop_box is None:
+        base = (
+            build_video_base_filter_gpu_hdr(
+                plan.hdr,
+                plan.hdr_strategy,
+                max_width=max_width,
+                max_height=max_height,
+                max_fps=plan.max_fps,
+                source_frame_rate=source_frame_rate,
+            )
+            if tonemap_gpu
+            else build_video_base_filter(
+                plan.hdr,
+                plan.hdr_strategy,
+                max_width=max_width,
+                max_height=max_height,
+                max_fps=plan.max_fps,
+                source_frame_rate=source_frame_rate,
+            )
+        )
+        return f"{base},subtitles=filename={source}{fonts_arg}"
+    pre = (
+        build_video_base_filter_gpu_hdr(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+            defer_crop_and_scale=True,
+        )
+        if tonemap_gpu
+        else build_video_base_filter(
+            plan.hdr,
+            plan.hdr_strategy,
+            max_width=max_width,
+            max_height=max_height,
+            max_fps=plan.max_fps,
+            source_frame_rate=source_frame_rate,
+            defer_crop_and_scale=True,
+        )
+    )
+    crop_and_scale = build_subtitle_overlay_prefilter(max_width, max_height, crop=plan.crop_box)
+    return f"{pre},subtitles=filename={source}{fonts_arg},{crop_and_scale}"
+
+
 def _subtitle_video_filter(
     plan: ClipRenderPlan,
     preroll_seconds: float,
@@ -344,8 +415,11 @@ def _subtitle_video_filter(
         source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
         fonts_dir = _prepared_filter_path(prepared_text_subtitle.fonts_dir)
         fonts_arg = f":fontsdir={_filtergraph_quote(fonts_dir)}"
+        burn_in = _text_subtitle_burn_in_filter(
+            plan, max_width, max_height, source_frame_rate, source, fonts_arg
+        )
         return VideoFilterPlan(
-            f"{base},subtitles=filename={source}{fonts_arg},{trim}",
+            f"{burn_in},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
         )
     if strategy == "external_text" and stream is not None:
@@ -359,8 +433,11 @@ def _subtitle_video_filter(
         source = _filtergraph_quote(_prepared_filter_path(prepared_text_subtitle.path))
         fonts_dir = _prepared_filter_path(prepared_text_subtitle.fonts_dir)
         fonts_arg = f":fontsdir={_filtergraph_quote(fonts_dir)}"
+        burn_in = _text_subtitle_burn_in_filter(
+            plan, max_width, max_height, source_frame_rate, source, fonts_arg
+        )
         return VideoFilterPlan(
-            f"{base},subtitles=filename={source}{fonts_arg},{trim}",
+            f"{burn_in},{trim}",
             f"0:{plan.source_media.video_streams[0].stream_index}",
         )
     if strategy == "bitmap" and stream is not None:

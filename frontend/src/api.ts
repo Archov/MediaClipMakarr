@@ -6,6 +6,9 @@ import type {
   ClipMetadataUpdate,
   ClipPage,
   ClipRecord,
+  ClipSourceTrackInfo,
+  ClipTrimPreviewRequest,
+  ClipTrimPreviewResponse,
   ClipTrimSaveRequest,
   ClipDeleteResult,
   ClipFilterOptions,
@@ -296,6 +299,31 @@ export async function saveClipTrim(
     body: JSON.stringify(trim),
   });
   return parseResponse<JobSnapshot>(response, "Trim save request");
+}
+
+export async function fetchClipSourceTracks(clipId: string): Promise<ClipSourceTrackInfo> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/source-tracks`, {
+    headers: { Accept: "application/json" },
+  });
+  return parseResponse<ClipSourceTrackInfo>(response, "Clip source track request");
+}
+
+export async function requestClipTrimPreview(
+  clipId: string,
+  preview: ClipTrimPreviewRequest,
+): Promise<ClipTrimPreviewResponse> {
+  const response = await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/trim-preview`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(preview),
+  });
+  return parseResponse<ClipTrimPreviewResponse>(response, "Trim preview request");
+}
+
+export async function deleteClipTrimPreview(clipId: string, token: string): Promise<void> {
+  await apiFetch(`/api/clips/${encodeURIComponent(clipId)}/trim-preview/${encodeURIComponent(token)}`, {
+    method: "DELETE",
+  });
 }
 
 export interface GifExportRange {
